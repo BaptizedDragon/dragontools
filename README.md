@@ -51,6 +51,98 @@ DragonTools passes `-F /dev/null`, strict host-key verification, and no forwardi
 Socket and identity paths must be absolute and contain no whitespace, quotes,
 backslash, or OpenSSH `%` expansions.
 
+## Interactive setup
+
+The wizard helps assemble a regular DragonTools command, explains defaults, and
+shows the equivalent command and a summary before dispatch. It uses the same
+options, validation, and installation implementation as CLI flags.
+
+After building, put the binary on your current shell's `PATH` to use the shorter
+commands below (or invoke `./zig-out/bin/dragontool` directly):
+
+```bash
+export PATH="$PWD/zig-out/bin:$PATH"
+dragontool wizard
+# The same helper opens with no arguments when stdin and stdout are terminals:
+dragontool
+```
+
+Choose installation, agent setup, verification, status, firewall guidance, the
+information-only architecture overview, or command-line help. The overview and
+command preview are local: they do not connect to a host or resolve credentials.
+The current installer still provides **VictoriaMetrics only**. Roadmap inputs
+such as domain/TLS, IP allowlists, Telegram, agents, and firewall configuration
+remain explicitly unavailable and fail before SSH, including in plan mode.
+Station setup asks for host, SSH user/port, and authentication, then offers optional
+roadmap settings with a default of no. Accepting that default produces a usable
+VictoriaMetrics command. Metrics retention stays fixed at 90 days with a 20%
+capacity reserve. Agent guidance accepts a numeric station IP (the current
+`--station-ip` contract) and repeats validated `.service` names.
+
+Enter accepts a displayed default; required empty values and malformed values
+are prompted again. Use `?` for prompt help, `back` to return where offered, and
+`quit`, Ctrl+C, or end-of-input to cancel. Prompts use plain ASCII and need no
+colors, Unicode, or full-screen terminal support; `NO_COLOR` and `TERM=dumb` work.
+Before a mutating workflow, choose **Show plan only**, **Apply**, **Go back**, or
+**Cancel**. Plan uses the regular `--plan` behavior. Apply requires a separate
+`Continue? [y/N]` confirmation; Enter means no.
+
+Credential questions accept supported reference mechanisms, never pasted tokens.
+The preview can show an `op://` reference, but never a resolved secret. Such
+references may reveal vault/item names, so review the preview before sharing it.
+Private-key references remain unavailable; a normal or 1Password SSH agent socket
+can be used for the implemented installation. No protected-file credential option
+is offered until the regular CLI supports it.
+
+Without a terminal on both stdin and stdout, a no-argument invocation prints help
+and exits successfully without reading input. Explicit `wizard` instead reports
+`InteractiveTerminalRequired` and exits nonzero. Use explicit CLI commands in
+scripts, pipes, and CI. See `dragontool wizard --help` for a concise guide.
+
+## Shell completion
+
+DragonTools generates Bash, Zsh, and Fish completion scripts from its CLI metadata.
+Completion includes nested commands, relevant options, and enum choices such as
+`--tls manual|cloudflare`; path options use the shell's native path completion.
+It is local, deterministic, side-effect free, and never contacts remote hosts or
+secret providers. The binary has no shell dependency for script generation.
+
+Bash (with bash-completion installed and enabled):
+
+```bash
+mkdir -p "$HOME/.local/share/bash-completion/completions"
+dragontool completion bash > "$HOME/.local/share/bash-completion/completions/dragontool"
+# Enable in this Bash session immediately:
+source "$HOME/.local/share/bash-completion/completions/dragontool"
+```
+
+Zsh:
+
+```zsh
+mkdir -p "$HOME/.zsh/completions"
+dragontool completion zsh > "$HOME/.zsh/completions/_dragontool"
+fpath=("$HOME/.zsh/completions" $fpath)
+autoload -Uz compinit
+compinit
+```
+
+For future Zsh sessions, add the `fpath` line to your own `~/.zshrc` **before** its
+existing `compinit` initialization. If none exists, add the `autoload` and `compinit`
+lines too. You control these edits; DragonTools does not change shell startup files.
+
+Fish:
+
+```fish
+mkdir -p "$HOME/.config/fish/completions"
+dragontool completion fish > "$HOME/.config/fish/completions/dragontool.fish"
+```
+
+If you use a custom `XDG_CONFIG_HOME`, place the Fish file in its `fish/completions`
+directory instead. Type `dragontool monitoring install --` and press Tab, or type
+`dragontool monitoring install --tls ` and press Tab for `manual` and `cloudflare`.
+Completion can describe unavailable roadmap flags; selecting them does not enable
+their implementation. `dragontool completion --help` shows installation guidance.
+
 ## Inspect metrics from your workstation
 
 An explicit temporary SSH tunnel allows inspecting the installed component:
@@ -71,6 +163,8 @@ Grafana will become the normal human-facing UI in a later milestone.
 
 | Command | This milestone |
 | --- | --- |
+| `wizard` / no arguments in a TTY | Local interactive frontend to the same commands |
+| `completion bash/zsh/fish` | Print local shell completion scripts |
 | `monitoring install` | VictoriaMetrics vertical slice |
 | `monitoring verify` | VictoriaMetrics checks, nonzero on failure |
 | `monitoring status` | Service state summary, not an end-to-end health check |
@@ -81,6 +175,8 @@ Grafana will become the normal human-facing UI in a later milestone.
 reference flags are validated, then rejected as unavailable before any connection.
 They are not silently ignored, including with `--plan`.
 See `dragontool --help` and [examples](examples/).
+Each level has contextual help, for example `dragontool monitoring --help`,
+`dragontool monitoring install --help`, and `dragontool monitoring agents install --help`.
 Upgrade, uninstall, and `monitoring tls renew` are future commands.
 
 ## Storage and operation

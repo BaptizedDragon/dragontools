@@ -26,6 +26,38 @@ There is no absolute overall deployment deadline yet. Long downloads have their 
 curl deadline. Non-root users require `sudo -n` and are checked for effective UID 0.
 Raw stderr is suppressed and wiped; output summaries never echo arbitrary remote data.
 
+## CLI metadata and interactive frontend
+
+Interactive mode is a frontend to the regular DragonTools command model, not a
+separate deployment engine. `cli/spec.zig` describes the command hierarchy, flag
+contexts, value kinds, enum choices, and help text. Parsing, hierarchical help,
+completion generation, and wizard command assembly share that metadata. The strict
+parser remains authoritative: wizard answers use its validators, and the assembled
+argv is parsed before the ordinary dispatch path handles availability, `--plan`,
+or the existing remote workflow. No wizard-specific planner or installer exists.
+
+`dragontool wizard` and a no-argument invocation with terminal stdin/stdout enter
+the same helper. No arguments in a pipe print help without reading stdin; an explicit
+wizard without both terminals fails promptly. Small injectable input/output
+callbacks allow scripted wizard tests without creating a real terminal. Plain ASCII
+prompts work with `NO_COLOR`, `TERM=dumb`, and without a terminal UI dependency.
+
+The wizard previews shell-quoted equivalent argv and a human-readable summary.
+Preview is a deliberate local UI surface for the user's validated choices; diagnostic
+logs continue to suppress CLI values and remote command text. Credential references
+may appear only as references, never expanded secrets. Information, preview, and
+plan paths never SSH or resolve credentials. Mutation requires explicit Apply and a
+separate default-No confirmation. EOF, `quit`, and Ctrl+C cancel cleanly; `back`
+returns within the helper. Roadmap options retain the same before-SSH rejection as
+normal CLI flags.
+
+Shell completion is local, deterministic, side-effect free, and never contacts
+remote hosts or secret providers. `cli/completion.zig` renders Bash, Zsh, and Fish
+definitions from the shared spec; enum values and context-specific flags are not
+maintained as independent command trees. Generated scripts use native shell path
+completion for path-valued flags. Generation needs no shell executable or network,
+and installation never edits startup files automatically.
+
 ## Component layout and lifecycle
 
 VictoriaMetrics `v1.151.0` is pinned for both Linux architectures. Archive digests
@@ -126,6 +158,9 @@ notify-only for components and normal OS upgrades. Security installation is allo
 by policy; automatic reboot is disabled. None of this policy changes hosts yet.
 
 Unit tests cover parsing, redaction, quoting, units, storage, artifact plans and
-update-state parsing. Fake-remote tests cover first/second run, drift and failures;
+update-state parsing, as well as CLI metadata, completion, contextual help and
+scripted wizard validation/defaults/cancellation/command previews. CLI smoke tests
+check non-TTY behavior and the local help/completion boundary. Fake-remote tests
+cover first/second run, drift and failures;
 these prove sequencing, not actual systemd behavior. Disposable Ubuntu integration
 is documented separately and must verify the real runtime profile and no-op rerun.

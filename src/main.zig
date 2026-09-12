@@ -1,33 +1,14 @@
 const std = @import("std");
 const cli = @import("cli/parse.zig");
-const usage =
-    \\DragonTools 0.1.0-dev — opinionated monitoring over SSH
-    \\Usage:
-    \\  dragontool monitoring install --host HOST [--plan] [SSH options]
-    \\  dragontool monitoring verify --host HOST [SSH options]
-    \\  dragontool monitoring status --host HOST [SSH options]
-    \\  dragontool monitoring agents {install|verify|status} --host HOST
-    \\  dragontool monitoring firewall --host HOST
-    \\SSH: --user USER (root), --port PORT (22), --ssh-sock /absolute/path
-    \\     --identity /absolute/path (mutually exclusive with --ssh-sock)
-    \\Default: SSH agent/default OpenSSH identities, strict known-host verification.
-    \\--plan prints the intended slice without SSH or mutations.
-    \\Implemented: VictoriaMetrics only, loopback:8428, retention 90d, reserve 20%.
-    \\Unavailable options (validated, then rejected before SSH):
-    \\  --ssh-op-path op://...; --service NAME.service (repeatable)
-    \\  --station-ip IP; --admin-ip IP; --agent-ip IP (IPs repeatable)
-    \\  --domain DOMAIN; --tls manual|cloudflare; --cloudflare-token-op op://...
-    \\  --telegram-bot-token-op op://...; --telegram-channel-id ID
-    \\Agents, firewall, TLS, Telegram, remaining station components and maintenance
-    \\are roadmap work. Install success covers the VictoriaMetrics slice only.
-    \\
-;
+const help = @import("cli/help.zig");
+const completion = @import("cli/completion.zig");
+const terminal = @import("cli/terminal.zig");
 fn print(io: std.Io, message: []const u8) void {
     std.Io.File.stdout().writeStreamingAll(io, message) catch {};
 }
 pub fn main(init: std.process.Init) void {
     run(init) catch |err| {
-        const msg = std.fmt.allocPrint(init.arena.allocator(), "Error: {s}. No argument values or remote stderr are printed. See --help.\n", .{@errorName(err)}) catch "Error: operation failed.\n";
+        const msg = std.fmt.allocPrint(init.arena.allocator(), "Error: {s}. Argument values and remote stderr are omitted from this error. See --help.\n", .{@errorName(err)}) catch "Error: operation failed.\n";
         std.Io.File.stderr().writeStreamingAll(init.io, msg) catch {};
         std.process.exit(1);
     };
@@ -35,12 +16,35 @@ pub fn main(init: std.process.Init) void {
 fn run(init: std.process.Init) !void {
     const a = init.arena.allocator();
     const args = try init.minimal.args.toSlice(a);
-    var options = try cli.parse(a, args[1..]);
+    var input: []const []const u8 = args[1..];
+    if (try terminal.shouldWelcome(args.len - 1, init.io)) {
+        input = try terminal.run(a, init.io) orelse return;
+    }
+    var options = try cli.parse(a, input);
     defer options.deinit(a);
     if (options.help) {
-        print(init.io, usage);
+        try std.Io.File.stdout().writeStreamingAll(init.io, try help.render(a, options.node));
         return;
     }
+    if (options.action == .completion) {
+        try std.Io.File.stdout().writeStreamingAll(init.io, try completion.render(a, options.shell.?));
+        return;
+    }
+    if (options.action == .wizard) {
+        const wizard_args = try terminal.run(a, init.io) orelse return;
+        const selected = try cli.parse(a, wizard_args);
+        options.deinit(a);
+        options = selected;
+        if (options.help) {
+            try std.Io.File.stdout().writeStreamingAll(init.io, try help.render(a, options.node));
+            return;
+        }
+    }
+    try execute(init, options);
+}
+/// Both CLI arguments and wizard answers reach this one existing operation path.
+fn execute(init: std.process.Init, options: cli.Options) !void {
+    const a = init.arena.allocator();
     if (options.unsupported()) {
         print(init.io, "Requested workflow or integration is not yet available. Nothing changed; SSH was not attempted.\n");
         return error.NotImplemented;
@@ -70,6 +74,11 @@ fn run(init: std.process.Init) !void {
 }
 test {
     _ = @import("cli/parse.zig");
+    _ = @import("cli/spec.zig");
+    _ = @import("cli/help.zig");
+    _ = @import("cli/completion.zig");
+    _ = @import("cli/wizard.zig");
+    _ = @import("cli/terminal.zig");
     _ = @import("secrets/secret.zig");
     _ = @import("system/remote.zig");
     _ = @import("system/ssh.zig");

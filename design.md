@@ -19,6 +19,47 @@ The full target is Ubuntu 24.04/26.04, amd64/arm64; only those pass detection.
 Controller build targets are macOS/Linux amd64/arm64. Cross-compilation does not
 prove remote runtime compatibility. No VM run is inferred from a passing unit test.
 
+## Local CLI helper and completion
+
+Interactive mode is a frontend to the regular DragonTools command model, not a
+separate deployment engine. A small internal command/flag spec supplies hierarchy,
+option contexts, value types, and enum choices for parsing, help, completion, and
+wizard command generation. The parser performs final validation and the same
+dispatch enforces availability and plan/apply behavior for both frontends. This
+does not introduce a generic public CLI framework or a resource DSL.
+
+The wizard offers monitoring install, agents, verify, status, firewall guidance,
+architecture information, and command-line help. Station setup defaults to the
+implemented VictoriaMetrics slice; roadmap settings require explicit opt-in and
+still fail before SSH. Agent station entry remains a numeric IP, matching
+`--station-ip`. Unsupported components and protected-file credential inputs do not
+become implemented merely because an interactive interface exists.
+
+Prompts explain fixed storage defaults and distinguish current behavior from the
+intended complete stack. They use ASCII with no color dependency and reuse CLI
+validators on individual answers. Ordinary input errors are retried. Enter accepts
+displayed defaults, `?` gives context, `back` returns where practical, and `quit`,
+EOF, or Ctrl+C cancel. Both stdin and stdout must be terminals for the interactive
+entry point; no-argument non-TTY calls print help and return without waiting.
+
+Before a mutation the helper displays equivalent shell-quoted argv and a summary,
+then offers regular `--plan`, Apply, Go back, or Cancel. Apply also requires an
+explicit yes at `Continue? [y/N]`. Credential questions request references, not
+tokens, and only validate reference syntax. Preview may include a reference but
+never invokes a secret resolver. Information-only use performs no remote operation.
+
+Shell completion is local, deterministic, side-effect free, and never contacts
+remote hosts or secret providers. `completion bash|zsh|fish` writes a script to
+stdout from the shared spec, with nested commands, only relevant flags, known enum
+values, and native shell path completion. The controller gains no shell dependency.
+Users install the generated file and configure their own shell; v0.x never edits
+startup files. Contextual `--help` works for each command and command group.
+
+Scripted input/output unit tests cover the helper without spawning terminals.
+Completion metadata/rendering tests and CLI smoke tests cover hierarchy, enum and
+flag contexts, non-TTY behavior, and local-only help/completion. These UX changes
+leave the remote component and integration-validation boundary unchanged.
+
 ## Storage
 
 | Signal | Policy | State |

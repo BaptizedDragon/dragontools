@@ -2,6 +2,15 @@
 
 ## 0.1.0-dev — unreleased
 
+- Add a shared command/flag model, contextual help, and local Bash, Zsh, and Fish
+  completion with nested commands, relevant options, enum values, and native path
+  completion. Document user-managed completion installation without startup edits.
+- Add `wizard` and the no-argument terminal helper with shared CLI validation and
+  dispatch, architecture guidance, equivalent-command previews, regular `--plan`,
+  and explicit default-No mutation confirmation. Non-TTY no-argument calls return
+  help immediately; explicit non-TTY wizard calls fail without waiting for input.
+- Add scripted wizard and CLI UX coverage; preserve the VictoriaMetrics-only
+  implementation boundary and before-SSH rejection of roadmap settings.
 - Add Zig 0.16 controller, monitoring CLI hierarchy, validation, strict OpenSSH
   transport and an injectable remote boundary.
 - Add opaque redacting/wiping secret infrastructure; optional secret resolution

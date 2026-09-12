@@ -17,14 +17,20 @@ plan makes no connection. On a sandboxed controller set
 
 ## Test levels
 
-1. Pure unit tests: CLI hierarchy and invalid inputs, secret custom/structural
+1. Pure unit tests: CLI hierarchy and invalid inputs, shared command/flag metadata,
+   contextual help, Bash/Zsh/Fish generation, enum and context-specific completion,
+   scripted wizard defaults, retries, cancellation, command generation and reference
+   handling; secret custom/structural
    redaction, POSIX quoting, systemd/file rendering, artifact pin ordering, actual POSIX shell quoting and generated-script syntax, storage
    arithmetic/overflow and update model parsing. Firewall generation tests belong
    with the future safe firewall implementation; no pretend rules ship today.
 2. Fake remote: inject a stateful executor through `Remote`, exercise a first install,
    second no-op, changed configuration, existing resources, missing selected service
-   and a binary-stage failure. The CLI smoke test uses Python 3 and a fake SSH executable to ensure help/plans
-   and rejected integrations make no connection and errors do not echo values.
+   and a binary-stage failure. The CLI smoke test uses Python 3 and a fake SSH executable to ensure help/plans,
+   completion, non-TTY entry points and rejected integrations make no connection
+   and errors do not echo values. It also checks generated scripts with available
+   shells; a missing optional shell is reported as skipped. Wizard input/output
+   tests feed scripted answers into the small abstraction, never a real terminal.
    These tests validate orchestration, not the shell's
    behavior on Ubuntu. Add failure/resume and command execution tests as components grow.
 3. Disposable Ubuntu integration: [procedure](tests/integration/README.md) and opt-in
