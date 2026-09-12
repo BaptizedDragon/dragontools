@@ -1,0 +1,153 @@
+# Design decisions and staged delivery
+
+## First milestone: implemented
+
+The foundation deliberately delivers one usable slice, VictoriaMetrics, while
+rejecting unfinished integrations before connecting. Exit 0 from install means
+that slice passed verification; it never means the full requested station exists.
+`status` is a read-only service-state summary; use `verify` to test health.
+Help and `--plan` require no SSH. No generic primitives are public commands.
+
+Zig 0.16.0 and its standard library handle CLI parsing, process execution, memory,
+formatting and JSON. Controller relies on OpenSSH; the remote uses reviewed small
+shell fragments as system interfaces, not a configuration DSL. No third-party Zig
+dependencies. Hostnames, users, paths, service units, IPs and secret references are
+validated; dynamic values are independently shell-quoted. Unknown/duplicate scalar
+flags fail. Repeated list flags are supported.
+
+The full target is Ubuntu 24.04/26.04, amd64/arm64; only those pass detection.
+Controller build targets are macOS/Linux amd64/arm64. Cross-compilation does not
+prove remote runtime compatibility. No VM run is inferred from a passing unit test.
+
+## Storage
+
+| Signal | Policy | State |
+| --- | --- | --- |
+| Metrics | `-retentionPeriod=90d`, `-storage.minFreeDiskSpaceBytes=ceil(capacity/5)` | Implemented |
+| Logs | Maximum safely fitting history, native disk-pressure retention | Deferred; flags must be verified against pinned release |
+| Traces | Same elastic policy as logs | Deferred; flags must be verified against pinned release |
+
+Capacity uses `stat -f` on the actual data directory; available space is not mistaken
+for capacity. No automatic storage-file deletion. Reserve is a stop-ingestion
+threshold, not a quota. A resized filesystem requires reinstallation; verification
+recomputes the expected unit and catches a stale reserve. Future shared-filesystem
+allocation must budget logs/traces together, rather than give each the same entire
+free space budget.
+
+Planned filesystem states: below 60% healthy; ≥60% informational; ≥70% warning;
+about 75% logs/traces pressure retention; ≥80% critical. These are policy targets,
+not deployed alerts or implemented cleanup in this milestone.
+
+Verified upstream sources for implemented flags and artifact pins:
+
+- [Single-node flags and capacity guidance](https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/)
+- [Retention examples](https://docs.victoriametrics.com/victoriametrics/quick-start/)
+- [Pinned official release](https://github.com/VictoriaMetrics/VictoriaMetrics/releases/tag/v1.151.0)
+- [Pinned release metadata](https://api.github.com/repos/VictoriaMetrics/VictoriaMetrics/releases/tags/v1.151.0)
+
+Checksums are embedded in `src/components/victoriametrics.zig`. Version changes must
+review both architectures and independently recheck archive and extracted binary
+hashes. Health success alone is insufficient to approve a component version.
+
+## Agents and local journal safety: next vertical slice
+
+`monitoring agents install --service orderflow.service --service whoami.service`
+will validate all units before mutation. Vector reads selected journal units;
+vmagent scrapes loopback node_exporter and forwards metrics; OTel accepts application
+OTLP locally and forwards traces. No external trace listener is implied.
+
+Before installing, inspect effective journald configuration/drop-ins, persistence,
+`journalctl --disk-usage`, filesystem capacity and each selected service's
+StandardOutput/StandardError and direct file logging. Proposed managed drop-in:
+`/etc/systemd/journald.conf.d/90-dragontools.conf`, SystemMaxUse=512M,
+SystemKeepFree=1G, RuntimeMaxUse=128M, RuntimeKeepFree=256M. Adapt to smaller volumes,
+preserve stricter administrator bounds and refuse conflicting configuration until
+resolved. Do not silently override unrelated settings or claim direct file logs
+are bounded by journald. Inspect later-sorting drop-ins. Verify effective bounds,
+forwarder health and actual station arrival after installation. This is deferred;
+no agent install can succeed without it.
+
+## Firewall and TLS: fail closed until complete
+
+Own only monitoring rules, ideally one dedicated nftables table; do not flush
+unrelated rules or casually change global policy. Inspect active SSH source and
+port, verify requested admin allowance, stage a timed rollback and reconnect over a
+new SSH connection before canceling it. Cover IPv4 and IPv6. Agent IPs must never
+inherit access to Grafana, SSH or backend administrative routes. No rules are emitted
+or applied in this milestone; a meaningful firewall-generation test awaits the
+implementation instead of blessing an unsafe placeholder.
+
+DNS-01 modes will be manual and Cloudflare DNS-only (proxy not required).
+Manual flow displays the actual ACME TXT name/value, waits for propagation and
+continues the challenge. Cloudflare uses a minimum-permission DNS-edit token scoped
+to the monitoring zone, never a global API key. Both require real certificate
+validation and renewal behavior before reporting success. No fake challenges or
+self-signed certificate success. `monitoring tls renew` remains future work.
+
+Persistent secrets will use `systemd-creds` encrypted root-only storage and
+`LoadCredentialEncrypted=`; an explicit protected-file fallback would use
+`LoadCredential=` and root:root 0600. TLS/notification consumers read only the systemd
+credential path. The current opaque Secret infrastructure redacts and wipes; no
+resolver/storage consumer exists, so relevant CLI options fail before SSH.
+
+## Grafana, alerts and Telegram: roadmap
+
+Provision datasources for all three signal backends; dashboards: Host Overview,
+Monitoring Station, Service Health, Storage, Updates / Security. A complete station
+must verify datasource queries rather than only Grafana HTTP readiness.
+
+The default alert pack will include:
+
+| Group | Rules |
+| --- | --- |
+| Host | HostDown, CPUHigh, MemoryPressure, DiskWarning, DiskCritical, InodesCritical |
+| Service | ServiceDown, ServiceRestartLoop |
+| Logs | ErrorBurst, CriticalLogEvent |
+| Pipeline | LogsNotArriving, MetricsNotArriving, VectorForwardFailure, VmagentForwardFailure, MonitoringDiskPressure |
+| Updates | SecurityUpdatesPending, CriticalSecurityUpdatePending, SecurityUpdateInstallFailed, RebootRequired, MonitoringComponentUpdateAvailable, MonitoringAgentUpdateAvailable, OSReleaseNearEndOfSupport, OSReleaseUnsupported, UpdateCheckFailed, UpdateCheckStale |
+
+CPU >90% for 10 minutes, sustained memory pressure ~5 minutes, disk warning ≥70%,
+critical ≥80%. ErrorBurst aggregates several errors in a short interval; a structured
+critical/fatal event can alert immediately. No message for every error line.
+Document and normalize structured fields: timestamp, level, service, host,
+environment, request_id, event, duration_ms. Conventional normalized levels are
+`error` and `critical`. Log-derived metrics/rules need a verified log-query path;
+do not hand LogsQL to a PromQL-only rules engine and pretend it works.
+
+Optional Telegram: vmalert → Alertmanager → bot → channel/chat. Read bot token from
+credentials, group/deduplicate warning and critical alerts, include resolved alerts,
+and send a clearly labeled test alert during installation verification. API
+acceptance alone must not be presented as proven delivery to a human. No first-class
+notification providers beyond Telegram in v0.x.
+
+## Update monitoring and maintenance: roadmap
+
+Track VictoriaMetrics, VictoriaLogs, VictoriaTraces, Grafana, vmalert, Alertmanager,
+ingress/TLS and DragonTools helper releases; agent side vmagent, Vector, OTel and
+host metrics/helper components. Use trusted upstream/distro metadata, bounded timeouts,
+atomic results, last-success timestamps and explicit unknown/failure states.
+
+OS categories: kernel, OpenSSH, OpenSSL, libc, systemd, CA certificates and Ubuntu
+security origins; report reboot-required and lifecycle/EOL. Do not invent CVE
+severity: CriticalSecurityUpdatePending requires authoritative data or remains
+unknown/unavailable. No generic vulnerability scanner.
+
+Default policy allows automatic OS security patches, not ordinary OS upgrades;
+components notify only; automatic reboot disabled. Report successful installed
+security patches, failed installations, reboot need, component availability, failed
+or stale checks. Policy is documented/modelled only; no unattended-upgrades files
+are modified yet. Future maintenance runs as a local oneshot/timer, with no listener
+and no remote command channel. Future explicit upgrades must verify new artifacts,
+preserve previous versions, restart affected services and verify before success.
+
+## Complete-stack verification gate
+
+Later station completion requires healthy VictoriaMetrics/Logs/Traces, Grafana,
+vmalert and Alertmanager; working datasource queries; visible host metrics;
+storage controls; active fresh update checks; Telegram test if configured; valid
+TLS if configured. Agent completion requires Vector/vmagent/OTel health, bounded
+journald, reachable station, actual logs and metrics arrival, a working trace path,
+and fresh maintenance checks. These are not current test claims.
+
+See README non-goals. The scope remains one node, systemd, trusted infrastructure,
+network-based authorization and explicit workflows rather than generic management.
