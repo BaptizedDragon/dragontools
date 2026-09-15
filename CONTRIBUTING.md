@@ -34,7 +34,7 @@ plan makes no connection. On a sandboxed controller set
    These tests validate orchestration, not the shell's
    behavior on Ubuntu. Add failure/resume and command execution tests as components grow.
 3. Disposable Ubuntu integration: [procedure](tests/integration/README.md) and opt-in
-   [runner](tests/integration/victoriametrics.sh). Real host lifecycle, file ownership,
+   [two-component runner](tests/integration/victorialogs.sh). Real host lifecycle, file ownership,
    listener behavior, health, unit hardening and no-op process stability are required
    before treating a platform combination as operationally validated.
 

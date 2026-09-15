@@ -4,6 +4,7 @@ const help = @import("cli/help.zig");
 const completion = @import("cli/completion.zig");
 const terminal = @import("cli/terminal.zig");
 const policy = @import("monitoring/policy.zig");
+const plan = @import("monitoring/plan.zig");
 fn print(io: std.Io, message: []const u8) void {
     std.Io.File.stdout().writeStreamingAll(io, message) catch {};
 }
@@ -51,8 +52,7 @@ fn execute(init: std.process.Init, options: cli.Options) !void {
         return error.NotImplemented;
     }
     if (options.plan) {
-        print(init.io, try std.fmt.allocPrint(a, "Plan: detect Ubuntu 24.04/26.04 + systemd; ensure dedicated user and data directory; verify pinned VictoriaMetrics v1.151.0 archive and binary SHA-256; install versioned executable and hardened unit; restart only if changed/inactive; verify health and self-scraped metrics.\nStorage: {s} retention; {d}% capacity reserve calculated on host.\nNetwork: 127.0.0.1:8428 only. Firewall and other components unavailable. No remote operations performed.\n", .{ policy.metrics.retention, policy.metrics.reserve_percent }));
-        print(init.io, try policy.renderPlan(a));
+        print(init.io, try plan.render(a));
         return;
     }
     var ssh: @import("system/ssh.zig").Ssh = .{ .allocator = a, .io = init.io, .options = options };
@@ -60,19 +60,25 @@ fn execute(init: std.process.Init, options: cli.Options) !void {
     var report: @import("monitoring/install.zig").Report = .{};
     switch (options.command) {
         .install, .verify => {
-            print(init.io, if (options.command == .install) "Installing VictoriaMetrics slice over SSH...\n" else "Verifying VictoriaMetrics slice over SSH...\n");
+            print(init.io, if (options.command == .install) "Installing VictoriaMetrics and VictoriaLogs over SSH...\n" else "Verifying VictoriaMetrics and VictoriaLogs over SSH...\n");
             const result = if (options.command == .install) @import("monitoring/install.zig").install(a, r, &report) else @import("monitoring/verify.zig").verify(a, r, &report);
             result catch |err| {
-                print(init.io, try std.fmt.allocPrint(a, "Failed at {s}; {d} steps completed, {d} change steps confirmed. The failed step may have partially changed the host. Later steps were not attempted. Check SSH/prerequisites for detection failures, or inspect the managed unit and journal for later failures; fix the cause and rerun the same command. No rollback was attempted.\n", .{ @tagName(report.phase), report.completed, report.changes }));
+                print(init.io, try std.fmt.allocPrint(a, "Failed at {s}; {d} steps completed, {d} change steps confirmed. Component: {s}. The failed step may have partially changed the host. Later steps were not attempted. Check SSH/prerequisites for detection failures, or inspect the managed unit and journal for later failures; fix the cause and rerun the same command. No rollback was attempted.\n", .{ @tagName(report.phase), report.completed, report.changes, if (report.component) |component| component.name() else "host" }));
                 return err;
             };
             if (options.command == .install and report.changes == 0) print(init.io, "No changes required.\n");
-            print(init.io, try std.fmt.allocPrint(a, "VictoriaMetrics: healthy; self-scraped metrics queryable.\nStorage: {s} retention; free-space reserve {d} bytes ({d}% of filesystem capacity).\nNetwork: loopback:8428.\n", .{ policy.metrics.retention, report.reserve_bytes, policy.metrics.reserve_percent }));
+            print(init.io, try std.fmt.allocPrint(a, "VictoriaMetrics: loopback:8428\n  healthy; self-scraped metrics queryable\n  retention: {s}; free-space reserve: {d} bytes ({d}% of filesystem capacity)\nVictoriaLogs: loopback:9428\n  healthy; writable storage\n  retention: disk-bound; logical limit: {s}; native cleanup threshold: {d}% filesystem usage\n  Cleanup is periodic and preserves the newest two days; usage can exceed the threshold.\n", .{ policy.metrics.retention, report.reserve_bytes, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent }));
         },
-        .status => print(init.io, try @import("monitoring/status.zig").status(r)),
+        .status => {
+            const output = @import("monitoring/status.zig").status(a, r, &report) catch |err| {
+                print(init.io, try std.fmt.allocPrint(a, "Failed at {s}; Component: {s}.\n", .{ @tagName(report.phase), report.component.?.name() }));
+                return err;
+            };
+            print(init.io, output);
+        },
         else => unreachable,
     }
-    print(init.io, "Not yet available: VictoriaLogs, VictoriaTraces, Grafana, vmalert, Alertmanager, agents, firewall, TLS, Telegram, update monitoring and maintenance.\n");
+    print(init.io, plan.unavailable);
 }
 test {
     _ = @import("cli/parse.zig");
@@ -89,10 +95,15 @@ test {
     _ = @import("system/files.zig");
     _ = @import("system/systemd.zig");
     _ = @import("components/victoriametrics.zig");
+    _ = @import("components/victorialogs.zig");
+    _ = @import("components/victorialogs_unit.zig");
     _ = @import("monitoring/tests.zig");
     _ = @import("monitoring/policy.zig");
     _ = @import("monitoring/rules.zig");
     _ = @import("monitoring/verify.zig");
+    _ = @import("monitoring/victorialogs_verify.zig");
+    _ = @import("monitoring/plan.zig");
+    _ = @import("monitoring/status.zig");
     _ = @import("system/services.zig");
     _ = @import("update/model.zig");
 }

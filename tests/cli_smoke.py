@@ -42,7 +42,7 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
     plan_args = ["monitoring", "install", "--host", "example.com", "--plan"]
     plan_output = ""
     cases = [
-        (["--help"], 0, "VictoriaMetrics only"),
+        (["--help"], 0, "VictoriaMetrics and VictoriaLogs"),
         ([], 0, "Usage:"),
         (["wizard"], 1, "InteractiveTerminalRequired"),
         (plan_args, 0, "No remote operations performed"),
@@ -64,35 +64,36 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
           "--service", "one.service", "--plan"], 1, "NotImplemented"),
         (["monitoring", "firewall", "--host", "example.com", "--plan"], 1, "NotImplemented"),
         (["monitoring", "install", "--host", "example.com", "--tls", "manual", "--plan"], 1, "NotImplemented"),
+        (["monitoring", "install", "--host", "example.com", "--agent-ip", "192.0.2.10", "--plan"], 1, "NotImplemented"),
+        (["monitoring", "install", "--host", "example.com", "--admin-ip", "192.0.2.11", "--plan"], 1, "NotImplemented"),
+        (["monitoring", "install", "--host", "example.com", "--domain", "monitor.example.com", "--plan"], 1, "NotImplemented"),
     ]
     for args, code, expected in cases:
         result = local_run(args, code, expected)
         if args == plan_args:
             plan_output = result.stdout
 
-    # Policy describes future native retention and alerts; the actual install plan
-    # must continue to promise only the currently available VictoriaMetrics slice.
-    policy_header = re.search(r"Monitoring policy[^\n]*:\n", plan_output)
-    assert policy_header is not None, plan_output
-    implemented_plan = plan_output[:policy_header.start()]
-    assert "VictoriaMetrics" in implemented_plan and "pinned" in implemented_plan
-    assert "127.0.0.1:8428" in implemented_plan, implemented_plan
-    for component in ("VictoriaLogs", "VictoriaTraces", "vmalert", "Alertmanager", "Grafana"):
-        assert not re.search(rf"\binstall(?:ing)?\s+{component}\b", implemented_plan, re.I), implemented_plan
-    policy = plan_output[policy_header.end():].lower()
-    policy_lines = policy.splitlines()
-    metrics = next((line for line in policy_lines if re.match(r"\s*metrics\b", line)), "")
-    assert "90d" in metrics and "20%" in metrics and "reserve" in metrics, metrics
-    for signal in ("logs", "traces"):
-        retention = next((line for line in policy_lines if re.match(rf"\s*{signal}\b", line)), "")
-        for required in ("100y", "logical", "75%", "native"):
-            assert required in retention, (signal, required, retention)
-    assert "planned" in policy, policy
-    for level, percentage in (("info", 60), ("warning", 70), ("critical", 80)):
-        assert re.search(rf"\b{level}\s*[:=]?\s*{percentage}%|\b{percentage}%\s*{level}\b", policy), (level, policy)
-    unavailable = [line for line in policy_lines if re.search(r"not (?:yet )?(?:installed|deployed)", line)]
-    for component in ("logs", "traces", "alerts"):
-        assert any(component in line for line in unavailable), (component, policy)
+    # Both real components have an install section. Remaining components stay
+    # explicitly unavailable; native retention does not imply active alert rules.
+    vm_heading = "VictoriaMetrics: loopback:8428"
+    vl_heading = "VictoriaLogs: loopback:9428"
+    unavailable_heading = "Not yet available:"
+    assert vm_heading in plan_output and vl_heading in plan_output, plan_output
+    assert unavailable_heading in plan_output, plan_output
+    metrics, logs = plan_output.split(vm_heading, 1)[1].split(vl_heading, 1)
+    logs, unavailable = logs.split(unavailable_heading, 1)
+    for required in ("pinned", "v1.151.0", "90d", "20%", "reserve"):
+        assert required in metrics, (required, metrics)
+    for required in ("pinned", "v1.52.0", "100y", "logical", "75%", "cleanup"):
+        assert required in logs, (required, logs)
+    assert "periodic" in logs.lower(), logs
+    assert re.search(r"(?:newest|last) (?:two|2) days", logs), logs
+    assert "VictoriaMetrics" not in unavailable and "VictoriaLogs" not in unavailable, unavailable
+    for component in ("VictoriaTraces", "Grafana", "vmalert", "Alertmanager", "Vector", "vmagent",
+                      "OTel", "node_exporter", "agents", "firewall", "TLS", "Telegram"):
+        assert component in unavailable, (component, unavailable)
+    assert "Alert rules are rendered locally only" in logs, logs
+    assert "no rule deployment or alert evaluation/delivery" in logs, logs
     checked += 1
 
     help_paths = [

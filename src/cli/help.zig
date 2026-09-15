@@ -98,7 +98,7 @@ pub fn render(a: std.mem.Allocator, node: spec.Node) ![]const u8 {
         \\The information-only path performs no remote operations.
         \\
     );
-    try w.print("\nImplemented: VictoriaMetrics only, loopback:8428, retention {s}, reserve {d}%.\n", .{ policy.metrics.retention, policy.metrics.reserve_percent });
+    try w.print("\nImplemented: VictoriaMetrics and VictoriaLogs.\nVictoriaMetrics: loopback:8428; retention {s}; reserve {d}%.\nVictoriaLogs: loopback:9428; disk-bound retention; logical limit {s}; native cleanup {d}%.\nCleanup is periodic and preserves the newest two days; usage can exceed the threshold.\n", .{ policy.metrics.retention, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent });
     try w.writeAll(
         \\Agents, firewall, TLS, Telegram and the other station components are unavailable.
         \\Unavailable options are validated, then rejected before SSH, including with --plan.
@@ -113,7 +113,7 @@ test "hierarchical help lists only the current command children" {
     defer a.free(root);
     try std.testing.expect(std.mem.indexOf(u8, root, "  monitoring\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, root, "  completion\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, root, "VictoriaMetrics only") != null);
+    try std.testing.expect(std.mem.indexOf(u8, root, "VictoriaMetrics and VictoriaLogs") != null);
     const agents = try render(a, .agents);
     defer a.free(agents);
     try std.testing.expect(std.mem.indexOf(u8, agents, "dragontool monitoring agents <command>") != null);

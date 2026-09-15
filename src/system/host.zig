@@ -7,10 +7,25 @@ pub const detect_command =
     \\test -d /run/systemd/system || exit 11
     \\. /etc/os-release
     \\printf '%s\n%s\n%s\n' "$ID" "$VERSION_ID" "$(uname -m)"
+    \\for tool in curl tar sha256sum stat cmp install useradd getent systemctl flock readlink ss grep cut mktemp ln mv chmod chown tr; do command -v "$tool" >/dev/null || exit 12; done
+;
+// Check component conflicts before its first mutation. Keeping these checks in
+// the component sequence lets Report identify which service needs attention.
+pub const victoriametrics_preflight =
+    \\set -eu
     \\test ! -L /etc/systemd/system/dragontools-victoriametrics.service || exit 43
     \\if test -e /etc/systemd/system/dragontools-victoriametrics.service; then grep -qx '# Managed by DragonTools' /etc/systemd/system/dragontools-victoriametrics.service || exit 40; fi
     \\test -z "$(systemctl show -p DropInPaths --value dragontools-victoriametrics.service)" || exit 42
-    \\for tool in curl tar sha256sum stat cmp install useradd getent systemctl flock readlink ss grep cut mktemp ln mv chmod chown tr; do command -v "$tool" >/dev/null || exit 12; done
+    \\test ! -L /var/lib/dragontools/victoriametrics-restart-required || exit 43
+    \\if test -e /var/lib/dragontools/victoriametrics-restart-required; then test -f /var/lib/dragontools/victoriametrics-restart-required || exit 40; fi
+;
+pub const victorialogs_preflight =
+    \\set -eu
+    \\test ! -L /etc/systemd/system/dragontools-victorialogs.service || exit 43
+    \\if test -e /etc/systemd/system/dragontools-victorialogs.service; then grep -qx '# Managed by DragonTools' /etc/systemd/system/dragontools-victorialogs.service || exit 40; fi
+    \\test -z "$(systemctl show -p DropInPaths --value dragontools-victorialogs.service)" || exit 42
+    \\test ! -L /var/lib/dragontools/victorialogs-restart-required || exit 43
+    \\if test -e /var/lib/dragontools/victorialogs-restart-required; then test -f /var/lib/dragontools/victorialogs-restart-required || exit 40; fi
 ;
 pub fn parse(output: []const u8) !Host {
     var lines = std.mem.tokenizeScalar(u8, output, '\n');

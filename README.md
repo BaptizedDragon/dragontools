@@ -2,12 +2,15 @@ DragonTools is an opinionated Zig tool for minimalistic architecture enthusiasts
 
 # DragonTools · v0.1 foundation
 
-This first milestone installs **VictoriaMetrics**, not a complete monitoring station.
-It creates a dedicated Unix user, a checksum-verified versioned executable, a hardened
-systemd service, 90-day retention, and a disk reserve. It verifies health and queries
-self-scraped metrics. Repeating the same install leaves healthy, unchanged services running.
+The current milestone installs **VictoriaMetrics and VictoriaLogs**. Each has a
+dedicated Unix user, a checksum-verified versioned executable, a hardened systemd
+service, and a loopback-only listener. VictoriaMetrics keeps 90-day metrics with a
+disk reserve; VictoriaLogs keeps disk-bound log history with native cleanup.
+Installation verifies both components and preserves healthy, unchanged processes
+on reruns. This is not a complete monitoring station: agents, alert evaluation,
+dashboards, and application-host log ingestion remain unavailable.
 
-## Build and install your first component
+## Build and install metrics and logs
 
 Controller: Zig **0.16.0**, OpenSSH, macOS or Linux, amd64 or arm64.
 Target: **Ubuntu 24.04 LTS or 26.04 LTS**, systemd, amd64 or arm64.
@@ -30,14 +33,19 @@ MONITOR_HOST="monitor.example.com"
 ./zig-out/bin/dragontool monitoring status --host "$MONITOR_HOST"
 ```
 
-Expected: VictoriaMetrics `v1.151.0` runs at `127.0.0.1:8428` **on the server**.
-Output reports the effective reserve in bytes and explicitly lists unavailable
+Expected: VictoriaMetrics `v1.151.0` runs at `127.0.0.1:8428` and VictoriaLogs
+`v1.52.0` runs at `127.0.0.1:9428` **on the server**.
+Output reports the effective metrics reserve in bytes, the logs retention policy,
+and explicitly lists unavailable
 integrations. A second install prints `No changes required.` if no repairs were needed.
-`verify` is read-only; it checks the managed unit, active executable hash, service
-hardening, local listener, HTTP health, and stored self-scraped metrics.
+`verify` is read-only and fails if either component fails its checks. It checks
+managed units, active executable hashes, hardening, local listeners, HTTP health,
+stored VictoriaMetrics self-scraped metrics, and VictoriaLogs identity and writable
+storage through `vl_storage_is_read_only == 0`. It does not claim that application
+logs have arrived. `status` reports both service states; use `verify` for health.
 
-Security: no public service port is opened. There is no authentication on raw
-VictoriaMetrics; it must remain loopback-only. This slice has no remote agent
+Security: no public service port is opened. Raw VictoriaMetrics and VictoriaLogs
+APIs have no configured authentication and must remain loopback-only. This slice has no remote agent
 ingestion, Grafana, TLS, firewall management, alerts, or maintenance timer.
 Local users on the target can reach loopback. Install does not claim those missing
 protections or features are present. Use a provider firewall as an outer layer.
@@ -70,13 +78,14 @@ dragontool
 Choose installation, agent setup, verification, status, firewall guidance, the
 information-only architecture overview, or command-line help. The overview and
 command preview are local: they do not connect to a host or resolve credentials.
-The current installer still provides **VictoriaMetrics only**. Roadmap inputs
+The current installer provides **VictoriaMetrics and VictoriaLogs**. Roadmap inputs
 such as domain/TLS, IP allowlists, Telegram, agents, and firewall configuration
 remain explicitly unavailable and fail before SSH, including in plan mode.
 Station setup asks for host, SSH user/port, and authentication, then offers optional
 roadmap settings with a default of no. Accepting that default produces a usable
-VictoriaMetrics command. Metrics retention stays fixed at 90 days with a 20%
-capacity reserve. Agent guidance accepts a numeric station IP (the current
+metrics-and-logs command. Metrics retention stays fixed at 90 days with a 20%
+capacity reserve. Logs use a logical 100-year limit and native cleanup at 75%
+filesystem usage. Agent guidance accepts a numeric station IP (the current
 `--station-ip` contract) and repeats validated `.service` names.
 
 Enter accepts a displayed default; required empty values and malformed values
@@ -143,20 +152,25 @@ directory instead. Type `dragontool monitoring install --` and press Tab, or typ
 Completion can describe unavailable roadmap flags; selecting them does not enable
 their implementation. `dragontool completion --help` shows installation guidance.
 
-## Inspect metrics from your workstation
+## Inspect metrics and logs health from your workstation
 
-An explicit temporary SSH tunnel allows inspecting the installed component:
+An explicit temporary SSH tunnel allows inspecting both installed components:
 
 ```bash
 MONITOR_HOST="monitor.example.com"
-ssh -o StrictHostKeyChecking=yes -N -L 8428:127.0.0.1:8428 "root@$MONITOR_HOST"
+ssh -o StrictHostKeyChecking=yes -N \
+  -L 8428:127.0.0.1:8428 -L 9428:127.0.0.1:9428 "root@$MONITOR_HOST"
 # In another terminal:
 curl --fail http://127.0.0.1:8428/health
 curl --fail 'http://127.0.0.1:8428/api/v1/query?query=vm_app_version'
+curl --fail http://127.0.0.1:9428/health
+curl --fail http://127.0.0.1:9428/metrics | grep '^vl_storage_is_read_only'
 ```
 
-Expected: HTTP health succeeds and the query returns stored metrics. The tunnel
-exposes the raw API on your workstation's loopback; close it when finished.
+Expected: both HTTP health checks succeed, the metrics query returns stored data,
+and the VictoriaLogs read-only metric is `0`. The tunnel exposes raw APIs on your
+workstation's loopback; close it when finished. No application logs are ingested by
+this installation, and no synthetic log is required or written by verification.
 Grafana will become the normal human-facing UI in a later milestone.
 
 ## Command availability
@@ -165,11 +179,21 @@ Grafana will become the normal human-facing UI in a later milestone.
 | --- | --- |
 | `wizard` / no arguments in a TTY | Local interactive frontend to the same commands |
 | `completion bash/zsh/fish` | Print local shell completion scripts |
-| `monitoring install` | VictoriaMetrics vertical slice |
-| `monitoring verify` | VictoriaMetrics checks, nonzero on failure |
-| `monitoring status` | Service state summary, not an end-to-end health check |
+| `monitoring install` | VictoriaMetrics and VictoriaLogs installation |
+| `monitoring verify` | Both components checked; nonzero if either fails |
+| `monitoring status` | Both service states, not an end-to-end health check |
 | `monitoring agents install/verify/status` | Parsed; fails explicitly before SSH |
 | `monitoring firewall` | Parsed; fails explicitly before SSH |
+
+| Component/integration | Availability |
+| --- | --- |
+| VictoriaMetrics | Implemented |
+| VictoriaLogs | Implemented; loopback only, without application-host ingestion |
+| VictoriaTraces | Unavailable |
+| vmalert / Alertmanager | Unavailable; rules are only rendered locally |
+| Grafana / Telegram | Unavailable |
+| Vector / vmagent / OTel Collector / node_exporter / monitoring agents | Unavailable |
+| Monitoring firewall / TLS | Unavailable |
 
 `--service` is repeatable. Agent, admin-IP, TLS, Telegram and 1Password private-key
 reference flags are validated, then rejected as unavailable before any connection.
@@ -181,27 +205,34 @@ Upgrade, uninstall, and `monitoring tls renew` are future commands.
 
 ## Storage and operation
 
-`src/monitoring/policy.zig` defines the fixed monitoring defaults. The eventual
-storage behavior is:
+`src/monitoring/policy.zig` defines the fixed monitoring defaults:
 
 | Signal | Retention and disk policy | Current availability |
 | --- | --- | --- |
 | Metrics | `90d` retention; 20% filesystem reserve | Installed and verified by the VictoriaMetrics workflow |
-| Logs | Keep as much history as safely fits, with a logical `100y` limit and native cleanup around 75% filesystem usage | Policy only; VictoriaLogs is unavailable |
+| Logs | Keep as much history as safely fits, with a logical `100y` limit and native cleanup around 75% filesystem usage | Installed VictoriaLogs native retention |
 | Traces | Keep as much history as safely fits, with a logical `100y` limit and native cleanup around 75% filesystem usage | Policy only; VictoriaTraces is unavailable |
 
-Disk states are **60% info, 70% warning, 80% critical**. The 75% threshold is the
-future native logs/traces cleanup target, separate from those alert thresholds.
-It is not a manual deletion job or a guarantee that storage remains below 75%.
-Shared filesystem capacity must be budgeted across both backends before their
-installation is implemented. The 60% informational state is policy only; the
-current rule renderer emits the warning and critical disk alerts.
+VictoriaLogs starts deleting the oldest daily partitions when filesystem usage
+exceeds 75%, using `-retention.maxDiskUsagePercent=75` alongside
+`-retentionPeriod=100y`. It retains at least the newest two days and checks disk
+usage periodically, so filesystem usage can temporarily exceed that threshold.
+This is a cleanup target, not a hard capacity ceiling. Size the monitoring
+filesystem for incoming data, shared writers, and sufficient headroom; `100y`
+does not promise 100 years of stored logs. DragonTools performs no manual storage
+deletion and does not combine percentage retention with the mutually exclusive
+`-retention.maxDiskSpaceUsageBytes` option. [VictoriaLogs retention](https://docs.victoriametrics.com/victorialogs/#retention).
+
+Disk states are **60% info, 70% warning, 80% critical**. They are separate from
+the native 75% logs cleanup threshold and the planned traces cleanup policy.
+These alerts are not deployed. The 60% informational state is policy only;
+the local renderer emits warning and critical disk alerts.
 
 For example, `dragontool monitoring install --host monitor.example.com --plan`
-prints the implemented VictoriaMetrics installation and a separate planned
-monitoring policy section. It performs no SSH and explicitly states that
-logs, traces, and alerts are not installed. These defaults are fixed policy;
-this slice adds no retention, threshold, or rule-deployment CLI options.
+prints both implemented component installations and their retention/listener
+settings, then lists unavailable components. It performs no SSH. DragonTools owns
+versions, paths, retention, binding, and hardening; no VictoriaLogs-specific
+configuration or new CLI options are needed for normal installation.
 
 The VictoriaMetrics reserve remains `ceil(filesystem capacity / 5)`
 using the data filesystem, passed to upstream `-storage.minFreeDiskSpaceBytes`.
@@ -215,11 +246,17 @@ Paths:
 - `/opt/dragontools/components/victoriametrics/v1.151.0/` and `current` symlink
 - `/var/lib/dragontools/victoriametrics/` (service-owned data)
 - `/etc/systemd/system/dragontools-victoriametrics.service`
+- `/opt/dragontools/components/victorialogs/v1.52.0/` and `current` symlink
+- `/var/lib/dragontools/victorialogs/` (owned by `dt-victorialogs`, mode 0750)
+- `/etc/systemd/system/dragontools-victorialogs.service`
 
-Errors name the failed phase and completed changes, stop later steps, and avoid
+Errors name the failed component, phase, and completed changes, stop later steps, and avoid
 printing remote stderr or argument values. A failed step may have partially changed
-the target. Fix the cause, inspect `journalctl -u dragontools-victoriametrics`, then
-rerun. No automatic rollback or component upgrades are implemented. Run one install
+the target. Fix the cause, inspect `journalctl -u dragontools-victoriametrics`
+or `journalctl -u dragontools-victorialogs`, then rerun. Each component retains its
+own restart marker until verification succeeds. A VictoriaLogs failure does not
+roll back an already verified VictoriaMetrics installation. No automatic rollback
+or component upgrades are implemented. Run one install
 per target at a time. Do not replace managed paths with symlinks or locally edit the
 managed unit; its content is reconciled. Unmanaged unit files and systemd drop-ins for the managed service are refused.
 For `SshConnectionFailed`, check the host fingerprint, authentication and reachability
@@ -268,7 +305,7 @@ storage deletion, service changes, or notification delivery.
 
 ## Next milestones
 
-VictoriaLogs, VictoriaTraces, Grafana provisioned datasources/dashboards, vmalert,
+VictoriaTraces, Grafana provisioned datasources/dashboards, vmalert,
 Alertmanager/Telegram; Vector + vmagent + OTel Collector + node_exporter agents;
 bounded journald; restricted ingestion; safe monitoring firewall; DNS-01 TLS;
 oneshot maintenance; update/security checks and alerts.

@@ -6,14 +6,18 @@ pub fn writeCommand(a: std.mem.Allocator, path: []const u8, content: []const u8,
     return remote.shell(a, &.{
         "sh",                "-eu", "-c",
         \\path=$1
-        \\test ! -L "$path"
+        \\test ! -L "$path" || exit 43
+        \\if test -n "$3"; then
+        \\  test ! -L "$3" || exit 43
+        \\  if test -e "$3"; then test -f "$3" && test "$(stat -c '%u:%g' "$3")" = 0:0 || exit 40; fi
+        \\fi
         \\if test -e "$path"; then grep -qx '# Managed by DragonTools' "$path" || exit 40; fi
         \\tmp=$(mktemp "${path}.XXXXXX")
         \\trap 'rm -f "$tmp"' EXIT
         \\printf '%s' "$2" > "$tmp"
         \\chmod 644 "$tmp"
         \\chown root:root "$tmp"
-        \\if test -f "$path" && cmp -s "$tmp" "$path" && test "$(stat -c '%u:%g:%a' "$path")" = 0:0:644; then printf 'unchanged'; else if test -n "$3"; then touch "$3"; fi; mv -fT "$tmp" "$path"; printf 'changed'; fi
+        \\if test -f "$path" && cmp -s "$tmp" "$path" && test "$(stat -c '%u:%g:%a' "$path")" = 0:0:644; then printf 'unchanged'; else if test -n "$3"; then (umask 077; touch "$3"); fi; mv -fT "$tmp" "$path"; printf 'changed'; fi
         ,
         "dragontools-write", path,  content,
         restart_marker,

@@ -1,10 +1,10 @@
 # Design decisions and staged delivery
 
-## First milestone: implemented
+## Current milestone: metrics and logs implemented
 
-The foundation deliberately delivers one usable slice, VictoriaMetrics, while
-rejecting unfinished integrations before connecting. Exit 0 from install means
-that slice passed verification; it never means the full requested station exists.
+The foundation delivers two concrete slices, VictoriaMetrics and VictoriaLogs,
+while rejecting unfinished integrations before connecting. Exit 0 from install
+means both passed verification; it never means the full requested station exists.
 `status` is a read-only service-state summary; use `verify` to test health.
 Help and `--plan` require no SSH. No generic primitives are public commands.
 
@@ -30,7 +30,7 @@ does not introduce a generic public CLI framework or a resource DSL.
 
 The wizard offers monitoring install, agents, verify, status, firewall guidance,
 architecture information, and command-line help. Station setup defaults to the
-implemented VictoriaMetrics slice; roadmap settings require explicit opt-in and
+implemented VictoriaMetrics and VictoriaLogs slices; roadmap settings require explicit opt-in and
 still fail before SSH. Agent station entry remains a numeric IP, matching
 `--station-ip`. Unsupported components and protected-file credential inputs do not
 become implemented merely because an interactive interface exists.
@@ -63,12 +63,12 @@ leave the remote component and integration-validation boundary unchanged.
 ## Storage
 
 `src/monitoring/policy.zig` defines the fixed policy values consumed by the
-VictoriaMetrics component, local alert renderers, and install plan.
+VictoriaMetrics and VictoriaLogs components, local alert renderers, and install plan.
 
 | Signal | Policy | State |
 | --- | --- | --- |
 | Metrics | `-retentionPeriod=90d`, `-storage.minFreeDiskSpaceBytes=ceil(capacity/5)` (20% reserve) | Implemented installation; existing behavior preserved |
-| Logs | Maximum safely fitting history, logical `100y` limit, native cleanup at 75% filesystem usage | Code-level policy only; installation and pinned native flags are deferred |
+| Logs | Maximum safely fitting history, `-retentionPeriod=100y`, `-retention.maxDiskUsagePercent=75` | Implemented VictoriaLogs native retention |
 | Traces | Maximum safely fitting history, logical `100y` limit, native cleanup at 75% filesystem usage | Code-level policy only; installation and pinned native flags are deferred |
 
 Capacity uses `stat -f` on the actual data directory; available space is not mistaken
@@ -76,21 +76,30 @@ for capacity. No automatic storage-file deletion. Reserve is a stop-ingestion
 threshold, not a quota. A resized filesystem requires reinstallation; verification
 recomputes the expected unit and catches a stale reserve. Future shared-filesystem
 allocation must budget logs/traces together, rather than give each the same entire
-free space budget.
+free space budget. Metrics and logs currently share a filesystem unless the
+operator mounts separate storage; their reserve and cleanup settings do not
+isolate them from one another or from other writers.
 
 Filesystem states: below 60% healthy; ≥60% informational; ≥70% warning; ≥80%
-critical. The separate 75% logs/traces cleanup target will use native retention
-controls, subject to verification against the selected pinned releases. Logical
+critical. The separate 75% cleanup target uses native VictoriaLogs retention;
+VictoriaTraces support and its pinned flags are still deferred. Logical
 `100y` retention expresses a long maximum history, not a promise of 100 years of
 stored data. No manual VictoriaLogs/VictoriaTraces file deletion is permitted.
 VictoriaMetrics continues to use its free-space reserve and 90-day retention.
 
 The local renderer implements warning and critical disk rules; the informational
-60% state is defined in policy but has no rule in this bounded pack. No alerts or
-logs/traces cleanup run on the target yet. `monitoring install --plan` describes
-only the VictoriaMetrics workflow, followed by a clearly separate planned policy
-section that explicitly identifies logs, traces, and alerts as not installed.
+60% state is defined in policy but has no rule in this bounded pack. No alert
+evaluation or traces cleanup runs on the target yet. `monitoring install --plan`
+describes both installed components and lists unavailable integrations separately.
 There are no new CLI policy overrides or rule-deployment options.
+
+VictoriaLogs deletes oldest daily partitions when the containing filesystem
+exceeds 75% usage. Its periodic checks and retention of at least the newest two
+days mean usage can exceed the target. A full disk can leave storage read-only,
+so adequate capacity and headroom remain necessary. DragonTools does not enable
+the mutually exclusive byte-based retention option or manually remove partitions.
+These controls keep the longest useful history that fits; they do not guarantee
+100 years or a strict 75% ceiling. [Upstream retention controls and limitations](https://docs.victoriametrics.com/victorialogs/#retention-by-disk-space-usage).
 
 Verified upstream sources for implemented flags and artifact pins:
 
@@ -98,10 +107,50 @@ Verified upstream sources for implemented flags and artifact pins:
 - [Retention examples](https://docs.victoriametrics.com/victoriametrics/quick-start/)
 - [Pinned official release](https://github.com/VictoriaMetrics/VictoriaMetrics/releases/tag/v1.151.0)
 - [Pinned release metadata](https://api.github.com/repos/VictoriaMetrics/VictoriaMetrics/releases/tags/v1.151.0)
+- [Pinned VictoriaLogs release](https://github.com/VictoriaMetrics/VictoriaLogs/releases/tag/v1.52.0)
+- [VictoriaLogs release metadata](https://api.github.com/repos/VictoriaMetrics/VictoriaLogs/releases/tags/v1.52.0)
 
-Checksums are embedded in `src/components/victoriametrics.zig`. Version changes must
+Checksums are embedded in `src/components/victoriametrics.zig` and
+`src/components/victorialogs.zig`. VictoriaLogs `v1.52.0` is a deliberately reviewed
+stable pin; installation never resolves mutable `latest` metadata or downloads
+unchecked runtime checksum files. Version changes must
 review both architectures and independently recheck archive and extracted binary
 hashes. Health success alone is insufficient to approve a component version.
+
+## VictoriaLogs installation and verification
+
+The second component uses `/opt/dragontools/components/victorialogs/v1.52.0/` with
+an atomic `current` symlink and the expected `victoria-logs-prod` executable.
+Archive hashing precedes extraction of that one named regular file; executable
+hashing precedes atomic installation. A dedicated `dt-victorialogs` account owns
+only `/var/lib/dragontools/victorialogs` (0750). Root owns binaries, parent paths,
+and the managed `dragontools-victorialogs.service`. Unexpected symlinks, unrelated
+units, conflicting users and service drop-ins cause a safe refusal.
+
+The concrete hardened unit passes the fixed storage/retention flags and binds
+`-httpListenAddr=127.0.0.1:9428`. No authentication or external ingestion gateway
+is configured. Private temporary/device namespaces are allowed, persistent writes
+are limited to the data directory, and no capabilities are granted. The requested
+hardening directives have no intentional relaxation; no MemoryMax is selected
+without a workload-tested budget. Real systemd compatibility is an integration gate.
+
+Changes set `/var/lib/dragontools/victorialogs-restart-required` before activation.
+A failed verification leaves restart intent intact; a later install repairs and
+restarts VictoriaLogs without restarting unchanged VictoriaMetrics. Inactive
+services start, disabled services enable, and healthy matching components require
+no restart. There is no whole-install rollback if VictoriaLogs fails after
+VictoriaMetrics succeeds.
+
+Verification compares the managed unit and running configuration against policy,
+checks active and disk executable identity, effective service hardening, the loopback
+listener, bounded HTTP health, and VictoriaLogs-specific `/metrics` output.
+The loaded unit must use the managed path and need no daemon reload; managed
+directories, binary, and unit must retain their expected types, owners, and modes.
+`vl_storage_is_read_only` must be zero; missing identity or read-only storage fails
+verification and cannot finalize the component. No synthetic log or remote
+application ingestion is required, so success does not demonstrate an application
+log pipeline. `monitoring verify` checks both installed components; `status`
+reports both service states without claiming full health or active alerts.
 
 ## Agents and local journal safety: next vertical slice
 
@@ -227,7 +276,7 @@ Monitoring Station, Service Health, Storage, Updates / Security. A complete stat
 must verify datasource queries rather than only Grafana HTTP readiness.
 
 No generated rules are deployed or evaluated by the current installation.
-VictoriaLogs, VictoriaTraces, vmalert, Alertmanager, Grafana, Vector, vmagent,
+VictoriaTraces, vmalert, Alertmanager, Grafana, Vector, vmagent,
 OTel Collector, and node_exporter installation remain explicitly unavailable.
 Rendering rules does not install a complete monitoring station or enable alerts.
 

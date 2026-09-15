@@ -13,8 +13,8 @@ pub const CommandSpec = struct {
 pub const commands = [_]CommandSpec{
     .{ .node = .root, .parent = null, .name = "dragontool", .description = "Opinionated monitoring over SSH" },
     .{ .node = .monitoring, .parent = .root, .name = "monitoring", .description = "Install, verify and inspect monitoring" },
-    .{ .node = .install, .parent = .monitoring, .name = "install", .description = "Install a monitoring station (VictoriaMetrics slice)", .command = .install },
-    .{ .node = .verify, .parent = .monitoring, .name = "verify", .description = "Verify the installed VictoriaMetrics slice", .command = .verify },
+    .{ .node = .install, .parent = .monitoring, .name = "install", .description = "Install VictoriaMetrics and VictoriaLogs", .command = .install },
+    .{ .node = .verify, .parent = .monitoring, .name = "verify", .description = "Verify installed VictoriaMetrics and VictoriaLogs", .command = .verify },
     .{ .node = .status, .parent = .monitoring, .name = "status", .description = "Show monitoring service state", .command = .status },
     .{ .node = .agents, .parent = .monitoring, .name = "agents", .description = "Manage monitored hosts (not yet available)" },
     .{ .node = .agents_install, .parent = .agents, .name = "install", .description = "Connect a monitored host (not yet available)", .command = .agents_install },
