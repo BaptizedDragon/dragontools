@@ -181,7 +181,29 @@ Upgrade, uninstall, and `monitoring tls renew` are future commands.
 
 ## Storage and operation
 
-Metrics retention is `90d`. The initial reserve is `ceil(filesystem capacity / 5)`
+`src/monitoring/policy.zig` defines the fixed monitoring defaults. The eventual
+storage behavior is:
+
+| Signal | Retention and disk policy | Current availability |
+| --- | --- | --- |
+| Metrics | `90d` retention; 20% filesystem reserve | Installed and verified by the VictoriaMetrics workflow |
+| Logs | Keep as much history as safely fits, with a logical `100y` limit and native cleanup around 75% filesystem usage | Policy only; VictoriaLogs is unavailable |
+| Traces | Keep as much history as safely fits, with a logical `100y` limit and native cleanup around 75% filesystem usage | Policy only; VictoriaTraces is unavailable |
+
+Disk states are **60% info, 70% warning, 80% critical**. The 75% threshold is the
+future native logs/traces cleanup target, separate from those alert thresholds.
+It is not a manual deletion job or a guarantee that storage remains below 75%.
+Shared filesystem capacity must be budgeted across both backends before their
+installation is implemented. The 60% informational state is policy only; the
+current rule renderer emits the warning and critical disk alerts.
+
+For example, `dragontool monitoring install --host monitor.example.com --plan`
+prints the implemented VictoriaMetrics installation and a separate planned
+monitoring policy section. It performs no SSH and explicitly states that
+logs, traces, and alerts are not installed. These defaults are fixed policy;
+this slice adds no retention, threshold, or rule-deployment CLI options.
+
+The VictoriaMetrics reserve remains `ceil(filesystem capacity / 5)`
 using the data filesystem, passed to upstream `-storage.minFreeDiskSpaceBytes`.
 VictoriaMetrics stops accepting new samples below the reserve. This is **not** a
 hard free-space guarantee: merges and other writers can consume headroom. No data
@@ -204,6 +226,45 @@ For `SshConnectionFailed`, check the host fingerprint, authentication and reacha
 with ordinary SSH. For `MissingRemotePrerequisite`, install the listed Ubuntu packages
 and rerun. For account/unit conflicts, inspect existing configuration before making
 any manual change; DragonTools does not adopt it silently.
+
+## Default alert rule generation
+
+`src/monitoring/rules.zig` locally renders deterministic vmalert rule YAML from
+the policy module. Host/service metrics and VictoriaLogs rules use separate files.
+This is an internal Zig API: there is no rule-export or deployment CLI command yet.
+No rules are installed or evaluated by DragonTools, and neither vmalert nor
+node_exporter is installed. Renderer tests do not prove runtime compatibility.
+
+| Group | Generated defaults |
+| --- | --- |
+| Host | HostDown; CPUHigh; MemoryPressure; DiskWarning; DiskCritical; InodesCritical |
+| Service | ServiceDown; ServiceRestartLoop, only for explicitly selected `.service` units |
+| Logs | ErrorBurst; CriticalLogEvent |
+
+CPUHigh uses non-idle CPU above 90% for 10 minutes. MemoryPressure uses
+`MemAvailable` to detect usage above 90% for 5 minutes. DiskWarning and DiskCritical
+use 70% and 80%, with a 5-minute hold; InodesCritical uses 90% for 5 minutes.
+HostDown waits 2 minutes. ServiceDown waits 2 minutes; ServiceRestartLoop requires
+at least 3 automatic restarts over 5 minutes, sustained for 1 minute. Temporary/pseudo
+filesystems are excluded from the filesystem rules.
+
+For example, a caller selecting `orderflow.service` and `whoami.service` receives
+service rules only for those units; an empty list emits no service rules. Future
+agent setup must enable node_exporter's systemd collector and its restart metric
+before these rules can be deployed.
+
+ErrorBurst groups normalized `level=error` events by service and requires at least
+5 events within 5 minutes; ordinary errors do not each generate a notification.
+CriticalLogEvent needs one normalized `critical` or `fatal` event within 1 minute
+and has no hold period. Evaluation is every minute, so "immediate" means the next
+evaluation, not synchronous delivery. Logs use the VictoriaLogs `vlogs` group type
+and require a VictoriaLogs datasource when an evaluator is eventually installed.
+Structured fields and future runtime prerequisites are described in [design](design.md).
+
+Alerts carry stable `severity` and `source` labels and concise annotations with
+host/service context where available. Log messages, request IDs, and secrets are
+not copied into annotations. Rendering performs no SSH, credential resolution,
+storage deletion, service changes, or notification delivery.
 
 ## Next milestones
 

@@ -62,11 +62,14 @@ leave the remote component and integration-validation boundary unchanged.
 
 ## Storage
 
+`src/monitoring/policy.zig` defines the fixed policy values consumed by the
+VictoriaMetrics component, local alert renderers, and install plan.
+
 | Signal | Policy | State |
 | --- | --- | --- |
-| Metrics | `-retentionPeriod=90d`, `-storage.minFreeDiskSpaceBytes=ceil(capacity/5)` | Implemented |
-| Logs | Maximum safely fitting history, native disk-pressure retention | Deferred; flags must be verified against pinned release |
-| Traces | Same elastic policy as logs | Deferred; flags must be verified against pinned release |
+| Metrics | `-retentionPeriod=90d`, `-storage.minFreeDiskSpaceBytes=ceil(capacity/5)` (20% reserve) | Implemented installation; existing behavior preserved |
+| Logs | Maximum safely fitting history, logical `100y` limit, native cleanup at 75% filesystem usage | Code-level policy only; installation and pinned native flags are deferred |
+| Traces | Maximum safely fitting history, logical `100y` limit, native cleanup at 75% filesystem usage | Code-level policy only; installation and pinned native flags are deferred |
 
 Capacity uses `stat -f` on the actual data directory; available space is not mistaken
 for capacity. No automatic storage-file deletion. Reserve is a stop-ingestion
@@ -75,9 +78,19 @@ recomputes the expected unit and catches a stale reserve. Future shared-filesyst
 allocation must budget logs/traces together, rather than give each the same entire
 free space budget.
 
-Planned filesystem states: below 60% healthy; ≥60% informational; ≥70% warning;
-about 75% logs/traces pressure retention; ≥80% critical. These are policy targets,
-not deployed alerts or implemented cleanup in this milestone.
+Filesystem states: below 60% healthy; ≥60% informational; ≥70% warning; ≥80%
+critical. The separate 75% logs/traces cleanup target will use native retention
+controls, subject to verification against the selected pinned releases. Logical
+`100y` retention expresses a long maximum history, not a promise of 100 years of
+stored data. No manual VictoriaLogs/VictoriaTraces file deletion is permitted.
+VictoriaMetrics continues to use its free-space reserve and 90-day retention.
+
+The local renderer implements warning and critical disk rules; the informational
+60% state is defined in policy but has no rule in this bounded pack. No alerts or
+logs/traces cleanup run on the target yet. `monitoring install --plan` describes
+only the VictoriaMetrics workflow, followed by a clearly separate planned policy
+section that explicitly identifies logs, traces, and alerts as not installed.
+There are no new CLI policy overrides or rule-deployment options.
 
 Verified upstream sources for implemented flags and artifact pins:
 
@@ -131,29 +144,99 @@ Persistent secrets will use `systemd-creds` encrypted root-only storage and
 credential path. The current opaque Secret infrastructure redacts and wipes; no
 resolver/storage consumer exists, so relevant CLI options fail before SSH.
 
-## Grafana, alerts and Telegram: roadmap
+## Default alert rule generation: implemented locally
+
+`src/monitoring/rules.zig` uses small explicit Zig render functions, with no template
+engine or remote execution. `renderHosts`, `renderServices`, and `renderLogs`
+return deterministic YAML. Metrics rules use Prometheus-compatible expressions;
+log rules form a separate VictoriaLogs `type: vlogs` group. These functions are
+internal APIs; no new rule-export CLI command is introduced.
+
+The generated pack uses the policy module for these defaults:
+
+| Group | Rule | Condition and hold duration |
+| --- | --- | --- |
+| Host | HostDown | `up == 0` for 2 minutes |
+| Host | CPUHigh | Non-idle node_exporter CPU usage >90% for 10 minutes |
+| Host | MemoryPressure | Memory usage from `MemAvailable` >90% for 5 minutes |
+| Host | DiskWarning | Filesystem usage ≥70% for 5 minutes |
+| Host | DiskCritical | Filesystem usage ≥80% for 5 minutes |
+| Host | InodesCritical | Inode usage ≥90% for 5 minutes |
+| Service | ServiceDown | Selected systemd unit's active-state signal is zero for 2 minutes |
+| Service | ServiceRestartLoop | At least 3 automatic restarts over 5 minutes, sustained for 1 minute |
+| Logs | ErrorBurst | At least 5 normalized `error` events per service over 5 minutes; no additional hold |
+| Logs | CriticalLogEvent | At least one normalized `critical` or `fatal` event per service over 1 minute; no additional hold |
+
+The inode default leaves 10% headroom and waits 5 minutes to avoid transient
+notifications. Filesystem expressions exclude temporary/pseudo filesystems and
+compute disk usage as `100 × (1 − available bytes / filesystem size)`.
+HostDown covers reported failed scrape
+targets; an absent time series or a target removed from scrape configuration is
+not the same as `up == 0`. Missing signals and stalled pipelines need later alerts.
+
+`renderServices` accepts an explicit unit list, for example `orderflow.service`
+and `whoami.service`. It validates with the existing CLI service validator,
+sorts/deduplicates the units, emits exact PromQL name selectors and quoted YAML
+service labels, and produces `groups: []` for an empty list. It never discovers
+services or interpolates units into executable shell text. Agent installation and
+the existing `--service` CLI path remain unavailable.
+
+Future agents must enable `--collector.systemd` and
+`--collector.systemd.enable-restarts-metrics` before deploying these service rules.
+The source exposes `node_systemd_unit_state` and
+`node_systemd_service_restart_total{name="..."}`; the latter comes from systemd's
+`NRestarts` property and requires systemd ≥235. These are planned collector
+requirements, not currently configured agent behavior. [node_exporter systemd collector source](https://github.com/prometheus/node_exporter/blob/master/collector/systemd_linux.go).
+The counter represents automatic restarts, not an audit of every manual restart. [systemd restart counter scope](https://github.com/systemd/systemd/issues/29348).
+
+Log rules depend on normalized structured fields: `timestamp`, `level`, `service`,
+`host`, `environment`, `request_id`, `event`, and `duration_ms`. Severity matches
+exact structured values through `level:in(error)` and `level:in(critical,fatal)`;
+arbitrary message text does not establish severity. The queries use `_time:5m`
+or `_time:1m`, then group with `stats by (service) count()` and filter the count.
+Counts combine events sharing the same service value across hosts; callers must
+provide consistent service naming. Log annotations identify the service and count,
+without copying log messages, request IDs, or secret fields.
+
+The log group evaluates every minute. CriticalLogEvent has no `for:` delay and
+fires on the next evaluation with a matching event; it is not synchronous delivery.
+ErrorBurst avoids alerting for each ordinary error, though overlapping windows can
+keep an alert active. Later Alertmanager grouping/deduplication controls delivery.
+Every rule has stable `severity` and `source` labels and a concise summary with
+host/service context and the signal where practical.
+
+Upstream supports `type: vlogs` and the log-query statistics/filter pipeline.
+Each vmalert process uses a configured datasource URL, so metrics and logs must
+eventually use separate evaluator instances or explicitly verified datasource
+routing. A `vlogs` group alone does not route a query to VictoriaLogs. The explicit
+`_time` windows are intended for live evaluation; upstream does not support those
+custom windows for replay/backfill. [VictoriaLogs alerting documentation](https://docs.victoriametrics.com/victorialogs/vmalert/).
+
+Unit tests cover policy values, deterministic output, requested-service selection,
+escaping, thresholds, durations, labels, and basic YAML structure. No real
+VictoriaLogs, node_exporter, or vmalert runtime is exercised by these renderer
+tests. A later vertical slice must verify collector flags and labels, actual
+automatic restart signals, expression syntax against pinned releases, datasource
+routing, event-time mapping, ingestion latency/window boundaries, and end-to-end
+alert evaluation before installing or claiming this pack is active.
+
+## Grafana, alert deployment and Telegram: roadmap
 
 Provision datasources for all three signal backends; dashboards: Host Overview,
 Monitoring Station, Service Health, Storage, Updates / Security. A complete station
 must verify datasource queries rather than only Grafana HTTP readiness.
 
-The default alert pack will include:
+No generated rules are deployed or evaluated by the current installation.
+VictoriaLogs, VictoriaTraces, vmalert, Alertmanager, Grafana, Vector, vmagent,
+OTel Collector, and node_exporter installation remain explicitly unavailable.
+Rendering rules does not install a complete monitoring station or enable alerts.
 
-| Group | Rules |
+Beyond the locally generated host/service/log pack, later rules will include:
+
+| Group | Planned rules (not rendered yet) |
 | --- | --- |
-| Host | HostDown, CPUHigh, MemoryPressure, DiskWarning, DiskCritical, InodesCritical |
-| Service | ServiceDown, ServiceRestartLoop |
-| Logs | ErrorBurst, CriticalLogEvent |
 | Pipeline | LogsNotArriving, MetricsNotArriving, VectorForwardFailure, VmagentForwardFailure, MonitoringDiskPressure |
 | Updates | SecurityUpdatesPending, CriticalSecurityUpdatePending, SecurityUpdateInstallFailed, RebootRequired, MonitoringComponentUpdateAvailable, MonitoringAgentUpdateAvailable, OSReleaseNearEndOfSupport, OSReleaseUnsupported, UpdateCheckFailed, UpdateCheckStale |
-
-CPU >90% for 10 minutes, sustained memory pressure ~5 minutes, disk warning ≥70%,
-critical ≥80%. ErrorBurst aggregates several errors in a short interval; a structured
-critical/fatal event can alert immediately. No message for every error line.
-Document and normalize structured fields: timestamp, level, service, host,
-environment, request_id, event, duration_ms. Conventional normalized levels are
-`error` and `critical`. Log-derived metrics/rules need a verified log-query path;
-do not hand LogsQL to a PromQL-only rules engine and pretend it works.
 
 Optional Telegram: vmalert → Alertmanager → bot → channel/chat. Read bot token from
 credentials, group/deduplicate warning and critical alerts, include resolved alerts,

@@ -2,6 +2,18 @@
 
 ## 0.1.0-dev — unreleased
 
+- Add a single monitoring policy module for metrics `90d` retention and 20%
+  filesystem reserve, planned logs/traces `100y` logical retention with native
+  cleanup at 75% usage, and 60/70/80% operational disk states. Preserve the existing
+  VictoriaMetrics reserve calculation and installation behavior.
+- Add deterministic local vmalert YAML renderers for six host alerts, selected-unit
+  ServiceDown/ServiceRestartLoop alerts, and a separate VictoriaLogs `vlogs` pack
+  for ErrorBurst and CriticalLogEvent. Share policy defaults, validate/escape unit
+  names, and keep log contents and secrets out of annotations.
+- Extend install plans and documentation with a clearly separated planned
+  monitoring policy. Rule generation is implemented; rule deployment/evaluation,
+  collector setup, logs/traces installation, and notification delivery remain
+  unavailable. Add policy and renderer tests without claiming runtime validation.
 - Add a shared command/flag model, contextual help, and local Bash, Zsh, and Fish
   completion with nested commands, relevant options, enum values, and native path
   completion. Document user-managed completion installation without startup edits.

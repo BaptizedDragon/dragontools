@@ -3,6 +3,7 @@ const cli = @import("cli/parse.zig");
 const help = @import("cli/help.zig");
 const completion = @import("cli/completion.zig");
 const terminal = @import("cli/terminal.zig");
+const policy = @import("monitoring/policy.zig");
 fn print(io: std.Io, message: []const u8) void {
     std.Io.File.stdout().writeStreamingAll(io, message) catch {};
 }
@@ -50,7 +51,8 @@ fn execute(init: std.process.Init, options: cli.Options) !void {
         return error.NotImplemented;
     }
     if (options.plan) {
-        print(init.io, "Plan: detect Ubuntu 24.04/26.04 + systemd; ensure dedicated user and data directory; verify pinned VictoriaMetrics v1.151.0 archive and binary SHA-256; install versioned executable and hardened unit; restart only if changed/inactive; verify health and self-scraped metrics.\nStorage: 90d retention; 20% capacity reserve calculated on host.\nNetwork: 127.0.0.1:8428 only. Firewall and other components unavailable. No remote operations performed.\n");
+        print(init.io, try std.fmt.allocPrint(a, "Plan: detect Ubuntu 24.04/26.04 + systemd; ensure dedicated user and data directory; verify pinned VictoriaMetrics v1.151.0 archive and binary SHA-256; install versioned executable and hardened unit; restart only if changed/inactive; verify health and self-scraped metrics.\nStorage: {s} retention; {d}% capacity reserve calculated on host.\nNetwork: 127.0.0.1:8428 only. Firewall and other components unavailable. No remote operations performed.\n", .{ policy.metrics.retention, policy.metrics.reserve_percent }));
+        print(init.io, try policy.renderPlan(a));
         return;
     }
     var ssh: @import("system/ssh.zig").Ssh = .{ .allocator = a, .io = init.io, .options = options };
@@ -65,7 +67,7 @@ fn execute(init: std.process.Init, options: cli.Options) !void {
                 return err;
             };
             if (options.command == .install and report.changes == 0) print(init.io, "No changes required.\n");
-            print(init.io, try std.fmt.allocPrint(a, "VictoriaMetrics: healthy; self-scraped metrics queryable.\nStorage: 90d retention; free-space reserve {d} bytes (20% of filesystem capacity).\nNetwork: loopback:8428.\n", .{report.reserve_bytes}));
+            print(init.io, try std.fmt.allocPrint(a, "VictoriaMetrics: healthy; self-scraped metrics queryable.\nStorage: {s} retention; free-space reserve {d} bytes ({d}% of filesystem capacity).\nNetwork: loopback:8428.\n", .{ policy.metrics.retention, report.reserve_bytes, policy.metrics.reserve_percent }));
         },
         .status => print(init.io, try @import("monitoring/status.zig").status(r)),
         else => unreachable,
@@ -88,6 +90,8 @@ test {
     _ = @import("system/systemd.zig");
     _ = @import("components/victoriametrics.zig");
     _ = @import("monitoring/tests.zig");
+    _ = @import("monitoring/policy.zig");
+    _ = @import("monitoring/rules.zig");
     _ = @import("monitoring/verify.zig");
     _ = @import("system/services.zig");
     _ = @import("update/model.zig");

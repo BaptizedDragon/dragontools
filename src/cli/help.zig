@@ -1,5 +1,6 @@
 const std = @import("std");
 const spec = @import("spec.zig");
+const policy = @import("../monitoring/policy.zig");
 
 fn writePath(w: *std.Io.Writer, node: spec.Node) !void {
     if (node == .root) return w.writeAll("dragontool");
@@ -97,9 +98,8 @@ pub fn render(a: std.mem.Allocator, node: spec.Node) ![]const u8 {
         \\The information-only path performs no remote operations.
         \\
     );
+    try w.print("\nImplemented: VictoriaMetrics only, loopback:8428, retention {s}, reserve {d}%.\n", .{ policy.metrics.retention, policy.metrics.reserve_percent });
     try w.writeAll(
-        \\
-        \\Implemented: VictoriaMetrics only, loopback:8428, retention 90d, reserve 20%.
         \\Agents, firewall, TLS, Telegram and the other station components are unavailable.
         \\Unavailable options are validated, then rejected before SSH, including with --plan.
         \\

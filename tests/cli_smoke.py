@@ -2,6 +2,7 @@
 """Exercise the built CLI without allowing a real SSH connection."""
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -38,12 +39,13 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
         checked += 1
         return result
 
+    plan_args = ["monitoring", "install", "--host", "example.com", "--plan"]
+    plan_output = ""
     cases = [
         (["--help"], 0, "VictoriaMetrics only"),
         ([], 0, "Usage:"),
         (["wizard"], 1, "InteractiveTerminalRequired"),
-        (["monitoring", "install", "--host", "example.com", "--plan"], 0,
-         "No remote operations performed"),
+        (plan_args, 0, "No remote operations performed"),
         (["monitoring", "agents", "install", "--host", "example.com",
           "--service", "one.service", "--service", "two.service"], 1, "NotImplemented"),
         (["monitoring", "agents", "verify", "--host", "example.com"], 1, "NotImplemented"),
@@ -58,9 +60,40 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
         (["wizard", "--host", "REDACTION-SENTINEL"], 1, "UnknownFlag"),
         (["monitoring", "verify", "--host", "example.com", "--tls", "manual"], 1, "FlagNotAllowed"),
         (["monitoring", "install", "--host", "example.com", "--ssh-op-path", "REDACTION-SENTINEL"], 1, "InvalidReference"),
+        (["monitoring", "agents", "install", "--host", "example.com",
+          "--service", "one.service", "--plan"], 1, "NotImplemented"),
+        (["monitoring", "firewall", "--host", "example.com", "--plan"], 1, "NotImplemented"),
+        (["monitoring", "install", "--host", "example.com", "--tls", "manual", "--plan"], 1, "NotImplemented"),
     ]
     for args, code, expected in cases:
-        local_run(args, code, expected)
+        result = local_run(args, code, expected)
+        if args == plan_args:
+            plan_output = result.stdout
+
+    # Policy describes future native retention and alerts; the actual install plan
+    # must continue to promise only the currently available VictoriaMetrics slice.
+    policy_header = re.search(r"Monitoring policy[^\n]*:\n", plan_output)
+    assert policy_header is not None, plan_output
+    implemented_plan = plan_output[:policy_header.start()]
+    assert "VictoriaMetrics" in implemented_plan and "pinned" in implemented_plan
+    assert "127.0.0.1:8428" in implemented_plan, implemented_plan
+    for component in ("VictoriaLogs", "VictoriaTraces", "vmalert", "Alertmanager", "Grafana"):
+        assert not re.search(rf"\binstall(?:ing)?\s+{component}\b", implemented_plan, re.I), implemented_plan
+    policy = plan_output[policy_header.end():].lower()
+    policy_lines = policy.splitlines()
+    metrics = next((line for line in policy_lines if re.match(r"\s*metrics\b", line)), "")
+    assert "90d" in metrics and "20%" in metrics and "reserve" in metrics, metrics
+    for signal in ("logs", "traces"):
+        retention = next((line for line in policy_lines if re.match(rf"\s*{signal}\b", line)), "")
+        for required in ("100y", "logical", "75%", "native"):
+            assert required in retention, (signal, required, retention)
+    assert "planned" in policy, policy
+    for level, percentage in (("info", 60), ("warning", 70), ("critical", 80)):
+        assert re.search(rf"\b{level}\s*[:=]?\s*{percentage}%|\b{percentage}%\s*{level}\b", policy), (level, policy)
+    unavailable = [line for line in policy_lines if re.search(r"not (?:yet )?(?:installed|deployed)", line)]
+    for component in ("logs", "traces", "alerts"):
+        assert any(component in line for line in unavailable), (component, policy)
+    checked += 1
 
     help_paths = [
         ["monitoring"], ["monitoring", "install"], ["monitoring", "verify"],

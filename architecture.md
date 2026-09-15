@@ -58,6 +58,36 @@ maintained as independent command trees. Generated scripts use native shell path
 completion for path-valued flags. Generation needs no shell executable or network,
 and installation never edits startup files automatically.
 
+## Monitoring policy and local rule generation
+
+`monitoring/policy.zig` is the single source of truth for fixed storage and alert
+defaults. Metrics retain `90d` with the existing overflow-safe
+`ceil(filesystem capacity / 5)` reserve. Logs and traces each have a logical `100y`
+retention limit and a future native cleanup target of 75% filesystem usage. The
+operational disk states are 60% info, 70% warning, and 80% critical. Native cleanup
+at 75% is a separate future storage control; no manual deletion is introduced.
+
+`monitoring/rules.zig` is a pure, deterministic local renderer with small concrete
+functions returning YAML. It emits Prometheus-compatible host/service rules and
+a separate VictoriaLogs file with `type: vlogs`. It consumes an explicit validated
+service-unit list; no services means no service rules. Unit identifiers are encoded
+for PromQL and YAML without forming executable shell text. Annotations expose
+conditions and signal context, never raw log contents or secrets. Rules have stable
+severity/source labels and avoid request-level labels.
+
+The generated pack comprises HostDown, CPUHigh, MemoryPressure, DiskWarning,
+DiskCritical, InodesCritical, ServiceDown, ServiceRestartLoop, ErrorBurst, and
+CriticalLogEvent. The informational disk state is modeled but does not add a
+DiskInfo alert to this pack. Policy/rendering tests run without SSH or a real
+evaluator. No CLI export command, remote rule installation, collector setup,
+evaluation, or Alertmanager delivery is implemented by this module.
+
+The ordinary install plan separates the available VictoriaMetrics workflow from
+the planned monitoring policy and states that logs, traces, and alerts are not
+installed. A successful installation continues to mean only that the existing
+VictoriaMetrics slice passed its checks. Unsupported component paths and flags
+still fail before SSH; generated YAML does not make a component available.
+
 ## Component layout and lifecycle
 
 VictoriaMetrics `v1.151.0` is pinned for both Linux architectures. Archive digests
@@ -159,7 +189,9 @@ by policy; automatic reboot is disabled. None of this policy changes hosts yet.
 
 Unit tests cover parsing, redaction, quoting, units, storage, artifact plans and
 update-state parsing, as well as CLI metadata, completion, contextual help and
-scripted wizard validation/defaults/cancellation/command previews. CLI smoke tests
+scripted wizard validation/defaults/cancellation/command previews. Monitoring tests
+cover policy constants, deterministic host/service/log rule generation, thresholds,
+stable labels, and service identifier validation/escaping. CLI smoke tests
 check non-TTY behavior and the local help/completion boundary. Fake-remote tests
 cover first/second run, drift and failures;
 these prove sequencing, not actual systemd behavior. Disposable Ubuntu integration

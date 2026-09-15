@@ -4,11 +4,12 @@ const install = @import("install.zig");
 const host = @import("../system/host.zig");
 const vm = @import("../components/victoriametrics.zig");
 const fs = @import("../system/filesystem.zig");
+const policy = @import("policy.zig");
 pub fn health(a: std.mem.Allocator, r: remote.Remote, report: *install.Report, arch: host.Arch) !void {
     const unit = try @import("../system/systemd.zig").render(a, report.reserve_bytes);
     const command = try remote.shell(a, &.{
-        "sh",                                                      "-eu",                           "-c",
-        \\expected=$1; unit=$2; reserve=$3
+        "sh",                                                      "-eu",                                           "-c",
+        \\expected=$1; unit=$2; reserve=$3; retention=$4
         \\test -z "$(systemctl show -p DropInPaths --value dragontools-victoriametrics.service)"
         \\systemctl is-active --quiet dragontools-victoriametrics.service
         \\systemctl is-enabled --quiet dragontools-victoriametrics.service
@@ -18,7 +19,7 @@ pub fn health(a: std.mem.Allocator, r: remote.Remote, report: *install.Report, a
         \\pid=$(systemctl show -p MainPID --value dragontools-victoriametrics.service)
         \\test "$pid" -gt 0
         \\actual_args=$(tr '\000' '\n' < "/proc/$pid/cmdline")
-        \\expected_args=$(printf '%s\n' /opt/dragontools/components/victoriametrics/current/victoria-metrics-prod -storageDataPath=/var/lib/dragontools/victoriametrics -retentionPeriod=90d "-storage.minFreeDiskSpaceBytes=$reserve" -httpListenAddr=127.0.0.1:8428 -selfScrapeInterval=15s)
+        \\expected_args=$(printf '%s\n' /opt/dragontools/components/victoriametrics/current/victoria-metrics-prod -storageDataPath=/var/lib/dragontools/victoriametrics "$retention" "-storage.minFreeDiskSpaceBytes=$reserve" -httpListenAddr=127.0.0.1:8428 -selfScrapeInterval=15s)
         \\test "$actual_args" = "$expected_args"
         \\printf '%s  %s\n' "$expected" "/proc/$pid/exe" | sha256sum --check --status
         \\test "$(readlink /opt/dragontools/components/victoriametrics/current)" = v1.151.0
@@ -35,8 +36,8 @@ pub fn health(a: std.mem.Allocator, r: remote.Remote, report: *install.Report, a
         \\done
         \\printf '%s' "$result"
         ,
-        "dragontools-health",                                      vm.artifact(arch).binary_sha256, unit,
-        try std.fmt.allocPrint(a, "{d}", .{report.reserve_bytes}),
+        "dragontools-health",                                      vm.artifact(arch).binary_sha256,                 unit,
+        try std.fmt.allocPrint(a, "{d}", .{report.reserve_bytes}), "-retentionPeriod=" ++ policy.metrics.retention,
     });
     const output = try report.call(r, .health, command);
     try validateMetrics(a, output);

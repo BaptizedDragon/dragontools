@@ -1,7 +1,6 @@
 const std = @import("std");
 pub fn reserve(total: u64) !u64 {
-    if (total == 0) return error.InvalidCapacity;
-    return total / 5 + @intFromBool(total % 5 != 0);
+    return @import("../monitoring/policy.zig").metricsReserve(total);
 }
 pub fn capacity(output: []const u8) !u64 {
     var tokens = std.mem.tokenizeAny(u8, output, " \n\t");

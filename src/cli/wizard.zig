@@ -2,6 +2,7 @@ const std = @import("std");
 const parse = @import("parse.zig");
 const spec = @import("spec.zig");
 const remote = @import("../system/remote.zig");
+const policy = @import("../monitoring/policy.zig");
 
 /// The caller owns input storage and the operation arena. The wizard only reads,
 /// writes, and returns ordinary CLI arguments; it never executes an operation.
@@ -143,10 +144,10 @@ const welcome =
     \\
 ;
 
-const overview =
+const overview = std.fmt.comptimePrint(
     \\Implemented today
     \\  VictoriaMetrics: metrics on the station, bound to 127.0.0.1:8428.
-    \\  Metrics retention: 90 days. Reserve: 20% of data filesystem capacity.
+    \\  Metrics retention: {d} days. Reserve: {d}% of data filesystem capacity.
     \\  Below the reserve, ingestion stops; this is not a hard disk quota.
     \\  SSH installation with strict host-key checks, a dedicated service user,
     \\  pinned and checksum-verified binaries, and systemd hardening.
@@ -166,7 +167,7 @@ const overview =
     \\    maintenance checker   update and security checks
     \\  Security: source-IP restrictions, TLS, Grafana authentication,
     \\    bounded journald, and dedicated hardening for each new component.
-    \\  Intended defaults: logs/traces disk-bound; disk warning 70%, critical 80%;
+    \\  Intended defaults: logs/traces disk-bound; disk warning {d}%, critical {d}%;
     \\    automatic OS security updates; no automatic reboot;
     \\    component updates notification only; Telegram optional.
     \\
@@ -175,7 +176,9 @@ const overview =
     \\roadmap configuration flags currently fail before SSH, including --plan.
     \\This overview contacts no hosts or secret providers.
     \\
-;
+,
+    .{ policy.metrics.retention_days, policy.metrics.reserve_percent, policy.disk.warning_percent, policy.disk.critical_percent },
+);
 
 /// Returns validated argv without the executable name, or null on cancellation
 /// or an information-only path. CLI help returns --help for normal dispatch.
@@ -277,7 +280,7 @@ fn workflow(input: Input, command: spec.Command) !?[]const []const u8 {
     var step: Step = .host;
     var history: std.ArrayList(Step) = .empty;
     defer history.deinit(input.a);
-    if (command == .install) try input.write("\nThis release installs the VictoriaMetrics slice only. Metrics retention is\n90 days, with a 20% data filesystem reserve. These defaults are fixed.\nLogs/traces will use disk-bound retention in a later release.\n");
+    if (command == .install) try input.write(std.fmt.comptimePrint("\nThis release installs the VictoriaMetrics slice only. Metrics retention is\n{d} days, with a {d}% data filesystem reserve. These defaults are fixed.\nLogs/traces will use disk-bound retention in a later release.\n", .{ policy.metrics.retention_days, policy.metrics.reserve_percent }));
     if (command == .agents_install) try input.write("\nAgent installation is unavailable in this release; even --plan is rejected\nbefore SSH. This helper can collect and preview future CLI configuration.\nThe intended install includes Vector, vmagent, OpenTelemetry Collector,\nhost metrics and a maintenance/update checker. It must inspect and bound\njournald and verify signal arrival before reporting installation success.\n");
     if (command == .firewall) try input.write("\nFirewall management is unavailable; even --plan is rejected before SSH.\nIntended policy: admin IPs may access SSH and Grafana; agent IPs may submit\ntelemetry only. DragonTools will manage monitoring-related rules only and\nmust preserve unrelated administrator configuration. This helper previews\nfuture configuration; it cannot claim that access restrictions are applied.\n");
     while (true) {
@@ -454,7 +457,7 @@ fn preview(input: Input, args: []const []const u8, options: parse.Options) !void
     }, options.host, options.user, options.port });
     try input.write(summary);
     if (options.command == .install) {
-        try input.write(try std.fmt.allocPrint(input.a, "Domain: {s}\nAdmin IPs: {d}\nAgent IPs: {d}\nTLS: {s}\nTelegram: {s}\nStorage: metrics 90 days; 20% data filesystem reserve.\nLogs and traces: planned disk-bound retention, unavailable.\n", .{ options.domain orelse "none", options.admin_ips.items.len, options.agent_ips.items.len, options.tls orelse "none", if (options.telegram_token_op != null) "requested (unavailable)" else "disabled" }));
+        try input.write(try std.fmt.allocPrint(input.a, "Domain: {s}\nAdmin IPs: {d}\nAgent IPs: {d}\nTLS: {s}\nTelegram: {s}\nStorage: metrics {d} days; {d}% data filesystem reserve.\nLogs and traces: planned disk-bound retention, unavailable.\n", .{ options.domain orelse "none", options.admin_ips.items.len, options.agent_ips.items.len, options.tls orelse "none", if (options.telegram_token_op != null) "requested (unavailable)" else "disabled", policy.metrics.retention_days, policy.metrics.reserve_percent }));
     }
     if (options.command == .agents_install) try input.write(try std.fmt.allocPrint(input.a, "Station IP: {s}\nServices: {d}\n", .{ options.station_ip orelse "none", options.services.items.len }));
     if (options.command == .firewall) try input.write(try std.fmt.allocPrint(input.a, "Admin IPs: {d}\nAgent IPs: {d}\nNo firewall rules can be applied in this release.\n", .{ options.admin_ips.items.len, options.agent_ips.items.len }));
