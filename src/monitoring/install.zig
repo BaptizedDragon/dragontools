@@ -4,16 +4,20 @@ const host = @import("../system/host.zig");
 const fs = @import("../system/filesystem.zig");
 const vm = @import("../components/victoriametrics.zig");
 const vl = @import("../components/victorialogs.zig");
+const vt = @import("../components/victoriatraces.zig");
 const units = @import("../system/systemd.zig");
 const vl_unit = @import("../components/victorialogs_unit.zig");
+const vt_unit = @import("../components/victoriatraces_unit.zig");
 pub const Component = enum {
     victoriametrics,
     victorialogs,
+    victoriatraces,
 
     pub fn name(self: Component) []const u8 {
         return switch (self) {
             .victoriametrics => "VictoriaMetrics",
             .victorialogs => "VictoriaLogs",
+            .victoriatraces => "VictoriaTraces",
         };
     }
 };
@@ -44,59 +48,81 @@ pub const Report = struct {
     }
 };
 pub const capacity_command = "stat -f -c '%b %S' /var/lib/dragontools/victoriametrics";
-const directories =
+// These helpers instantiate only the three concrete managed component paths.
+// Existing directories receive only the metadata change they actually need.
+const parent_directories =
     \\set -eu
     \\changed=0
     \\for dir in /var/lib/dragontools /opt/dragontools /opt/dragontools/components; do
-    \\  test ! -L "$dir"
-    \\  if test ! -d "$dir" || test "$(stat -c '%u:%g:%a' "$dir")" != 0:0:755; then install -d -o root -g root -m 755 "$dir"; changed=1; fi
+    \\  test ! -L "$dir" || exit 43
+    \\  if test -e "$dir"; then
+    \\    test -d "$dir" || exit 40
+    \\    if test "$(stat -c '%u:%g' "$dir")" != 0:0; then chown root:root "$dir"; changed=1; fi
+    \\    if test "$(stat -c '%a' "$dir")" != 755; then chmod 755 "$dir"; changed=1; fi
+    \\  else
+    \\    install -d -o root -g root -m 755 "$dir"
+    \\    changed=1
+    \\  fi
     \\done
-    \\dir=/var/lib/dragontools/victoriametrics
-    \\test ! -L "$dir"
-    \\if test ! -d "$dir" || test "$(stat -c '%U:%G:%a' "$dir")" != dt-victoriametrics:dt-victoriametrics:750; then install -d -o dt-victoriametrics -g dt-victoriametrics -m 750 "$dir"; changed=1; fi
-    \\if test "$changed" = 1; then printf changed; else printf unchanged; fi
 ;
-const victorialogs_directories =
-    \\set -eu
-    \\dir=/var/lib/dragontools/victorialogs
-    \\test ! -L "$dir" || exit 43
-    \\if test ! -d "$dir" || test "$(stat -c '%U:%G:%a' "$dir")" != dt-victorialogs:dt-victorialogs:750; then
-    \\  install -d -o dt-victorialogs -g dt-victorialogs -m 750 "$dir"
-    \\  printf changed
-    \\else
-    \\  printf unchanged
-    \\fi
-;
-pub const activate =
-    \\set -eu
-    \\changed=0
-    \\if test -e /var/lib/dragontools/victoriametrics-restart-required; then
-    \\  systemctl daemon-reload
-    \\  systemctl restart dragontools-victoriametrics.service
-    \\  changed=1
-    \\elif ! systemctl is-active --quiet dragontools-victoriametrics.service; then
-    \\  systemctl start dragontools-victoriametrics.service
-    \\  changed=1
-    \\fi
-    \\if ! systemctl is-enabled --quiet dragontools-victoriametrics.service; then systemctl enable dragontools-victoriametrics.service >/dev/null 2>&1; changed=1; fi
-    \\if test "$changed" = 1; then printf changed; else printf unchanged; fi
-;
-pub const activate_victorialogs =
-    \\set -eu
-    \\changed=0
-    \\test ! -L /var/lib/dragontools/victorialogs-restart-required || exit 43
-    \\if test -e /var/lib/dragontools/victorialogs-restart-required; then
-    \\  test -f /var/lib/dragontools/victorialogs-restart-required || exit 40
-    \\  systemctl daemon-reload
-    \\  systemctl restart dragontools-victorialogs.service
-    \\  changed=1
-    \\elif ! systemctl is-active --quiet dragontools-victorialogs.service; then
-    \\  systemctl start dragontools-victorialogs.service
-    \\  changed=1
-    \\fi
-    \\if ! systemctl is-enabled --quiet dragontools-victorialogs.service; then systemctl enable dragontools-victorialogs.service >/dev/null 2>&1; changed=1; fi
-    \\if test "$changed" = 1; then printf changed; else printf unchanged; fi
-;
+fn dataDirectory(comptime component: []const u8) []const u8 {
+    return std.fmt.comptimePrint(
+        \\dir=/var/lib/dragontools/{s}; owner=dt-{s}
+        \\test ! -L "$dir" || exit 43
+        \\if test -e "$dir"; then
+        \\  test -d "$dir" || exit 40
+        \\  if test "$(stat -c '%u:%g' "$dir")" != "$(id -u "$owner"):$(id -g "$owner")"; then chown "$owner:$owner" "$dir"; changed=1; fi
+        \\  if test "$(stat -c '%a' "$dir")" != 750; then chmod 750 "$dir"; changed=1; fi
+        \\else
+        \\  install -d -o "$owner" -g "$owner" -m 750 "$dir"
+        \\  changed=1
+        \\fi
+        \\if test "$changed" = 1; then printf changed; else printf unchanged; fi
+    , .{ component, component });
+}
+const directories = parent_directories ++ "\n" ++ dataDirectory("victoriametrics");
+const victorialogs_directories = "set -eu\nchanged=0\n" ++ dataDirectory("victorialogs");
+const victoriatraces_directories = "set -eu\nchanged=0\n" ++ dataDirectory("victoriatraces");
+
+// NeedDaemonReload can be global after enable/disable. It requires a reload,
+// never a component restart. Only the component's binary/unit writer records
+// restart intent, which survives a reload performed for another component.
+fn activation(comptime component: []const u8) []const u8 {
+    return std.fmt.comptimePrint(
+        \\set -eu
+        \\unit=dragontools-{s}.service; pending=/var/lib/dragontools/{s}-restart-required
+        \\changed=0
+        \\test ! -L "$pending" || exit 43
+        \\if test -e "$pending"; then test -f "$pending" && test "$(stat -c '%u:%g' "$pending")" = 0:0 || exit 40; fi
+        \\enabled_now=0
+        \\enabled_state=$(systemctl is-enabled "$unit") || {{ test "$enabled_state" = disabled || exit 1; }}
+        \\case "$enabled_state" in enabled|disabled|enabled-runtime) ;; *) exit 1 ;; esac
+        \\if test "$enabled_state" != enabled; then
+        \\  systemctl enable --no-reload "$unit" >/dev/null 2>&1
+        \\  enabled_now=1
+        \\  changed=1
+        \\fi
+        \\reload=$(systemctl show -p NeedDaemonReload --value "$unit")
+        \\loaded=$(systemctl show -p LoadState --value "$unit")
+        \\case "$reload" in yes|no) ;; *) exit 1 ;; esac
+        \\if test "$reload" = yes || test "$loaded" = not-found || test "$enabled_now" = 1; then
+        \\  systemctl daemon-reload
+        \\  changed=1
+        \\fi
+        \\test "$(systemctl show -p LoadState --value "$unit")" = loaded
+        \\if test -e "$pending"; then
+        \\  systemctl restart "$unit"
+        \\  changed=1
+        \\elif ! systemctl is-active --quiet "$unit"; then
+        \\  systemctl start "$unit"
+        \\  changed=1
+        \\fi
+        \\if test "$changed" = 1; then printf changed; else printf unchanged; fi
+    , .{ component, component });
+}
+pub const activate = activation("victoriametrics");
+pub const activate_victorialogs = activation("victorialogs");
+pub const activate_victoriatraces = activation("victoriatraces");
 pub fn install(a: std.mem.Allocator, r: remote.Remote, report: *Report) !void {
     report.component = null;
     const machine = try host.parse(try report.call(r, .detect, host.detect_command));
@@ -119,4 +145,13 @@ pub fn install(a: std.mem.Allocator, r: remote.Remote, report: *Report) !void {
     _ = try report.call(r, .activate, activate_victorialogs);
     try @import("victorialogs_verify.zig").health(a, r, report, machine.arch);
     _ = try report.call(r, .finalize, "rm -f /var/lib/dragontools/victorialogs-restart-required");
+
+    report.component = .victoriatraces;
+    _ = try report.call(r, .user, host.victoriatraces_preflight ++ "\n" ++ @import("../system/users.zig").ensure_victoriatraces);
+    _ = try report.call(r, .directories, victoriatraces_directories);
+    _ = try report.call(r, .binary, try vt.binaryCommand(a, machine.arch));
+    _ = try report.call(r, .unit, try @import("../system/files.zig").writeCommand(a, vt_unit.unit_path, try vt_unit.render(a), vt.pending));
+    _ = try report.call(r, .activate, activate_victoriatraces);
+    try @import("victoriatraces_verify.zig").health(a, r, report, machine.arch);
+    _ = try report.call(r, .finalize, "rm -f /var/lib/dragontools/victoriatraces-restart-required");
 }

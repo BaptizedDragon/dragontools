@@ -1,10 +1,10 @@
 # Design decisions and staged delivery
 
-## Current milestone: metrics and logs implemented
+## Current milestone: metrics, logs, and traces implemented
 
-The foundation delivers two concrete slices, VictoriaMetrics and VictoriaLogs,
-while rejecting unfinished integrations before connecting. Exit 0 from install
-means both passed verification; it never means the full requested station exists.
+The monitoring foundation delivers three concrete slices: VictoriaMetrics, VictoriaLogs, and
+VictoriaTraces. Unfinished integrations fail before connecting. Exit 0 from install
+means all three passed verification; it never means the full requested station exists.
 `status` is a read-only service-state summary; use `verify` to test health.
 Help and `--plan` require no SSH. No generic primitives are public commands.
 
@@ -15,7 +15,7 @@ dependencies. Hostnames, users, paths, service units, IPs and secret references 
 validated; dynamic values are independently shell-quoted. Unknown/duplicate scalar
 flags fail. Repeated list flags are supported.
 
-The full target is Ubuntu 24.04/26.04, amd64/arm64; only those pass detection.
+The monitoring target is Ubuntu 24.04/26.04, amd64/arm64; only those pass its detection.
 Controller build targets are macOS/Linux amd64/arm64. Cross-compilation does not
 prove remote runtime compatibility. No VM run is inferred from a passing unit test.
 
@@ -30,7 +30,7 @@ does not introduce a generic public CLI framework or a resource DSL.
 
 The wizard offers monitoring install, agents, verify, status, firewall guidance,
 architecture information, and command-line help. Station setup defaults to the
-implemented VictoriaMetrics and VictoriaLogs slices; roadmap settings require explicit opt-in and
+implemented VictoriaMetrics, VictoriaLogs, and VictoriaTraces slices; roadmap settings require explicit opt-in and
 still fail before SSH. Agent station entry remains a numeric IP, matching
 `--station-ip`. Unsupported components and protected-file credential inputs do not
 become implemented merely because an interactive interface exists.
@@ -52,54 +52,138 @@ Shell completion is local, deterministic, side-effect free, and never contacts
 remote hosts or secret providers. `completion bash|zsh|fish` writes a script to
 stdout from the shared spec, with nested commands, only relevant flags, known enum
 values, and native shell path completion. The controller gains no shell dependency.
-Users install the generated file and configure their own shell; v0.x never edits
-startup files. Contextual `--help` works for each command and command group.
+Users install the generated file and configure their own shell; completion setup
+never edits startup files. Contextual `--help` works for each command and command group.
 
 Scripted input/output unit tests cover the helper without spawning terminals.
 Completion metadata/rendering tests and CLI smoke tests cover hierarchy, enum and
 flag contexts, non-TTY behavior, and local-only help/completion. These UX changes
 leave the remote component and integration-validation boundary unchanged.
 
+## Host utility: install Oh My Zsh
+
+`host install-oh-my-zsh` is an independent convenience command for an existing
+Ubuntu/Debian account. It does not enter `monitoring install`, manage services,
+change a login shell, create users, or introduce a general package/dotfile system.
+The shared CLI metadata provides parsing, help and completion; the command has a
+small local plan, not a generic host-planning framework.
+
+`--ssh-host` is a native OpenSSH connection mode. DragonTools passes the alias to
+OpenSSH and leaves HostName, User, Port, IdentityAgent, IdentityFile, ProxyJump and
+other configuration resolution to it. This supports quoted agent socket paths
+containing spaces without a Zig SSH-config parser. The user's SSH config is trusted,
+including proxy commands. Strict host-key checks, noninteractive operation, and
+suppression of raw remote stderr remain enforced. The direct `--host` fallback
+retains explicit `--user`, `--port` and authentication options without inherited
+config. Mixing alias and direct connection options fails before SSH.
+
+Inspection runs as the SSH login user, so a default target is not accidentally
+changed to root by transport-level sudo. Normal account lookup determines the
+target UID, group, home and current shell, including for `--target-user`; home paths
+are never inferred from account names. Missing accounts fail. Home writes run as
+the target account. Missing packages require root or noninteractive `sudo -n`;
+selecting another target requires root or suitable noninteractive sudo access.
+The home must be an existing directory owned by that account. Its ancestors must
+be owned by root or that account, with no symlink components or group/world-writable
+directories (including `/`). Account home and shell
+paths use conservative absolute ASCII path segments (letters, digits, `.`, `_`,
+`-`), with no spaces or traversal segments. Conflicting `.oh-my-zsh` or `.zshrc` path types are
+refused rather than replaced. Account policy and existing ownership remain intact.
+
+zsh is installed only when missing, using noninteractive apt on Ubuntu/Debian.
+The command also installs curl or CA certificates only when required for a missing
+Oh My Zsh download. Apt indexes are refreshed only when a missing package requires
+installation. Basic account and filesystem utilities, tar, and SHA-256 tooling
+are prerequisites. This is concrete package handling for this command, not a
+generic package manager abstraction.
+
+New Oh My Zsh installations pin commit
+`0ee67f042872d1dfab74270c31867771ca35aef4` from the
+[official upstream repository](https://github.com/ohmyzsh/ohmyzsh/commit/0ee67f042872d1dfab74270c31867771ca35aef4).
+The official immutable [source archive](https://codeload.github.com/ohmyzsh/ohmyzsh/tar.gz/0ee67f042872d1dfab74270c31867771ca35aef4)
+has SHA-256 `73a7017cd5cde1d76b4044df9f100c6aeae0feb9820e8529f8c90063d2af3cb9`,
+calculated locally from that archive. Upstream does not publish an independent
+checksum for this source snapshot; this pin trusts the reviewed upstream account
+and archive, not an independent publisher signature. Runtime installation uses
+the literal revision and digest, HTTPS-only bounded downloads, and private staging.
+The reviewed archive contains regular files, directories and nine internal relative
+symlinks, with no hardlinks, devices, traversal or members beneath a symlink. The
+digest is checked before extraction; unrecognized content is not accepted.
+It never executes the upstream interactive installer or pipes a download to a shell.
+The installed source has no `.git` checkout and is not updated by this command.
+
+Recognizable existing Oh My Zsh directories are left untouched, including local
+changes and branch state. Existing regular `.zshrc` files are preserved byte-for-byte,
+with their ownership and permissions unchanged, even if they do not load Oh My Zsh.
+An absent `.zshrc` receives only the usual `ZSH="$HOME/.oh-my-zsh"`,
+`ZSH_THEME="robbyrussell"`, `plugins=(git)` and `source "$ZSH/oh-my-zsh.sh"`
+configuration. Publication must not overwrite a file that appears concurrently.
+The new `.zshrc` is owned by the target account with mode 0644.
+The result reports the current shell and a manual `chsh` suggestion when appropriate;
+DragonTools never runs it.
+
+Each run inspects actual state. An unchanged run makes no package, download,
+directory, file-content or ownership changes and reports `No changes required.`.
+Private download/extraction staging prevents a partial final directory from being
+mistaken for a complete installation. Rerunning after package or directory creation
+continues from observed state and creates only missing pieces; it never deletes
+unrelated temporary user data. Ordinary failures clean up their own private staging.
+An uncatchable interruption can leave a unique `.oh-my-zsh.dragontool.*` or
+`.zshrc.dragontool.*` directory; reruns use fresh staging and do not adopt or purge
+those leftovers. Local `--plan` makes no SSH connection and therefore
+does not claim to know the alias's resolved user, home, or existing remote state.
+
+Local unit/fake-remote and CLI checks do not prove compatibility with a real apt
+transaction, SSH configuration, or user's shell environment. Disposable-host
+integration remains a separate validation gate described in the integration checklist.
+
 ## Storage
 
 `src/monitoring/policy.zig` defines the fixed policy values consumed by the
-VictoriaMetrics and VictoriaLogs components, local alert renderers, and install plan.
+three storage components, local alert rendering, and the install plan.
 
 | Signal | Policy | State |
 | --- | --- | --- |
 | Metrics | `-retentionPeriod=90d`, `-storage.minFreeDiskSpaceBytes=ceil(capacity/5)` (20% reserve) | Implemented installation; existing behavior preserved |
-| Logs | Maximum safely fitting history, `-retentionPeriod=100y`, `-retention.maxDiskUsagePercent=75` | Implemented VictoriaLogs native retention |
-| Traces | Maximum safely fitting history, logical `100y` limit, native cleanup at 75% filesystem usage | Code-level policy only; installation and pinned native flags are deferred |
+| Logs | `-retentionPeriod=100y`, `-retention.maxDiskUsagePercent=75`; the pinned implementation budgets log partition bytes against total filesystem capacity | Implemented VictoriaLogs native retention |
+| Traces | `-retentionPeriod=100y`, `-retention.maxDiskUsagePercent=75`; the pinned implementation budgets trace partition bytes against total filesystem capacity | Implemented VictoriaTraces native retention |
 
 Capacity uses `stat -f` on the actual data directory; available space is not mistaken
 for capacity. No automatic storage-file deletion. Reserve is a stop-ingestion
 threshold, not a quota. A resized filesystem requires reinstallation; verification
-recomputes the expected unit and catches a stale reserve. Future shared-filesystem
-allocation must budget logs/traces together, rather than give each the same entire
-free space budget. Metrics and logs currently share a filesystem unless the
+recomputes the expected unit and catches a stale reserve. Shared-filesystem
+capacity must be budgeted across all three backends. They share a filesystem unless the
 operator mounts separate storage; their reserve and cleanup settings do not
 isolate them from one another or from other writers.
 
 Filesystem states: below 60% healthy; ≥60% informational; ≥70% warning; ≥80%
-critical. The separate 75% cleanup target uses native VictoriaLogs retention;
-VictoriaTraces support and its pinned flags are still deferred. Logical
+critical. The native logs/traces settings are both 75%, with the partition-budget
+distinction described below. Logical
 `100y` retention expresses a long maximum history, not a promise of 100 years of
 stored data. No manual VictoriaLogs/VictoriaTraces file deletion is permitted.
 VictoriaMetrics continues to use its free-space reserve and 90-day retention.
 
-The local renderer implements warning and critical disk rules; the informational
-60% state is defined in policy but has no rule in this bounded pack. No alert
-evaluation or traces cleanup runs on the target yet. `monitoring install --plan`
-describes both installed components and lists unavailable integrations separately.
+All disk alert states remain policy only: host rendering is unavailable until the
+Vector metric contract is verified. No alert evaluation runs on the target.
+`monitoring install --plan` describes all three installed components and lists
+unavailable integrations separately.
 There are no new CLI policy overrides or rule-deployment options.
 
-VictoriaLogs deletes oldest daily partitions when the containing filesystem
-exceeds 75% usage. Its periodic checks and retention of at least the newest two
-days mean usage can exceed the target. A full disk can leave storage read-only,
-so adequate capacity and headroom remain necessary. DragonTools does not enable
-the mutually exclusive byte-based retention option or manually remove partitions.
-These controls keep the longest useful history that fits; they do not guarantee
-100 years or a strict 75% ceiling. [Upstream retention controls and limitations](https://docs.victoriametrics.com/victorialogs/#retention-by-disk-space-usage).
+Both VictoriaLogs `v1.52.0` and the storage dependency pinned by VictoriaTraces
+`v0.11.0` implement the percentage setting as a budget: 75% of total filesystem
+capacity compared with that backend's own partition bytes (compressed data and
+indexes). The comparison excludes unrelated writers. Every roughly 10 seconds
+with jitter, cleanup can remove oldest partitions while preserving the newest two
+daily partitions; gaps can make these span more than two calendar days.
+
+This corrects the previous broad description of a total-filesystem-usage trigger.
+Neither pinned release implements that global trigger with this flag. Their
+independent budgets can together exceed available storage, and unrelated writers
+can fill the disk earlier. The policy goal remains long safely fitting history,
+but the implemented control is a native partition budget, not a shared-disk
+ceiling. `100y` is a logical limit, not a history guarantee. No mutually exclusive
+byte-based retention setting or manual deletion is added. Capacity/headroom
+planning remains necessary. [VictoriaLogs pinned implementation](https://github.com/VictoriaMetrics/VictoriaLogs/blob/v1.52.0/lib/logstorage/storage.go#L826-L871), [VictoriaTraces pinned storage dependency](https://github.com/VictoriaMetrics/VictoriaLogs/blob/6ae2da3c11f3/lib/logstorage/storage.go#L826-L871).
 
 Verified upstream sources for implemented flags and artifact pins:
 
@@ -109,10 +193,12 @@ Verified upstream sources for implemented flags and artifact pins:
 - [Pinned release metadata](https://api.github.com/repos/VictoriaMetrics/VictoriaMetrics/releases/tags/v1.151.0)
 - [Pinned VictoriaLogs release](https://github.com/VictoriaMetrics/VictoriaLogs/releases/tag/v1.52.0)
 - [VictoriaLogs release metadata](https://api.github.com/repos/VictoriaMetrics/VictoriaLogs/releases/tags/v1.52.0)
+- [Pinned VictoriaTraces release](https://github.com/VictoriaMetrics/VictoriaTraces/releases/tag/v0.11.0)
+- [VictoriaTraces release metadata](https://api.github.com/repos/VictoriaMetrics/VictoriaTraces/releases/tags/v0.11.0)
 
-Checksums are embedded in `src/components/victoriametrics.zig` and
-`src/components/victorialogs.zig`. VictoriaLogs `v1.52.0` is a deliberately reviewed
-stable pin; installation never resolves mutable `latest` metadata or downloads
+Checksums are embedded in `src/components/victoriametrics.zig`,
+`src/components/victorialogs.zig`, and `src/components/victoriatraces.zig`. Each is a
+deliberately reviewed release pin; installation never resolves mutable `latest` metadata or downloads
 unchecked runtime checksum files. Version changes must
 review both architectures and independently recheck archive and extracted binary
 hashes. Health success alone is insufficient to approve a component version.
@@ -149,15 +235,75 @@ directories, binary, and unit must retain their expected types, owners, and mode
 `vl_storage_is_read_only` must be zero; missing identity or read-only storage fails
 verification and cannot finalize the component. No synthetic log or remote
 application ingestion is required, so success does not demonstrate an application
-log pipeline. `monitoring verify` checks both installed components; `status`
-reports both service states without claiming full health or active alerts.
+log pipeline. `monitoring verify` checks all three installed components; `status`
+reports their service states without claiming full health or active alerts.
+
+## VictoriaTraces installation and verification
+
+VictoriaTraces `v0.11.0` is the third concrete component. Both amd64 and arm64
+archives and their published checksum assets are verified against official release
+metadata; the extracted regular `victoria-traces-prod` binary is independently
+hashed. Runtime installation uses those literal pins, bounded HTTPS downloads,
+expected-file-only extraction, and atomic binary/current-link replacement.
+Previous version directories are retained. Root owns
+`/opt/dragontools/components/victoriatraces/v0.11.0/`; the non-login
+`dt-victoriatraces` user/group owns `/var/lib/dragontools/victoriatraces` (0750).
+
+The dedicated `dragontools-victoriatraces.service` binds
+`-httpListenAddr=127.0.0.1:10428` and explicitly disables the extra gRPC listener
+with `-otlpGRPCListenAddr=`. It uses the policy's `100y`/`75` native retention flags,
+never the mutually exclusive byte-based flag. It applies the full requested
+hardening baseline without intentional relaxation, grants persistent writes only
+to its own data path, and uses empty capability sets. Private temporary storage
+and standard pseudo-devices remain available; MemoryMax is deferred pending
+workload/capacity testing.
+
+Verification checks active/enabled state, exact managed/loaded unit and running
+arguments, pinned disk/running executable hashes, current link, loopback listener,
+bounded HTTP health, effective hardening, and managed-path metadata. The exact
+`vt_storage_is_read_only{path="/var/lib/dragontools/victoriatraces"}` metric must
+exist once and equal zero. This proves the pinned application's reported writable
+storage state, not application trace arrival or OTLP end-to-end behavior. No
+synthetic traces are injected. [Pinned application metric source](https://github.com/VictoriaMetrics/VictoriaTraces/blob/v0.11.0/app/vtstorage/main.go#L639-L651).
+
+## Safe reruns across all mutating workflows
+
+The remote host is the source of observable state; there is no controller-side
+state database. Every run inspects resources and service state rather than
+assuming the previous deployment finished. Correct users, directories, valid
+pinned binaries, and matching units are no-ops. Conflicting accounts and unexpected
+symlinks fail. Supported metadata repair changes only required owner/group/mode,
+without restarting healthy services. Valid binaries are reused without download.
+
+Each component owns its restart marker, including
+`/var/lib/dragontools/victoriatraces-restart-required`. Binary/current-link or unit
+content changes preserve restart intent before activation. Activation reads
+systemd's loaded unit state; `daemon-reload` happens only when needed, not merely
+because a binary changed. Inactive services start; disabled services enable;
+unchanged active/persistently enabled services keep their processes. Runtime-only
+enablement is repaired persistently. A VM, VL, or VT change
+cannot restart either unrelated healthy component.
+Enabling a disabled unit changes global systemd state and requires a subsequent
+reload, but must not restart the active service. A global `NeedDaemonReload` flag
+alone never marks a component for restart. Manual drift in running configuration
+may instead fail verification and require operator correction; automatic repair
+of every out-of-band runtime change is not claimed.
+
+Failed health and interrupted deployments retain restart intent. The next install
+repairs/resumes from actual state and removes each marker only after successful
+verification. Existing markers need not be rewritten. Standalone verification is
+always read-only: it cannot repair files, reload/start/restart/enable services, or
+clear restart markers. There is no whole-install rollback or automatic deletion;
+operators serialize installs per host.
 
 ## Agents and local journal safety: next vertical slice
 
 `monitoring agents install --service orderflow.service --service whoami.service`
 will validate all units before mutation. Vector reads selected journal units;
-vmagent scrapes loopback node_exporter and forwards metrics; OTel accepts application
-OTLP locally and forwards traces. No external trace listener is implied.
+Vector also collects host metrics for VictoriaMetrics; vmagent scrapes application
+Prometheus `/metrics` endpoints and forwards them to VictoriaMetrics. OTel Collector
+accepts application OTLP locally and forwards traces to VictoriaTraces. The exact
+systemd service-state solution is deferred. No external trace listener is implied.
 
 Before installing, inspect effective journald configuration/drop-ins, persistence,
 `journalctl --disk-usage`, filesystem capacity and each selected service's
@@ -193,50 +339,47 @@ Persistent secrets will use `systemd-creds` encrypted root-only storage and
 credential path. The current opaque Secret infrastructure redacts and wipes; no
 resolver/storage consumer exists, so relevant CLI options fail before SSH.
 
-## Default alert rule generation: implemented locally
+## Alert policy and partial rendering
 
-`src/monitoring/rules.zig` uses small explicit Zig render functions, with no template
-engine or remote execution. `renderHosts`, `renderServices`, and `renderLogs`
-return deterministic YAML. Metrics rules use Prometheus-compatible expressions;
-log rules form a separate VictoriaLogs `type: vlogs` group. These functions are
-internal APIs; no new rule-export CLI command is introduced.
+The alert policy remains defined in `src/monitoring/policy.zig`. Host and service
+rendering is deliberately unavailable until the agent slice establishes real
+signal contracts. `renderHosts` returns `HostMetricContractUnavailable`.
+`renderServices` returns `ServiceMetricContractUnavailable` for requested units;
+an empty list returns `groups: []`. No stale collector-specific expressions or
+unverified Vector metric names are emitted. Systemd service-state monitoring is
+intentionally deferred.
 
-The generated pack uses the policy module for these defaults:
+The retained policy describes these intended alerts, not deployable rules:
 
-| Group | Rule | Condition and hold duration |
+| Group | Rule | Policy condition and hold duration |
 | --- | --- | --- |
-| Host | HostDown | `up == 0` for 2 minutes |
-| Host | CPUHigh | Non-idle node_exporter CPU usage >90% for 10 minutes |
-| Host | MemoryPressure | Memory usage from `MemAvailable` >90% for 5 minutes |
-| Host | DiskWarning | Filesystem usage ≥70% for 5 minutes |
-| Host | DiskCritical | Filesystem usage ≥80% for 5 minutes |
-| Host | InodesCritical | Inode usage ≥90% for 5 minutes |
-| Service | ServiceDown | Selected systemd unit's active-state signal is zero for 2 minutes |
-| Service | ServiceRestartLoop | At least 3 automatic restarts over 5 minutes, sustained for 1 minute |
-| Logs | ErrorBurst | At least 5 normalized `error` events per service over 5 minutes; no additional hold |
-| Logs | CriticalLogEvent | At least one normalized `critical` or `fatal` event per service over 1 minute; no additional hold |
+| Host | HostDown | Unavailable host signal for 2 minutes; exact signal deferred |
+| Host | CPUHigh | Non-idle CPU usage >90% for 10 minutes |
+| Host | MemoryPressure | Memory usage >90% for 5 minutes |
+| Host | DiskWarning | Filesystem usage >=70% for 5 minutes |
+| Host | DiskCritical | Filesystem usage >=80% for 5 minutes |
+| Host | InodesCritical | Inode usage >=90% for 5 minutes |
+| Service | ServiceDown | Selected service down for 2 minutes; state signal deferred |
+| Service | ServiceRestartLoop | At least 3 restarts over 5 minutes, sustained for 1 minute; counter deferred |
 
-The inode default leaves 10% headroom and waits 5 minutes to avoid transient
-notifications. Filesystem expressions exclude temporary/pseudo filesystems and
-compute disk usage as `100 × (1 − available bytes / filesystem size)`.
-HostDown covers reported failed scrape
-targets; an absent time series or a target removed from scrape configuration is
-not the same as `up == 0`. Missing signals and stalled pipelines need later alerts.
+The host metric contract will be established by the Vector agent implementation.
+vmagent will scrape application Prometheus endpoints. Installing the three storage
+backends does not supply host or service telemetry. The inode policy leaves 10%
+headroom and waits 5 minutes to avoid transient notifications; actual filesystem
+selection, label mapping, and signal availability must be verified later.
 
-`renderServices` accepts an explicit unit list, for example `orderflow.service`
-and `whoami.service`. It validates with the existing CLI service validator,
-sorts/deduplicates the units, emits exact PromQL name selectors and quoted YAML
-service labels, and produces `groups: []` for an empty list. It never discovers
-services or interpolates units into executable shell text. Agent installation and
-the existing `--service` CLI path remain unavailable.
+`renderLogs` remains a small deterministic local YAML renderer using the policy
+module, without a template engine or SSH. Its separate `type: vlogs` group is
+provisional until the ingestion and evaluator paths are verified:
 
-Future agents must enable `--collector.systemd` and
-`--collector.systemd.enable-restarts-metrics` before deploying these service rules.
-The source exposes `node_systemd_unit_state` and
-`node_systemd_service_restart_total{name="..."}`; the latter comes from systemd's
-`NRestarts` property and requires systemd ≥235. These are planned collector
-requirements, not currently configured agent behavior. [node_exporter systemd collector source](https://github.com/prometheus/node_exporter/blob/master/collector/systemd_linux.go).
-The counter represents automatic restarts, not an audit of every manual restart. [systemd restart counter scope](https://github.com/systemd/systemd/issues/29348).
+| Rule | Condition |
+| --- | --- |
+| ErrorBurst | At least 5 normalized `error` events per service over 5 minutes; no additional hold |
+| CriticalLogEvent | At least one normalized `critical` or `fatal` event per service over 1 minute; no additional hold |
+
+These are internal APIs; no rule-export or deployment CLI command is introduced.
+Alert policy is defined, rendering is partial/provisional, and alert runtime is
+unavailable.
 
 Log rules depend on normalized structured fields: `timestamp`, `level`, `service`,
 `host`, `environment`, `request_id`, `event`, and `duration_ms`. Severity matches
@@ -244,15 +387,17 @@ exact structured values through `level:in(error)` and `level:in(critical,fatal)`
 arbitrary message text does not establish severity. The queries use `_time:5m`
 or `_time:1m`, then group with `stats by (service) count()` and filter the count.
 Counts combine events sharing the same service value across hosts; callers must
-provide consistent service naming. Log annotations identify the service and count,
+provide consistent service naming. Missing service values form one unnamed group
+until the future ingestion path normalizes them. Log annotations identify the service and count,
 without copying log messages, request IDs, or secret fields.
 
-The log group evaluates every minute. CriticalLogEvent has no `for:` delay and
-fires on the next evaluation with a matching event; it is not synchronous delivery.
+The provisional log group specifies evaluation every minute. CriticalLogEvent has
+no `for:` delay and would fire on the next matching evaluation once deployed;
+no evaluator or synchronous delivery is present now.
 ErrorBurst avoids alerting for each ordinary error, though overlapping windows can
 keep an alert active. Later Alertmanager grouping/deduplication controls delivery.
-Every rule has stable `severity` and `source` labels and a concise summary with
-host/service context and the signal where practical.
+Generated log rules have stable `severity` and `source` labels and concise
+service/count summaries.
 
 Upstream supports `type: vlogs` and the log-query statistics/filter pipeline.
 Each vmalert process uses a configured datasource URL, so metrics and logs must
@@ -261,13 +406,13 @@ routing. A `vlogs` group alone does not route a query to VictoriaLogs. The expli
 `_time` windows are intended for live evaluation; upstream does not support those
 custom windows for replay/backfill. [VictoriaLogs alerting documentation](https://docs.victoriametrics.com/victorialogs/vmalert/).
 
-Unit tests cover policy values, deterministic output, requested-service selection,
-escaping, thresholds, durations, labels, and basic YAML structure. No real
-VictoriaLogs, node_exporter, or vmalert runtime is exercised by these renderer
-tests. A later vertical slice must verify collector flags and labels, actual
-automatic restart signals, expression syntax against pinned releases, datasource
-routing, event-time mapping, ingestion latency/window boundaries, and end-to-end
-alert evaluation before installing or claiming this pack is active.
+Unit tests cover policy values, explicit host/service-rendering refusal,
+deterministic log YAML, thresholds, durations, labels, and basic structure. No
+real evaluator or application log pipeline is exercised by renderer tests. A later
+slice must verify the Vector host metric contract, the service-state solution,
+expression syntax against pinned releases, datasource routing, event-time mapping,
+ingestion latency/window boundaries, and end-to-end alert evaluation before
+installing or claiming any pack is active.
 
 ## Grafana, alert deployment and Telegram: roadmap
 
@@ -276,11 +421,11 @@ Monitoring Station, Service Health, Storage, Updates / Security. A complete stat
 must verify datasource queries rather than only Grafana HTTP readiness.
 
 No generated rules are deployed or evaluated by the current installation.
-VictoriaTraces, vmalert, Alertmanager, Grafana, Vector, vmagent,
-OTel Collector, and node_exporter installation remain explicitly unavailable.
+vmalert, Alertmanager, Grafana, Vector, vmagent, and OTel Collector installation
+remain explicitly unavailable, as do Telegram, agents, firewall, and TLS.
 Rendering rules does not install a complete monitoring station or enable alerts.
 
-Beyond the locally generated host/service/log pack, later rules will include:
+Beyond the defined host/service policy and provisional log pack, later rules will include:
 
 | Group | Planned rules (not rendered yet) |
 | --- | --- |

@@ -2,17 +2,18 @@
 
 > DragonTools should encode operational knowledge, not merely automate commands.
 
-The public API is a set of monitoring workflows, not a generic resource DSL.
+The public API consists of monitoring workflows and one separate shell-tooling
+host utility, without a generic resource DSL.
 Small concrete Zig modules render controlled system commands. The controller is
 short-lived and connects only via OpenSSH. Managed services run directly under
 systemd. There is no persistent remote control daemon, container requirement,
-provider abstraction, arbitrary shell configuration, or plugin system.
+provider abstraction, arbitrary shell hooks, or plugin system.
 
 ## Implemented boundary
 
 `cli/parse.zig` validates all supplied inputs before SSH. `main.zig` rejects
 unimplemented integrations. `monitoring/install.zig` detects the host once, then
-installs and verifies VictoriaMetrics followed by VictoriaLogs. Each concrete
+installs and verifies VictoriaMetrics, VictoriaLogs, then VictoriaTraces. Each concrete
 component workflow handles its account, directories, binary, unit, activation,
 verification, and finalization; VictoriaMetrics also computes its capacity reserve.
 Host detection checks OS and prerequisites once. Before changing a component,
@@ -28,8 +29,81 @@ NUL is rejected. Small static shell fragments use positional parameters.
 `system/ssh.zig` spawns argv directly with Zig 0.16 `std.process`; no local shell.
 SSH is noninteractive, strict, with connection/keepalive limits and bounded output.
 There is no absolute overall deployment deadline yet. Long downloads have their own
-curl deadline. Non-root users require `sudo -n` and are checked for effective UID 0.
+curl deadline. Monitoring commands use direct connections without local SSH config;
+non-root monitoring users require `sudo -n` and are checked for effective UID 0.
 Raw stderr is suppressed and wiped; output summaries never echo arbitrary remote data.
+
+The separate `host install-oh-my-zsh` command uses the same transport boundary
+without elevating the initial SSH login session. Its `--ssh-host` mode lets OpenSSH
+resolve the user's native configuration, including aliases, identity agents and
+jump hosts, while enforcing strict host-key checks. The direct `--host` mode keeps
+the existing explicit connection behavior. Host inspection resolves the actual
+login account or requested existing target account before any package or home
+mutation. It does not create users or invoke monitoring installation.
+
+## Current architecture
+
+Only these storage components are installed by monitoring today:
+
+```text
+CONTROLLER                              REMOTE MONITORING HOST
+DragonTools -- strict OpenSSH --------> systemd
+                                          |
+                                          +-- VictoriaMetrics v1.151.0
+                                          |   127.0.0.1:8428
+                                          |   metrics: 90d; reserve: 20%
+                                          |
+                                          +-- VictoriaLogs v1.52.0
+                                          |   127.0.0.1:9428
+                                          |   logical: 100y; partition budget: 75%
+                                          |
+                                          +-- VictoriaTraces v0.11.0
+                                              127.0.0.1:10428
+                                              logical: 100y; partition budget: 75%
+```
+
+Agents, remote ingestion, dashboards, alert evaluation/delivery, monitoring
+firewall, TLS, and frontend telemetry are unavailable. The controller exits after
+the command; no controller-side state database or resident remote agent is added.
+
+The independent host utility has no listener or connection to these services:
+
+```text
+LOCAL MACHINE                           REMOTE HOST
+DragonTools host install-oh-my-zsh
+    -- strict OpenSSH alias/direct ---> actual account home
+                                          +-- .oh-my-zsh (install if absent)
+                                          +-- .zshrc (create if absent)
+                                       zsh package (install if absent)
+
+MONITORING STACK: unchanged by this command
+```
+
+## Safe rerun contract
+
+Every mutating command observes actual remote state each time. A first install
+converges each concrete component; an unchanged run reuses correct accounts,
+directories, pinned binaries, and identical units without unnecessary mutation.
+Only supported owner/group/mode repairs are made. Incompatible accounts and
+unexpected symlinks fail explicitly. Valid binaries are not redownloaded.
+
+Unit content changes and binary/current-link changes record restart intent before
+activation. Metadata-only repair does not make a healthy service dirty. Activation
+inspects loaded unit state and `NeedDaemonReload`; systemd reloads only when that
+state requires it, and a binary-only change does not force a reload. Active,
+persistently enabled, unchanged services stay running; inactive services start,
+and disabled or runtime-only units gain persistent enablement independently.
+One component's change never restarts the others.
+Enabling uses a subsequent required reload without restarting an already running
+service. Global `NeedDaemonReload` alone never creates per-component restart
+intent. Out-of-band running configuration drift can fail verification and require
+operator correction; it does not trigger a blanket restart of the station.
+
+An interrupted run leaves narrowly scoped, root-owned restart markers. The next
+run inspects actual files and service state, resumes pending activation, and clears
+each marker only after that component verifies. Existing markers are not blindly
+rewritten. Read-only `monitoring verify` never repairs files, reloads systemd,
+restarts services, or clears restart intent. No prior run is assumed successful.
 
 ## CLI metadata and interactive frontend
 
@@ -61,46 +135,51 @@ remote hosts or secret providers. `cli/completion.zig` renders Bash, Zsh, and Fi
 definitions from the shared spec; enum values and context-specific flags are not
 maintained as independent command trees. Generated scripts use native shell path
 completion for path-valued flags. Generation needs no shell executable or network,
-and installation never edits startup files automatically.
+and completion installation never edits startup files automatically.
+
+The `host` command group participates in the shared parser/help/completion metadata.
+It has a small local plan and regular dispatch, but is not an additional wizard
+deployment path. Alias completion never invokes SSH or reads remote account data.
 
 ## Monitoring policy and local rule generation
 
 `monitoring/policy.zig` is the single source of truth for fixed storage and alert
 defaults. Metrics retain `90d` with the existing overflow-safe
 `ceil(filesystem capacity / 5)` reserve. Logs and traces each have a logical `100y`
-retention limit and a native cleanup target of 75% filesystem usage. VictoriaLogs
-now applies this policy; VictoriaTraces remains unavailable. The
-operational disk states are 60% info, 70% warning, and 80% critical. Native cleanup
-at 75% is separate from those alert thresholds; no manual deletion is introduced.
-VictoriaLogs checks pressure periodically and preserves at least the newest two
-days, so the target does not guarantee a hard usage ceiling.
+retention limit and a native 75% setting. In both pinned releases, the setting
+budgets each backend's own partition bytes against total filesystem capacity;
+other writers are excluded. The operational disk states are 60% info, 70% warning,
+and 80% critical. They are policy thresholds, separate from native retention.
+Cleanup checks run roughly every 10 seconds with jitter and keep the newest two
+daily partitions, potentially spanning more than two days. The two budgets do not
+provide a combined shared-filesystem usage ceiling. No manual deletion is added.
 
-`monitoring/rules.zig` is a pure, deterministic local renderer with small concrete
-functions returning YAML. It emits Prometheus-compatible host/service rules and
-a separate VictoriaLogs file with `type: vlogs`. It consumes an explicit validated
-service-unit list; no services means no service rules. Unit identifiers are encoded
-for PromQL and YAML without forming executable shell text. Annotations expose
-conditions and signal context, never raw log contents or secrets. Rules have stable
-severity/source labels and avoid request-level labels.
+Alert policy is defined; rendering is partial/provisional; alert runtime is
+unavailable. `monitoring/rules.zig` renders only deterministic provisional
+VictoriaLogs `type: vlogs` YAML for ErrorBurst and CriticalLogEvent. It includes
+stable severity/source labels and concise service/count annotations, without log
+payloads, request IDs, or secrets.
 
-The generated pack comprises HostDown, CPUHigh, MemoryPressure, DiskWarning,
-DiskCritical, InodesCritical, ServiceDown, ServiceRestartLoop, ErrorBurst, and
-CriticalLogEvent. The informational disk state is modeled but does not add a
-DiskInfo alert to this pack. Policy/rendering tests run without SSH or a real
-evaluator. No CLI export command, remote rule installation, collector setup,
-evaluation, or Alertmanager delivery is implemented by this module.
+Host and service rules are unavailable until real metric contracts exist.
+`renderHosts` returns `HostMetricContractUnavailable`; requested service rendering
+returns `ServiceMetricContractUnavailable`, while an empty service list yields an
+empty rules document. No replacement host expressions are guessed. Vector will
+supply host metrics in the agent slice; the systemd service-state solution is
+deferred. Policy and renderer tests involve no SSH or real evaluator. There is no
+CLI export command, rule installation, or alert delivery.
 
-The ordinary install plan describes both available VictoriaMetrics and VictoriaLogs
-workflows, including their private listeners and retention, then explicitly lists
-unavailable components. A successful installation means both components passed
-their checks; it does not imply traces or alerts are installed. Unsupported component paths and flags
+The ordinary install plan describes all three available storage components,
+including their private listeners and retention, then explicitly lists unavailable
+integrations. A successful installation means all three components passed their
+checks; it does not imply agents or alerts are installed. Unsupported component paths and flags
 still fail before SSH; generated YAML does not make a component available.
 
 ## Component layout and lifecycle
 
-VictoriaMetrics `v1.151.0` and VictoriaLogs `v1.52.0` are pinned for both Linux
-architectures. Archive digests come from official GitHub release metadata;
-VictoriaLogs archives are also checked against their published release checksums.
+VictoriaMetrics `v1.151.0`, VictoriaLogs `v1.52.0`, and VictoriaTraces `v0.11.0`
+are pinned for both Linux architectures. Archive digests come from official GitHub release metadata;
+VictoriaLogs and VictoriaTraces archives are also checked against their published
+release checksums.
 Executable digests are computed from those verified archives. Literal archive and
 binary hashes are embedded in each component module. Remote
 curl downloads over HTTPS into a root-owned staging directory on the installation
@@ -111,8 +190,8 @@ account; a checksum is not an independent publisher signature.
 Each binary is installed as root:root 0755 inside a version directory; atomic rename
 replaces the executable and stable `current` symlink. Existing matching binary hashes
 and permissions avoid downloads. VictoriaLogs refuses a nested version mount that
-would turn binary replacement into a cross-filesystem copy. Dedicated `dt-victoriametrics` and
-`dt-victorialogs` system users/groups own their respective data directories (0750),
+would turn binary replacement into a cross-filesystem copy. Dedicated `dt-victoriametrics`,
+`dt-victorialogs`, and `dt-victoriatraces` system users/groups own their respective data directories (0750),
 with `/usr/sbin/nologin`. Parent and binary directories stay root-owned. An existing account
 must match the expected home, shell and group and have a nonzero UID; otherwise the
 installer refuses it. There is no recursive chown of existing storage.
@@ -130,8 +209,10 @@ and requires writable storage (`vl_storage_is_read_only == 0`); an arbitrary HTT
 synthetic application logs. Its read-only checks also reject stale loaded units,
 verify the effective hardening properties, and check managed path ownership,
 permissions, and unexpected symlinks. Each marker clears only after its component's
-verification succeeds. Unchanged VictoriaMetrics stays running when VictoriaLogs
-needs a repair or fails; the failure retains VictoriaLogs restart intent for retry.
+verification succeeds. VictoriaTraces uses the analogous dedicated verifier and
+requires `vt_storage_is_read_only == 0` for its managed storage path. Verification
+is read-only and injects no synthetic traces. A repair or failure leaves unrelated
+healthy services running; each component retains its own restart intent for retry.
 There is no full transactional rollback. Version directories permit future rollback,
 but this release will not silently select a different component version.
 
@@ -145,26 +226,63 @@ service boundary, not a machine already controlled by a malicious administrator.
 The VictoriaMetrics profile uses an empty capability set, no new privileges,
 private temporary files, protected home/system/kernel/control groups, restricted
 address families, a single data write path, umask 0027, and TasksMax 512. It does not
-blindly reuse that profile for Vector (journal access) or node_exporter. MemoryMax
+blindly reuse that profile for Vector, which needs journal access. MemoryMax
 is intentionally not imposed without capacity/workload testing. Systemd log rate
 limits reduce service log storms but do not substitute for the future agent journal
 capacity policy. Settings are renderer-tested; runtime validation on all supported
 Ubuntu/architecture combinations remains an integration gate.
 
-VictoriaLogs has its own concrete unit renderer and dedicated account, rather than
-a generic service DSL. Its profile sets `NoNewPrivileges`, `PrivateTmp`,
+VictoriaLogs and VictoriaTraces have their own concrete unit renderers and accounts, rather than
+a generic service DSL. Each profile sets `NoNewPrivileges`, `PrivateTmp`,
 `PrivateDevices`, `ProtectHome`, `ProtectSystem=strict`, `ProtectKernelTunables`,
 `ProtectKernelModules`, `ProtectControlGroups`, `RestrictSUIDSGID`, and
 `LockPersonality`. Both capability sets are empty. It restricts address families,
-uses umask 0027 and TasksMax 512, and grants persistent writes only beneath
-`/var/lib/dragontools/victorialogs`. Private temporary/device namespaces remain
+uses umask 0027 and TasksMax 512, and grants persistent writes only beneath its
+respective `/var/lib/dragontools/victorialogs` or
+`/var/lib/dragontools/victoriatraces` data path. Private temporary/device namespaces remain
 available. Restart-on-failure has a delay; service journal rate limits are bounded.
 All requested hardening directives are represented, with no intentional relaxation.
 MemoryMax is omitted until workload/capacity testing establishes a safe bound.
 The renderer and fake-remote checks do not prove compatibility under a real systemd
 instance; supported Ubuntu/architecture VM runs remain required.
 
-## Intended station and agent architecture (not installed yet)
+## Target near-term architecture (not implemented)
+
+The storage backends on the right exist today. All application-host collectors,
+network ingestion edges, alert evaluators/delivery, and Grafana below are targets:
+
+```text
+APPLICATION HOST                        MONITORING HOST
+(all collectors unavailable)            (VM / VL / VT installed)
+
+journald
+   |
+ Vector -- logs ----------------------> VictoriaLogs
+   |
+   +------ host metrics --------------> VictoriaMetrics
+
+application /metrics
+   |
+ vmagent -----------------------------> VictoriaMetrics
+
+application OTLP
+   |
+ OTel Collector ----------------------> VictoriaTraces
+
+                                        vmalert [unavailable]
+                                           |
+                                        Alertmanager [unavailable]
+                                           |
+                                        Telegram [unavailable]
+
+                                        Grafana [unavailable]
+                                         /  |  \
+                                        VM  VL  VT
+```
+
+These edges require later verified ingestion, network authorization, and collector
+configuration. Host metric names will be established by Vector implementation;
+systemd service-state monitoring is deferred. No frontend telemetry is included.
 
 Grafana is the only normal human-facing UI, with automatically provisioned
 VictoriaMetrics, VictoriaLogs and VictoriaTraces datasources. vmalert sends to
@@ -173,9 +291,10 @@ notifications. Backend administrative APIs stay private. An ingestion gateway mu
 expose only approved write routes; allowlisting a raw VictoriaMetrics port would
 also expose read/admin endpoints and is **not** an acceptable authorization boundary.
 
-Agents map logs → Vector, metrics → vmagent, traces → OTel Collector.
-node_exporter is the selected lightweight host/systemd metrics source. Selected
-services must exist; the reusable service-check primitive rejects missing units.
+Vector is planned for selected journald logs and host metrics. vmagent is planned
+for application Prometheus endpoints; OTel Collector is planned for application
+OTLP. The systemd service-state monitoring solution is deferred. Selected services
+must exist; the reusable service-check primitive rejects missing units.
 Installing Vector alone is insufficient: inspect and bound journald, verify local
 and remote health and signal arrival, monitor updates, alert on stalled pipelines,
 and protect monitoring disk capacity.
@@ -184,8 +303,10 @@ Network authorization is source-IP based in v0.x: admins may reach SSH/Grafana;
 agents may reach only ingestion. Provider firewall is an outer layer. A compromised
 allowlisted host can submit telemetry. Grafana still requires user authentication.
 No per-agent tokens or mTLS are claimed. Current slice avoids that unfinished
-boundary by binding VictoriaMetrics and VictoriaLogs to 127.0.0.1 on ports 8428
-and 9428. Installing VictoriaLogs does not configure application-host ingestion.
+boundary by binding VictoriaMetrics, VictoriaLogs, and VictoriaTraces to 127.0.0.1
+on ports 8428, 9428, and 10428. VictoriaTraces explicitly disables its additional
+gRPC listener with `-otlpGRPCListenAddr=`. No public OTLP or application-host
+ingestion path is installed.
 
 ## Secret handling and credentials
 
@@ -224,14 +345,21 @@ by policy; automatic reboot is disabled. None of this policy changes hosts yet.
 Unit tests cover parsing, redaction, quoting, units, storage, artifact plans and
 update-state parsing, as well as CLI metadata, completion, contextual help and
 scripted wizard validation/defaults/cancellation/command previews. Monitoring tests
-cover policy constants, deterministic host/service/log rule generation, thresholds,
-stable labels, and service identifier validation/escaping. CLI smoke tests
+cover policy constants, explicit unavailable host/service rendering, deterministic
+provisional log rules, thresholds, and stable labels. CLI smoke tests
 check non-TTY behavior and the local help/completion boundary. Fake-remote tests
-cover independent first/second runs, drift, failures and restart recovery for both
-installed components;
+cover independent first/second runs, drift, failures, and restart recovery for all
+three installed components;
 these prove sequencing, not actual systemd behavior. Disposable Ubuntu integration
 is documented separately and must verify the real runtime profile and no-op rerun.
-The opt-in `tests/integration/victorialogs.sh` runner checks both services, listeners,
-retention, writable logs storage, stable processes on reruns, VictoriaLogs-only
-unit repair, and recovery from a persisted restart marker. It is not run by the
+The opt-in `tests/integration/victoriatraces.sh` runner checks all three services,
+listeners, retention, writable backend storage, stable processes on reruns,
+VictoriaTraces-only unit repair, and recovery from a persisted restart marker. It is not run by the
 ordinary test target.
+
+Host utility tests separately cover account selection, missing/present packages,
+source and `.zshrc` preservation, path conflicts and interrupted runs. The CLI smoke
+harness exercises alias/direct dispatch through fake SSH and ensures local plans,
+help and rejected arguments never connect. See the host section of the same
+integration checklist for real SSH/apt, account, byte-preservation and rerun checks;
+local checks do not establish disposable-host validation.

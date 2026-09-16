@@ -1,7 +1,7 @@
 const std = @import("std");
 const spec = @import("spec.zig");
 pub const Command = spec.Command;
-pub const Action = enum { monitoring, completion, wizard };
+pub const Action = enum { monitoring, host, completion, wizard };
 pub const Options = struct {
     command: Command = .install,
     action: Action = .monitoring,
@@ -10,6 +10,8 @@ pub const Options = struct {
     help: bool = false,
     plan: bool = false,
     host: []const u8 = "",
+    ssh_host: ?[]const u8 = null,
+    target_user: ?[]const u8 = null,
     user: []const u8 = "root",
     port: u16 = 22,
     ssh_sock: ?[]const u8 = null,
@@ -64,7 +66,9 @@ pub fn validateValue(name: []const u8, value: []const u8) !void {
     if (item.kind == .boolean) return error.UnexpectedValue;
     if (eq(name, "--host")) {
         if (!token(value, ".-:")) return error.InvalidHost;
-    } else if (eq(name, "--user")) {
+    } else if (eq(name, "--ssh-host")) {
+        if (!token(value, "_.-:")) return error.InvalidSshHost;
+    } else if (eq(name, "--user") or eq(name, "--target-user")) {
         if (!token(value, "_-")) return error.InvalidUser;
     } else if (eq(name, "--port")) {
         const port = std.fmt.parseInt(u16, value, 10) catch return error.InvalidPort;
@@ -88,7 +92,7 @@ pub fn validateValue(name: []const u8, value: []const u8) !void {
 }
 fn assign(a: std.mem.Allocator, o: *Options, name: []const u8, value: []const u8) !void {
     try validateValue(name, value);
-    if (eq(name, "--host")) o.host = value else if (eq(name, "--user")) o.user = value else if (eq(name, "--port")) o.port = try std.fmt.parseInt(u16, value, 10) else if (eq(name, "--ssh-sock")) o.ssh_sock = value else if (eq(name, "--identity")) o.identity = value else if (eq(name, "--ssh-op-path")) o.ssh_op_path = value else if (eq(name, "--station-ip")) o.station_ip = value else if (eq(name, "--domain")) o.domain = value else if (eq(name, "--tls")) o.tls = value else if (eq(name, "--cloudflare-token-op")) o.cloudflare_token_op = value else if (eq(name, "--telegram-bot-token-op")) o.telegram_token_op = value else if (eq(name, "--telegram-channel-id")) o.telegram_channel_id = value else if (eq(name, "--service")) try o.services.append(a, value) else if (eq(name, "--admin-ip")) try o.admin_ips.append(a, value) else if (eq(name, "--agent-ip")) try o.agent_ips.append(a, value) else return error.UnknownFlag;
+    if (eq(name, "--host")) o.host = value else if (eq(name, "--ssh-host")) o.ssh_host = value else if (eq(name, "--target-user")) o.target_user = value else if (eq(name, "--user")) o.user = value else if (eq(name, "--port")) o.port = try std.fmt.parseInt(u16, value, 10) else if (eq(name, "--ssh-sock")) o.ssh_sock = value else if (eq(name, "--identity")) o.identity = value else if (eq(name, "--ssh-op-path")) o.ssh_op_path = value else if (eq(name, "--station-ip")) o.station_ip = value else if (eq(name, "--domain")) o.domain = value else if (eq(name, "--tls")) o.tls = value else if (eq(name, "--cloudflare-token-op")) o.cloudflare_token_op = value else if (eq(name, "--telegram-bot-token-op")) o.telegram_token_op = value else if (eq(name, "--telegram-channel-id")) o.telegram_channel_id = value else if (eq(name, "--service")) try o.services.append(a, value) else if (eq(name, "--admin-ip")) try o.admin_ips.append(a, value) else if (eq(name, "--agent-ip")) try o.agent_ips.append(a, value) else return error.UnknownFlag;
 }
 pub fn parse(a: std.mem.Allocator, args: []const []const u8) !Options {
     var o: Options = .{};
@@ -103,6 +107,7 @@ pub fn parse(a: std.mem.Allocator, args: []const []const u8) !Options {
     o.action = switch (o.node) {
         .completion, .completion_bash, .completion_zsh, .completion_fish => .completion,
         .wizard => .wizard,
+        .host, .install_oh_my_zsh => .host,
         else => .monitoring,
     };
     o.shell = switch (o.node) {
@@ -136,7 +141,12 @@ pub fn parse(a: std.mem.Allocator, args: []const []const u8) !Options {
         i += 1;
         try assign(a, &o, key, args[i]);
     }
-    if (!o.help and o.host.len == 0) return error.HostRequired;
+    if (o.ssh_host != null) {
+        if (o.host.len != 0) return error.ConflictingHosts;
+        // Alias mode lets OpenSSH resolve every connection/authentication field.
+        if (seen.contains("--user") or seen.contains("--port") or o.ssh_sock != null or o.identity != null or o.ssh_op_path != null) return error.ConflictingSshMode;
+    }
+    if (!o.help and o.host.len == 0 and o.ssh_host == null) return error.HostRequired;
     const modes: u8 = @intFromBool(o.ssh_sock != null) + @as(u8, @intFromBool(o.identity != null)) + @as(u8, @intFromBool(o.ssh_op_path != null));
     if (modes > 1) return error.ConflictingAuthentication;
     return o;
@@ -191,4 +201,41 @@ test "wizard value validator preserves the same strict checks" {
     try std.testing.expectError(error.InvalidService, validateValue("--service", "app;id.service"));
     try std.testing.expectError(error.InvalidReference, validateValue("--ssh-op-path", "plain-secret"));
     try std.testing.expectError(error.InvalidReference, validateValue("--ssh-op-path", "op://secret\x1b"));
+}
+
+test "host utility accepts an SSH alias without overriding the target account" {
+    const a = std.testing.allocator;
+    var alias = try parse(a, &.{ "host", "install-oh-my-zsh", "--ssh-host", "monitoring", "--plan" });
+    defer alias.deinit(a);
+    try std.testing.expectEqual(Action.host, alias.action);
+    try std.testing.expectEqual(Command.install_oh_my_zsh, alias.command);
+    try std.testing.expectEqualStrings("monitoring", alias.ssh_host.?);
+    try std.testing.expect(alias.host.len == 0);
+    try std.testing.expect(alias.target_user == null);
+    try std.testing.expect(alias.ssh_sock == null);
+    try std.testing.expect(alias.plan);
+    try std.testing.expect(!alias.unsupported());
+
+    var direct = try parse(a, &.{ "host", "install-oh-my-zsh", "--host", "monitoring.example.com", "--user", "ops", "--ssh-sock", "/tmp/agent.sock", "--target-user", "vasyl" });
+    defer direct.deinit(a);
+    try std.testing.expect(direct.ssh_host == null);
+    try std.testing.expectEqualStrings("ops", direct.user);
+    try std.testing.expectEqualStrings("vasyl", direct.target_user.?);
+    try std.testing.expectEqualStrings("/tmp/agent.sock", direct.ssh_sock.?);
+}
+
+test "host utility rejects conflicting connection forms and unsafe arguments" {
+    const a = std.testing.allocator;
+    try std.testing.expectError(error.HostRequired, parse(a, &.{ "host", "install-oh-my-zsh" }));
+    try std.testing.expectError(error.ConflictingHosts, parse(a, &.{ "host", "install-oh-my-zsh", "--ssh-host", "monitoring", "--host", "example.com" }));
+    for ([_][]const u8{ "--user", "--port", "--ssh-sock", "--identity" }, [_][]const u8{ "root", "22", "/tmp/sock", "/tmp/key" }) |flag, value| {
+        try std.testing.expectError(error.ConflictingSshMode, parse(a, &.{ "host", "install-oh-my-zsh", "--ssh-host", "monitoring", flag, value }));
+    }
+    for ([_][]const u8{ "", "-oProxyCommand=x", "root@host", "host;id", "host name", "host\nother", "host%h" }) |value| {
+        try std.testing.expectError(error.InvalidSshHost, parse(a, &.{ "host", "install-oh-my-zsh", "--ssh-host", value }));
+    }
+    try std.testing.expectError(error.InvalidUser, parse(a, &.{ "host", "install-oh-my-zsh", "--ssh-host", "monitoring", "--target-user", "root;id" }));
+    try std.testing.expectError(error.FlagNotAllowed, parse(a, &.{ "host", "install-oh-my-zsh", "--ssh-host", "monitoring", "--tls", "manual" }));
+    try std.testing.expectError(error.FlagNotAllowed, parse(a, &.{ "monitoring", "install", "--ssh-host", "monitoring" }));
+    try std.testing.expectError(error.FlagNotAllowed, parse(a, &.{ "monitoring", "install", "--host", "monitoring", "--target-user", "vasyl" }));
 }

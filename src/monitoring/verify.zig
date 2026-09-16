@@ -10,9 +10,11 @@ pub fn health(a: std.mem.Allocator, r: remote.Remote, report: *install.Report, a
     const command = try remote.shell(a, &.{
         "sh",                                                      "-eu",                                           "-c",
         \\expected=$1; unit=$2; reserve=$3; retention=$4
-        \\test -z "$(systemctl show -p DropInPaths --value dragontools-victoriametrics.service)"
+        \\dropins=$(systemctl show -p DropInPaths --value dragontools-victoriametrics.service)
+        \\test -z "$dropins"
         \\systemctl is-active --quiet dragontools-victoriametrics.service
-        \\systemctl is-enabled --quiet dragontools-victoriametrics.service
+        \\test "$(systemctl is-enabled dragontools-victoriametrics.service)" = enabled
+        \\test "$(systemctl show -p NeedDaemonReload --value dragontools-victoriametrics.service)" = no
         \\printf '%s' "$unit" | cmp -s - /etc/systemd/system/dragontools-victoriametrics.service
         \\test "$(systemctl show -p User --value dragontools-victoriametrics.service)" = dt-victoriametrics
         \\test "$(systemctl show -p ProtectSystem --value dragontools-victoriametrics.service)" = strict
@@ -62,6 +64,8 @@ pub fn verify(a: std.mem.Allocator, r: remote.Remote, report: *install.Report) !
     try health(a, r, report, machine.arch);
     report.component = .victorialogs;
     try @import("victorialogs_verify.zig").health(a, r, report, machine.arch);
+    report.component = .victoriatraces;
+    try @import("victoriatraces_verify.zig").health(a, r, report, machine.arch);
 }
 
 test "health fails on malformed, error and empty query responses" {

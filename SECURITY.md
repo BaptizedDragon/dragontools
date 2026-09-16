@@ -12,19 +12,22 @@ monitoring coverage. Only the current development version is maintained.
 
 ## Trust model
 
-DragonTools connects over SSH. Install requires administrator-level target access.
+DragonTools connects over SSH. Monitoring install requires administrator-level target access.
 Strict known-host verification is mandatory; verify fingerprints out-of-band before
 first use. The controller, its PATH/OpenSSH installation, known-hosts file, SSH agent,
 target OS, trusted distro CA store and reviewed artifact pins are trusted.
-No forwarding or local SSH config is inherited. SSH private keys remain with the
-agent or OpenSSH identity file; 1Password itself is optional.
+Direct connections disable inherited local SSH config and forwarding. The separate
+host utility's `--ssh-host` mode delegates alias, authentication and proxy resolution
+to OpenSSH, so local SSH configuration and its configured proxy commands are also
+trusted. Strict host-key checks remain enabled in both modes. SSH private keys
+remain with the agent or OpenSSH identity file; 1Password itself is optional.
 
 Future telemetry authorization is source-IP/network based. Monitored hosts are
 trusted infrastructure; a compromised allowlisted host can submit telemetry.
 Grafana still needs user authentication. A provider firewall is recommended outside
 the monitoring-only host rules. Raw administrative APIs must not be exposed to agent
-networks. Current VictoriaMetrics binds loopback only, reachable by target-local
-users and explicitly established SSH tunnels. No firewall or TLS protection is
+networks. Current VictoriaMetrics, VictoriaLogs, and VictoriaTraces bind loopback only on
+8428, 9428, and 10428, reachable by target-local users and explicitly established SSH tunnels. No firewall or TLS protection is
 claimed beyond this boundary.
 
 ## Secrets and privileges
@@ -41,10 +44,20 @@ against an already-compromised root account or controller. An artifact digest ve
 agreement with the reviewed upstream release; it does not protect against a malicious
 publisher. Managed root directories must not be shared with untrusted writers.
 
+The host utility inspects the SSH login account before elevation and writes home
+content as the target account. Missing packages or switching to another target may
+require noninteractive sudo. It refuses conflicting paths and preserves existing
+Oh My Zsh and regular `.zshrc` files. New source is pinned and checksum-verified;
+an existing user installation is deliberately not audited, repaired or updated.
+The command never changes the login shell or executes the upstream installer.
+
 ## Failure and recovery
 
 A failed install may have created accounts/directories or replaced a binary/unit.
 Later phases stop; no destructive rollback is attempted. Output reports confirmed
-progress and the failed phase. Inspect the unit/journal locally, fix the cause and
-rerun. Do not post raw command output or secret-bearing logs publicly.
+progress and the failed component/phase. Inspect the unit/journal locally, fix the
+cause, and rerun. Each component preserves its restart-intent marker until
+verification succeeds; unchanged healthy services are not restarted. Standalone
+verification is read-only and never clears markers. No controller-side state
+database is used. Do not post raw command output or secret-bearing logs publicly.
 Keep storage backups independently; a free-space threshold does not replace them.

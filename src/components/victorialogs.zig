@@ -68,24 +68,34 @@ pub fn binaryCommand(a: std.mem.Allocator, arch: Arch) ![]const u8 {
         \\    test -f "$root/$current_version/victoria-logs-prod" && test ! -L "$root/$current_version/victoria-logs-prod"
         \\  fi
         \\fi
+        \\valid=0
+        \\if test -f "$dest/victoria-logs-prod"; then
+        \\  if printf '%s  %s\n' "$binary_hash" "$dest/victoria-logs-prod" | sha256sum --check --status; then valid=1; fi
+        \\fi
+        \\test ! -L "$root/.install.lock"
+        \\if test -e "$root/.install.lock"; then test -f "$root/.install.lock"; test "$(stat -c '%u:%g' "$root/.install.lock")" = 0:0; fi
+        \\if test -d "$root" && test -d "$dest"; then test "$(stat -c '%d' "$root")" = "$(stat -c '%d' "$dest")"; fi
+        \\# Matching state returns before creating a lock, temporary file, or marker.
+        \\if test "$valid" = 1 && test "$current_version" = "$version" && test "$(stat -c '%u:%g:%a' "$root")" = 0:0:755 && test "$(stat -c '%u:%g:%a' "$dest")" = 0:0:755 && test "$(stat -c '%u:%g:%a' "$dest/victoria-logs-prod")" = 0:0:755; then printf unchanged; exit 0; fi
         \\mark_dirty() { if test ! -e "$pending"; then : > "$pending"; fi; }
         \\changed=0
         \\for dir in "$root" "$dest"; do
-        \\  if test ! -d "$dir" || test "$(stat -c '%u:%g:%a' "$dir")" != 0:0:755; then
-        \\    mark_dirty
+        \\  if test -d "$dir"; then
+        \\    if test "$(stat -c '%u:%g' "$dir")" != 0:0; then chown root:root "$dir"; changed=1; fi
+        \\    if test "$(stat -c '%a' "$dir")" != 755; then chmod 755 "$dir"; changed=1; fi
+        \\  else
         \\    install -d -o root -g root -m 755 "$dir"
         \\    changed=1
         \\  fi
         \\done
         \\# Refuse nested mounts that would turn mv into a cross-filesystem copy.
         \\test "$(stat -c '%d' "$root")" = "$(stat -c '%d' "$dest")"
-        \\test ! -L "$root/.install.lock"
-        \\if test -e "$root/.install.lock"; then test -f "$root/.install.lock"; test "$(stat -c '%u:%g' "$root/.install.lock")" = 0:0; fi
-        \\exec 9>"$root/.install.lock"
+        \\exec 9>>"$root/.install.lock"
         \\flock -w 30 9
-        \\valid=0
-        \\if test -f "$dest/victoria-logs-prod"; then
-        \\  if printf '%s  %s\n' "$binary_hash" "$dest/victoria-logs-prod" | sha256sum --check --status && test "$(stat -c '%u:%g:%a' "$dest/victoria-logs-prod")" = 0:0:755; then valid=1; fi
+        \\# Correct bytes need metadata repair only, never another download/restart.
+        \\if test "$valid" = 1; then
+        \\  if test "$(stat -c '%u:%g' "$dest/victoria-logs-prod")" != 0:0; then chown root:root "$dest/victoria-logs-prod"; changed=1; fi
+        \\  if test "$(stat -c '%a' "$dest/victoria-logs-prod")" != 755; then chmod 755 "$dest/victoria-logs-prod"; changed=1; fi
         \\fi
         \\tmp=''
         \\trap 'if test -n "$tmp"; then rm -rf "$tmp"; fi' EXIT
@@ -177,6 +187,9 @@ test "VictoriaLogs rejects unexpected managed symlinks and preserves restart int
     }) |needle| try expectContains(command, needle);
     const same_filesystem = std.mem.indexOf(u8, command, "\"$root\")\" = \"$(stat -c").?;
     try std.testing.expect(same_filesystem < std.mem.indexOf(u8, command, "mv -fT \"$tmp/binary.new\"").?);
+    const no_op = std.mem.indexOf(u8, command, "then printf unchanged; exit 0; fi").?;
+    try std.testing.expect(no_op < std.mem.indexOf(u8, command, "exec 9>>").?);
+    try std.testing.expect(no_op < std.mem.indexOf(u8, command, "mktemp").?);
     try std.testing.expect(std.mem.indexOf(u8, command, "rm -rf \"$dest\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, command, "rm -f \"$pending\"") == null);
 }

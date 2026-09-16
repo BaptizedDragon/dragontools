@@ -1,5 +1,5 @@
 const std = @import("std");
-pub const Operation = enum { detect, user, directories, capacity, binary, unit, activate, health, finalize, status, service_exists };
+pub const Operation = enum { detect, user, directories, capacity, binary, unit, activate, health, finalize, status, service_exists, host_inspect, host_packages, host_source, host_zshrc, host_verify };
 pub const Result = struct { code: u8, output: []const u8 = "" };
 /// Results are owned by the caller's operation arena. No stderr is surfaced.
 pub const Remote = struct {

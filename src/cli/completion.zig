@@ -248,6 +248,12 @@ test "shell completion encodes the nested tree and contextual flags" {
         const output = try render(a, shell);
         defer a.free(output);
         try std.testing.expect(std.mem.indexOf(u8, output, "'root:monitoring'") != null);
+        try std.testing.expect(std.mem.indexOf(u8, output, "'root:host'") != null);
+        try std.testing.expect(std.mem.indexOf(u8, output, "'host:install-oh-my-zsh'") != null);
+        try std.testing.expect(std.mem.indexOf(u8, output, "'install_oh_my_zsh:--ssh-host'") != null);
+        try std.testing.expect(std.mem.indexOf(u8, output, "'install_oh_my_zsh:--target-user'") != null);
+        try std.testing.expect(std.mem.indexOf(u8, output, "'install_oh_my_zsh:--tls'") == null);
+        try std.testing.expect(std.mem.indexOf(u8, output, "'install:--ssh-host'") == null);
         try std.testing.expect(std.mem.indexOf(u8, output, "'monitoring:agents'") != null);
         try std.testing.expect(std.mem.indexOf(u8, output, "'agents:install'") != null);
         try std.testing.expect(std.mem.indexOf(u8, output, "'install:--tls'") != null);

@@ -4,6 +4,7 @@ const help = @import("cli/help.zig");
 const completion = @import("cli/completion.zig");
 const terminal = @import("cli/terminal.zig");
 const policy = @import("monitoring/policy.zig");
+const vt = @import("components/victoriatraces.zig");
 const plan = @import("monitoring/plan.zig");
 fn print(io: std.Io, message: []const u8) void {
     std.Io.File.stdout().writeStreamingAll(io, message) catch {};
@@ -51,6 +52,10 @@ fn execute(init: std.process.Init, options: cli.Options) !void {
         print(init.io, "Requested workflow or integration is not yet available. Nothing changed; SSH was not attempted.\n");
         return error.NotImplemented;
     }
+    if (options.command == .install_oh_my_zsh) {
+        try personalizeHost(init, options);
+        return;
+    }
     if (options.plan) {
         print(init.io, try plan.render(a));
         return;
@@ -60,14 +65,18 @@ fn execute(init: std.process.Init, options: cli.Options) !void {
     var report: @import("monitoring/install.zig").Report = .{};
     switch (options.command) {
         .install, .verify => {
-            print(init.io, if (options.command == .install) "Installing VictoriaMetrics and VictoriaLogs over SSH...\n" else "Verifying VictoriaMetrics and VictoriaLogs over SSH...\n");
+            print(init.io, if (options.command == .install) "Installing VictoriaMetrics, VictoriaLogs and VictoriaTraces over SSH...\n" else "Verifying VictoriaMetrics, VictoriaLogs and VictoriaTraces over SSH...\n");
             const result = if (options.command == .install) @import("monitoring/install.zig").install(a, r, &report) else @import("monitoring/verify.zig").verify(a, r, &report);
             result catch |err| {
-                print(init.io, try std.fmt.allocPrint(a, "Failed at {s}; {d} steps completed, {d} change steps confirmed. Component: {s}. The failed step may have partially changed the host. Later steps were not attempted. Check SSH/prerequisites for detection failures, or inspect the managed unit and journal for later failures; fix the cause and rerun the same command. No rollback was attempted.\n", .{ @tagName(report.phase), report.completed, report.changes, if (report.component) |component| component.name() else "host" }));
+                const advice = if (options.command == .install)
+                    "The failed step may have partially changed the host. Later steps were not attempted. Fix the cause and rerun the same command; pending restart intent is preserved. No rollback was attempted."
+                else
+                    "Verification is read-only. Later checks were not attempted. Correct the cause and repeat verification.";
+                print(init.io, try std.fmt.allocPrint(a, "Failed at {s}; {d} steps completed, {d} change steps confirmed. Component: {s}. {s} Check SSH/prerequisites for detection failures, or inspect the managed unit and journal for later failures.\n", .{ @tagName(report.phase), report.completed, report.changes, if (report.component) |component| component.name() else "host", advice }));
                 return err;
             };
             if (options.command == .install and report.changes == 0) print(init.io, "No changes required.\n");
-            print(init.io, try std.fmt.allocPrint(a, "VictoriaMetrics: loopback:8428\n  healthy; self-scraped metrics queryable\n  retention: {s}; free-space reserve: {d} bytes ({d}% of filesystem capacity)\nVictoriaLogs: loopback:9428\n  healthy; writable storage\n  retention: disk-bound; logical limit: {s}; native cleanup threshold: {d}% filesystem usage\n  Cleanup is periodic and preserves the newest two days; usage can exceed the threshold.\n", .{ policy.metrics.retention, report.reserve_bytes, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent }));
+            print(init.io, try std.fmt.allocPrint(a, "VictoriaMetrics: loopback:8428\n  healthy; self-scraped metrics queryable\n  retention: {s}; free-space reserve: {d} bytes ({d}% of filesystem capacity)\nVictoriaLogs: loopback:9428\n  healthy; writable storage\n  retention: disk-bound; logical limit: {s}; native partition budget: {d}% of filesystem capacity\nVictoriaTraces: loopback:{d}\n  healthy; writable storage\n  retention: disk-bound; logical limit: {s}; native partition budget: {d}% of filesystem capacity\n  Logs/traces cleanup is periodic and preserves the newest two partitions; other writers can fill the filesystem earlier.\n", .{ policy.metrics.retention, report.reserve_bytes, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent, vt.port, policy.traces.retention, policy.traces.cleanup_usage_percent }));
         },
         .status => {
             const output = @import("monitoring/status.zig").status(a, r, &report) catch |err| {
@@ -79,6 +88,23 @@ fn execute(init: std.process.Init, options: cli.Options) !void {
         else => unreachable,
     }
     print(init.io, plan.unavailable);
+}
+fn personalizeHost(init: std.process.Init, options: cli.Options) !void {
+    const a = init.arena.allocator();
+    const host = @import("host/oh_my_zsh.zig");
+    const output = @import("host/output.zig");
+    if (options.plan) {
+        print(init.io, try output.plan(a, options));
+        return;
+    }
+    var ssh: @import("system/ssh.zig").Ssh = .{ .allocator = a, .io = init.io, .options = options, .elevation = .login_user };
+    var report: host.Report = .{};
+    print(init.io, "Host personalization\n\n");
+    host.install(a, ssh.asRemote(), options.target_user, &report) catch |err| {
+        print(init.io, try std.fmt.allocPrint(a, "Failed at {s}. Completed changes may remain; correct the cause and rerun the same command. Existing user configuration is preserved.\n", .{@tagName(report.phase)}));
+        return err;
+    };
+    print(init.io, try output.result(a, report));
 }
 test {
     _ = @import("cli/parse.zig");
@@ -97,13 +123,19 @@ test {
     _ = @import("components/victoriametrics.zig");
     _ = @import("components/victorialogs.zig");
     _ = @import("components/victorialogs_unit.zig");
+    _ = @import("components/victoriatraces.zig");
+    _ = @import("components/victoriatraces_unit.zig");
     _ = @import("monitoring/tests.zig");
     _ = @import("monitoring/policy.zig");
     _ = @import("monitoring/rules.zig");
     _ = @import("monitoring/verify.zig");
     _ = @import("monitoring/victorialogs_verify.zig");
+    _ = @import("monitoring/victoriatraces_verify.zig");
     _ = @import("monitoring/plan.zig");
     _ = @import("monitoring/status.zig");
     _ = @import("system/services.zig");
     _ = @import("update/model.zig");
+    _ = @import("host/oh_my_zsh.zig");
+    _ = @import("host/output.zig");
+    _ = @import("host/shell_tests.zig");
 }

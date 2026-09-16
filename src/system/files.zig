@@ -11,13 +11,25 @@ pub fn writeCommand(a: std.mem.Allocator, path: []const u8, content: []const u8,
         \\  test ! -L "$3" || exit 43
         \\  if test -e "$3"; then test -f "$3" && test "$(stat -c '%u:%g' "$3")" = 0:0 || exit 40; fi
         \\fi
-        \\if test -e "$path"; then grep -qx '# Managed by DragonTools' "$path" || exit 40; fi
+        \\if test -e "$path"; then
+        \\  test -f "$path" || exit 40
+        \\  grep -qx '# Managed by DragonTools' "$path" || exit 40
+        \\  if printf '%s' "$2" | cmp -s - "$path"; then
+        \\    changed=0
+        \\    if test "$(stat -c '%u:%g' "$path")" != 0:0; then chown root:root "$path"; changed=1; fi
+        \\    if test "$(stat -c '%a' "$path")" != 644; then chmod 644 "$path"; changed=1; fi
+        \\    if test "$changed" = 1; then printf changed; else printf unchanged; fi
+        \\    exit 0
+        \\  fi
+        \\fi
         \\tmp=$(mktemp "${path}.XXXXXX")
         \\trap 'rm -f "$tmp"' EXIT
         \\printf '%s' "$2" > "$tmp"
         \\chmod 644 "$tmp"
         \\chown root:root "$tmp"
-        \\if test -f "$path" && cmp -s "$tmp" "$path" && test "$(stat -c '%u:%g:%a' "$path")" = 0:0:644; then printf 'unchanged'; else if test -n "$3"; then (umask 077; touch "$3"); fi; mv -fT "$tmp" "$path"; printf 'changed'; fi
+        \\if test -n "$3" && test ! -e "$3"; then (umask 077; : > "$3"); fi
+        \\mv -fT "$tmp" "$path"
+        \\printf changed
         ,
         "dragontools-write", path,  content,
         restart_marker,
@@ -29,4 +41,7 @@ test "file writer compares and atomically replaces" {
     const s = try writeCommand(arena.allocator(), "/tmp/file", "# Managed by DragonTools\n", "");
     try std.testing.expect(std.mem.indexOf(u8, s, "cmp -s") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "mv -fT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "cmp -s -").? < std.mem.indexOf(u8, s, "mktemp").?);
+    try std.testing.expect(std.mem.indexOf(u8, s, ": > \"$3\"").? < std.mem.indexOf(u8, s, "mv -fT").?);
+    try std.testing.expect(std.mem.indexOf(u8, s, "test -f \"$path\" || exit 40") != null);
 }

@@ -3,20 +3,35 @@ const remote = @import("../system/remote.zig");
 const install = @import("install.zig");
 const verify = @import("verify.zig");
 const operation_count = @typeInfo(remote.Operation).@"enum".fields.len;
+const components = [_]install.Component{ .victoriametrics, .victorialogs, .victoriatraces };
 const vm_metrics = "{\"status\":\"success\",\"data\":{\"result\":[{\"metric\":{\"__name__\":\"vm_app_version\"},\"value\":[1,\"1\"]}]}}";
 const vl_metrics = "vl_storage_is_read_only{path=\"/var/lib/dragontools/victorialogs\"} 0\n";
+const vt_metrics = "vt_storage_is_read_only{path=\"/var/lib/dragontools/victoriatraces\"} 0\n";
 
-// Separate concrete states model sequencing, not execution of Ubuntu commands.
+// Three concrete states exercise the control flow, not Linux shell execution.
+// Mutations can complete before a simulated failure so retries cannot rely on
+// the previous controller result. Real systemd/filesystem behavior needs a VM.
 const ComponentState = struct {
     present: [operation_count]bool = @splat(false),
     calls: [operation_count]usize = @splat(0),
+    writes: [operation_count]usize = @splat(0),
+    metadata_drift: ?remote.Operation = null,
     restarts: usize = 0,
     starts: usize = 0,
     enables: usize = 0,
+    reloads: usize = 0,
+    downloads: usize = 0,
     dirty: bool = false,
+    stale_unit: bool = false,
+    loaded: bool = false,
     inactive: bool = true,
     disabled: bool = true,
+    runtime_enabled: bool = false,
     fail: ?remote.Operation = null,
+    fail_after: ?remote.Operation = null,
+    fail_after_reload: bool = false,
+    fail_after_enable: bool = false,
+    failure_code: u8 = 1,
     health_output: ?[]const u8 = null,
 
     fn called(self: ComponentState, op: remote.Operation) usize {
@@ -26,10 +41,20 @@ const ComponentState = struct {
 const Fake = struct {
     vm: ComponentState = .{},
     vl: ComponentState = .{},
+    vt: ComponentState = .{},
     calls: usize = 0,
     detections: usize = 0,
     check_syntax: bool = false,
+    // systemd 255 invalidates NeedDaemonReload globally after EnableUnitFiles.
+    enable_state_outdated: bool = false,
 
+    fn state(self: *Fake, component: install.Component) *ComponentState {
+        return switch (component) {
+            .victoriametrics => &self.vm,
+            .victorialogs => &self.vl,
+            .victoriatraces => &self.vt,
+        };
+    }
     fn asRemote(self: *Fake) remote.Remote {
         return .{ .context = self, .execute = execute };
     }
@@ -39,8 +64,8 @@ const Fake = struct {
             var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            // Intercept quoted sh wrappers and parse their inner scripts too.
-            // No mutation runs: the inner shell always receives -n.
+            // The outer shell intercepts quoted sh wrappers; the inner shell
+            // always has -n. No rendered mutation is executed by this test.
             const wrapped = std.mem.startsWith(u8, command, "'sh' ");
             const script = if (wrapped) try std.fmt.allocPrint(a, "sh() {{ command /bin/sh -n \"$@\"; }}\n{s}", .{command}) else command;
             const result = try std.process.run(a, std.testing.io, .{ .argv = if (wrapped) &.{ "/bin/sh", "-c", script } else &.{ "/bin/sh", "-n", "-c", script } });
@@ -52,51 +77,88 @@ const Fake = struct {
             self.detections += 1;
             return .{ .code = 0, .output = "ubuntu\n24.04\nx86_64\n" };
         }
-        const is_logs = std.mem.indexOf(u8, command, "victorialogs") != null;
-        try std.testing.expect(is_logs or std.mem.indexOf(u8, command, "victoriametrics") != null);
-        const state = if (is_logs) &self.vl else &self.vm;
-        state.calls[@intFromEnum(op)] += 1;
-        if (state.fail == op) return .{ .code = 1 };
+        const component: install.Component = if (std.mem.indexOf(u8, command, "victoriatraces") != null)
+            .victoriatraces
+        else if (std.mem.indexOf(u8, command, "victorialogs") != null)
+            .victorialogs
+        else if (std.mem.indexOf(u8, command, "victoriametrics") != null)
+            .victoriametrics
+        else
+            return error.MissingComponentContext;
+        const current = self.state(component);
+        current.calls[@intFromEnum(op)] += 1;
+        if (current.fail == op) return .{ .code = current.failure_code };
+        var changed = false;
         switch (op) {
             .detect => unreachable,
             .capacity => {
-                try std.testing.expect(!is_logs);
+                try std.testing.expectEqual(install.Component.victoriametrics, component);
                 return .{ .code = 0, .output = "1000000 4096" };
             },
             .health => {
-                if (state.inactive or state.disabled) return .{ .code = 1 };
-                return .{ .code = 0, .output = state.health_output orelse if (is_logs) vl_metrics else vm_metrics };
+                if (current.inactive or current.disabled or current.runtime_enabled or !current.loaded or current.stale_unit or self.enable_state_outdated) return .{ .code = 1 };
+                return .{ .code = 0, .output = current.health_output orelse switch (component) {
+                    .victoriametrics => vm_metrics,
+                    .victorialogs => vl_metrics,
+                    .victoriatraces => vt_metrics,
+                } };
             },
             .finalize => {
-                state.dirty = false;
+                current.dirty = false;
                 return .{ .code = 0 };
             },
             .activate => {
-                var changed = false;
-                if (state.dirty) {
-                    state.restarts += 1;
-                    state.inactive = false;
+                if (current.disabled or current.runtime_enabled) {
+                    current.enables += 1;
+                    current.disabled = false;
+                    current.runtime_enabled = false;
+                    self.enable_state_outdated = true;
                     changed = true;
-                } else if (state.inactive) {
-                    state.starts += 1;
-                    state.inactive = false;
+                    if (current.fail_after_enable) return .{ .code = 1 };
+                }
+                if (current.stale_unit or !current.loaded or self.enable_state_outdated) {
+                    current.reloads += 1;
+                    for (components) |loaded_component| {
+                        const loaded_state = self.state(loaded_component);
+                        loaded_state.stale_unit = false;
+                        loaded_state.loaded = loaded_state.present[@intFromEnum(remote.Operation.unit)];
+                    }
+                    self.enable_state_outdated = false;
+                    changed = true;
+                    if (current.fail_after_reload) return .{ .code = 1 };
+                }
+                if (current.dirty) {
+                    current.restarts += 1;
+                    current.inactive = false;
+                    changed = true;
+                } else if (current.inactive) {
+                    current.starts += 1;
+                    current.inactive = false;
                     changed = true;
                 }
-                if (state.disabled) {
-                    state.enables += 1;
-                    state.disabled = false;
-                    changed = true;
-                }
-                return .{ .code = 0, .output = if (changed) "changed" else "unchanged" };
             },
             else => {
                 const index = @intFromEnum(op);
-                if (state.present[index]) return .{ .code = 0, .output = "unchanged" };
-                state.present[index] = true;
-                if (op == .binary or op == .unit) state.dirty = true;
-                return .{ .code = 0, .output = "changed" };
+                if (current.present[index]) {
+                    if (current.metadata_drift != op) return .{ .code = 0, .output = "unchanged" };
+                    current.metadata_drift = null;
+                } else {
+                    current.present[index] = true;
+                    if (op == .binary) {
+                        current.dirty = true;
+                        current.downloads += 1;
+                    }
+                    if (op == .unit) {
+                        current.dirty = true;
+                        current.stale_unit = true;
+                    }
+                }
+                current.writes[index] += 1;
+                changed = true;
             },
         }
+        if (current.fail_after == op) return .{ .code = 1 };
+        return .{ .code = 0, .output = if (changed) "changed" else "unchanged" };
     }
 };
 
@@ -104,10 +166,19 @@ fn initialInstall(a: std.mem.Allocator, fake: *Fake) !void {
     var first: install.Report = .{};
     try install.install(a, fake.asRemote(), &first);
     try std.testing.expect(first.changes > 0);
-    try std.testing.expect(!fake.vm.dirty and !fake.vl.dirty);
+    for (components) |component| {
+        const current = fake.state(component);
+        try std.testing.expect(!current.dirty and !current.inactive and !current.disabled);
+    }
+}
+fn expectRestarts(fake: *Fake, affected: ?install.Component, affected_count: usize) !void {
+    for (components) |component| {
+        const expected: usize = if (component == affected) affected_count else 1;
+        try std.testing.expectEqual(expected, fake.state(component).restarts);
+    }
 }
 
-test "both components install once and second run is a no-op" {
+test "all three components converge once and inspect without mutation on a second run" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var fake: Fake = .{};
@@ -116,205 +187,308 @@ test "both components install once and second run is a no-op" {
     var second: install.Report = .{};
     try install.install(arena.allocator(), fake.asRemote(), &second);
     try std.testing.expectEqual(@as(usize, 0), second.changes);
-    for ([_]ComponentState{ fake.vm, fake.vl }) |state| {
-        try std.testing.expectEqual(@as(usize, 1), state.restarts);
-        try std.testing.expectEqual(@as(usize, 0), state.starts);
-        try std.testing.expectEqual(@as(usize, 1), state.enables);
-        try std.testing.expectEqual(@as(usize, 2), state.called(.health));
-        try std.testing.expectEqual(@as(usize, 2), state.called(.finalize));
-        try std.testing.expect(!state.dirty and !state.inactive and !state.disabled);
+    for (components) |component| {
+        const current = fake.state(component);
+        try std.testing.expectEqual(@as(usize, 1), current.restarts);
+        try std.testing.expectEqual(@as(usize, 0), current.starts);
+        try std.testing.expectEqual(@as(usize, 1), current.enables);
+        try std.testing.expectEqual(@as(usize, 1), current.reloads);
+        try std.testing.expectEqual(@as(usize, 1), current.downloads);
+        for ([_]remote.Operation{ .user, .directories, .binary, .unit }) |op| {
+            try std.testing.expectEqual(@as(usize, 1), current.writes[@intFromEnum(op)]);
+        }
+        try std.testing.expectEqual(@as(usize, 2), current.called(.health));
+        try std.testing.expect(!current.dirty);
     }
     try std.testing.expectEqual(@as(usize, 2), fake.vm.called(.capacity));
     try std.testing.expectEqual(@as(usize, 0), fake.vl.called(.capacity));
+    try std.testing.expectEqual(@as(usize, 0), fake.vt.called(.capacity));
 }
 
-test "changed VictoriaMetrics unit restarts only VictoriaMetrics" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var fake: Fake = .{};
-    try initialInstall(arena.allocator(), &fake);
-    fake.vm.present[@intFromEnum(remote.Operation.unit)] = false;
-    var report: install.Report = .{};
-    try install.install(arena.allocator(), fake.asRemote(), &report);
-    try std.testing.expectEqual(@as(usize, 2), fake.vm.restarts);
-    try std.testing.expectEqual(@as(usize, 1), fake.vl.restarts);
+test "binary and unit changes restart only their component and reload only changed units" {
+    for (components) |component| {
+        for ([_]remote.Operation{ .binary, .unit }) |changed| {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            var fake: Fake = .{};
+            try initialInstall(arena.allocator(), &fake);
+            const current = fake.state(component);
+            current.present[@intFromEnum(changed)] = false;
+            var repair: install.Report = .{};
+            try install.install(arena.allocator(), fake.asRemote(), &repair);
+            try std.testing.expectEqual(@as(usize, 2), repair.changes);
+            try expectRestarts(&fake, component, 2);
+            try std.testing.expectEqual(@as(usize, if (changed == .unit) 2 else 1), current.reloads);
+            var stable: install.Report = .{};
+            try install.install(arena.allocator(), fake.asRemote(), &stable);
+            try std.testing.expectEqual(@as(usize, 0), stable.changes);
+            try expectRestarts(&fake, component, 2);
+        }
+    }
 }
 
-test "changed VictoriaLogs binary or unit restarts only VictoriaLogs" {
-    for ([_]remote.Operation{ .binary, .unit }) |changed| {
+test "inactive services start and disabled services enable with only a required reload" {
+    for (components) |component| {
+        for ([_]bool{ false, true }) |disable| {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            var fake: Fake = .{};
+            try initialInstall(arena.allocator(), &fake);
+            const current = fake.state(component);
+            if (disable) current.disabled = true else current.inactive = true;
+            var report: install.Report = .{};
+            try install.install(arena.allocator(), fake.asRemote(), &report);
+            try std.testing.expectEqual(@as(usize, 1), report.changes);
+            try expectRestarts(&fake, null, 1);
+            try std.testing.expectEqual(@as(usize, if (disable) 0 else 1), current.starts);
+            try std.testing.expectEqual(@as(usize, if (disable) 2 else 1), current.enables);
+            try std.testing.expectEqual(@as(usize, if (disable) 2 else 1), current.reloads);
+        }
+    }
+}
+
+test "metadata-only repair does not redownload or restart matching binaries and units" {
+    for (components) |component| {
+        for ([_]remote.Operation{ .directories, .binary, .unit }) |op| {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            var fake: Fake = .{};
+            try initialInstall(arena.allocator(), &fake);
+            const current = fake.state(component);
+            current.metadata_drift = op;
+            var report: install.Report = .{};
+            try install.install(arena.allocator(), fake.asRemote(), &report);
+            try std.testing.expectEqual(@as(usize, 1), report.changes);
+            try expectRestarts(&fake, null, 1);
+            try std.testing.expectEqual(@as(usize, 1), current.downloads);
+            try std.testing.expectEqual(@as(usize, 1), current.reloads);
+        }
+    }
+}
+
+test "runtime-only enablement converges to persistent enabled state without restart" {
+    for (components) |component| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
         var fake: Fake = .{};
         try initialInstall(arena.allocator(), &fake);
-        fake.vl.present[@intFromEnum(changed)] = false;
-        var repair: install.Report = .{};
-        try install.install(arena.allocator(), fake.asRemote(), &repair);
-        try std.testing.expectEqual(@as(usize, 2), repair.changes);
-        try std.testing.expectEqual(@as(usize, 1), fake.vm.restarts);
-        try std.testing.expectEqual(@as(usize, 2), fake.vl.restarts);
+        const current = fake.state(component);
+        current.runtime_enabled = true;
+        var report: install.Report = .{};
+        try install.install(arena.allocator(), fake.asRemote(), &report);
+        try std.testing.expectEqual(@as(usize, 1), report.changes);
+        try std.testing.expectEqual(@as(usize, 2), current.enables);
+        try std.testing.expectEqual(@as(usize, 2), current.reloads);
+        try std.testing.expect(!current.runtime_enabled);
+        try expectRestarts(&fake, null, 1);
+    }
+}
+
+test "interrupted binary mutation leaves observable bytes and marker for retry without redownload" {
+    for (components) |component| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var fake: Fake = .{};
+        try initialInstall(arena.allocator(), &fake);
+        const current = fake.state(component);
+        current.present[@intFromEnum(remote.Operation.binary)] = false;
+        current.fail_after = .binary;
+        var failed: install.Report = .{};
+        try std.testing.expectError(error.RemoteOperationFailed, install.install(arena.allocator(), fake.asRemote(), &failed));
+        try std.testing.expectEqual(component, failed.component.?);
+        try std.testing.expectEqual(remote.Operation.binary, failed.phase);
+        try std.testing.expect(current.present[@intFromEnum(remote.Operation.binary)] and current.dirty);
+        try std.testing.expectEqual(@as(usize, 1), current.called(.unit));
+        current.fail_after = null;
+        var recovered: install.Report = .{};
+        try install.install(arena.allocator(), fake.asRemote(), &recovered);
+        try std.testing.expectEqual(@as(usize, 1), recovered.changes);
+        try std.testing.expectEqual(@as(usize, 2), current.downloads);
+        try std.testing.expectEqual(@as(usize, 1), current.reloads);
+        try expectRestarts(&fake, component, 2);
+        try std.testing.expect(!current.dirty);
+    }
+}
+
+test "interrupted unit mutation reloads once while interrupted reload resumes with only restart" {
+    for (components) |component| {
+        for ([_]bool{ false, true }) |after_reload| {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            var fake: Fake = .{};
+            try initialInstall(arena.allocator(), &fake);
+            const current = fake.state(component);
+            current.present[@intFromEnum(remote.Operation.unit)] = false;
+            if (after_reload) current.fail_after_reload = true else current.fail_after = .unit;
+            var failed: install.Report = .{};
+            try std.testing.expectError(error.RemoteOperationFailed, install.install(arena.allocator(), fake.asRemote(), &failed));
+            try std.testing.expect(current.dirty);
+            try std.testing.expectEqual(@as(usize, 1), current.called(.finalize));
+            current.fail_after = null;
+            current.fail_after_reload = false;
+            var recovered: install.Report = .{};
+            try install.install(arena.allocator(), fake.asRemote(), &recovered);
+            try std.testing.expectEqual(@as(usize, 2), current.reloads);
+            try expectRestarts(&fake, component, 2);
+            try std.testing.expect(!current.dirty);
+        }
+    }
+}
+
+test "stale loaded unit state reloads without inventing component restart intent" {
+    for (components) |component| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var fake: Fake = .{};
+        try initialInstall(arena.allocator(), &fake);
+        const current = fake.state(component);
+        current.stale_unit = true;
+        var report: install.Report = .{};
+        try install.install(arena.allocator(), fake.asRemote(), &report);
+        try std.testing.expectEqual(@as(usize, 1), report.changes);
+        try std.testing.expectEqual(@as(usize, 2), current.reloads);
+        try expectRestarts(&fake, null, 1);
+        try std.testing.expect(!current.dirty);
+    }
+}
+
+test "interrupted enable recovers global reload state without restarting any component" {
+    for (components) |component| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var fake: Fake = .{};
+        try initialInstall(arena.allocator(), &fake);
+        const current = fake.state(component);
+        current.disabled = true;
+        current.fail_after_enable = true;
+        var failed: install.Report = .{};
+        try std.testing.expectError(error.RemoteOperationFailed, install.install(arena.allocator(), fake.asRemote(), &failed));
+        try std.testing.expectEqual(component, failed.component.?);
+        try std.testing.expect(!current.disabled and !current.dirty and fake.enable_state_outdated);
+        try expectRestarts(&fake, null, 1);
+        current.fail_after_enable = false;
+        var recovered: install.Report = .{};
+        try install.install(arena.allocator(), fake.asRemote(), &recovered);
+        try std.testing.expectEqual(@as(usize, 1), recovered.changes);
+        try std.testing.expectEqual(@as(usize, 2), current.enables);
+        try std.testing.expectEqual(@as(usize, 4), fake.vm.reloads + fake.vl.reloads + fake.vt.reloads);
+        try std.testing.expect(!fake.enable_state_outdated);
+        try expectRestarts(&fake, null, 1);
         var stable: install.Report = .{};
         try install.install(arena.allocator(), fake.asRemote(), &stable);
         try std.testing.expectEqual(@as(usize, 0), stable.changes);
-        try std.testing.expectEqual(@as(usize, 2), fake.vl.restarts);
     }
 }
 
-test "inactive VictoriaLogs starts without rewriting or restarting unchanged resources" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var fake: Fake = .{};
-    try initialInstall(arena.allocator(), &fake);
-    fake.vl.inactive = true;
-    var report: install.Report = .{};
-    try install.install(arena.allocator(), fake.asRemote(), &report);
-    try std.testing.expectEqual(@as(usize, 1), report.changes);
-    try std.testing.expectEqual(@as(usize, 1), fake.vl.starts);
-    try std.testing.expectEqual(@as(usize, 1), fake.vl.restarts);
-    try std.testing.expectEqual(@as(usize, 1), fake.vm.restarts);
-}
-
-test "disabled VictoriaLogs is enabled without restarting a healthy service" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var fake: Fake = .{};
-    try initialInstall(arena.allocator(), &fake);
-    fake.vl.disabled = true;
-    var report: install.Report = .{};
-    try install.install(arena.allocator(), fake.asRemote(), &report);
-    try std.testing.expectEqual(@as(usize, 1), report.changes);
-    try std.testing.expectEqual(@as(usize, 2), fake.vl.enables);
-    try std.testing.expectEqual(@as(usize, 1), fake.vl.restarts);
-    try std.testing.expectEqual(@as(usize, 0), fake.vl.starts);
-    try std.testing.expectEqual(@as(usize, 1), fake.vm.restarts);
-}
-
-test "existing VictoriaMetrics user remains unchanged and binary failure stops later components" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var fake: Fake = .{};
-    fake.vm.fail = .binary;
-    fake.vm.present[@intFromEnum(remote.Operation.user)] = true;
-    var report: install.Report = .{};
-    try std.testing.expectError(error.RemoteOperationFailed, install.install(arena.allocator(), fake.asRemote(), &report));
-    try std.testing.expectEqual(remote.Operation.binary, report.phase);
-    try std.testing.expectEqual(install.Component.victoriametrics, report.component.?);
-    try std.testing.expectEqual(@as(usize, 5), fake.calls);
-    try std.testing.expectEqual(@as(usize, 0), fake.vm.restarts);
-    try std.testing.expectEqual(@as(usize, 0), fake.vl.called(.user));
-}
-
-test "failed VictoriaLogs binary stops its later steps and leaves VictoriaMetrics unchanged" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var fake: Fake = .{};
-    try initialInstall(arena.allocator(), &fake);
-    fake.vl.present[@intFromEnum(remote.Operation.binary)] = false;
-    fake.vl.fail = .binary;
-    var report: install.Report = .{};
-    try std.testing.expectError(error.RemoteOperationFailed, install.install(arena.allocator(), fake.asRemote(), &report));
-    try std.testing.expectEqual(remote.Operation.binary, report.phase);
-    try std.testing.expectEqual(install.Component.victorialogs, report.component.?);
-    try std.testing.expectEqual(@as(usize, 0), report.changes);
-    try std.testing.expectEqual(@as(usize, 1), fake.vl.called(.unit));
-    try std.testing.expectEqual(@as(usize, 1), fake.vl.called(.activate));
-    try std.testing.expectEqual(@as(usize, 1), fake.vl.called(.health));
-    try std.testing.expectEqual(@as(usize, 1), fake.vm.restarts);
-    try std.testing.expectEqual(@as(usize, 2), fake.vm.called(.health));
-    try std.testing.expect(!fake.vm.dirty and !fake.vm.inactive);
-}
-
-test "interrupted activation retains each component restart marker and retry recovers" {
-    for ([_]install.Component{ .victoriametrics, .victorialogs }) |component| {
+test "failed health retains each component marker until successful retry" {
+    for (components) |component| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
         var fake: Fake = .{};
-        const affected = if (component == .victorialogs) &fake.vl else &fake.vm;
-        affected.fail = .activate;
+        try initialInstall(arena.allocator(), &fake);
+        const current = fake.state(component);
+        current.present[@intFromEnum(remote.Operation.binary)] = false;
+        current.fail = .health;
         var failed: install.Report = .{};
         try std.testing.expectError(error.RemoteOperationFailed, install.install(arena.allocator(), fake.asRemote(), &failed));
         try std.testing.expectEqual(component, failed.component.?);
-        try std.testing.expect(affected.dirty);
-        try std.testing.expectEqual(@as(usize, 0), affected.called(.health));
-        try std.testing.expectEqual(@as(usize, 0), affected.called(.finalize));
-        affected.fail = null;
-        var recovered: install.Report = .{};
-        try install.install(arena.allocator(), fake.asRemote(), &recovered);
-        try std.testing.expectEqual(@as(usize, 1), fake.vm.restarts);
-        try std.testing.expectEqual(@as(usize, 1), fake.vl.restarts);
-        try std.testing.expect(!fake.vm.dirty and !fake.vl.dirty);
-    }
-}
-
-test "remote health failure never finalizes either component and retries preserve healthy peers" {
-    for ([_]install.Component{ .victoriametrics, .victorialogs }) |component| {
-        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-        defer arena.deinit();
-        var fake: Fake = .{};
-        const affected = if (component == .victorialogs) &fake.vl else &fake.vm;
-        affected.fail = .health;
-        var failed: install.Report = .{};
-        try std.testing.expectError(error.RemoteOperationFailed, install.install(arena.allocator(), fake.asRemote(), &failed));
         try std.testing.expectEqual(remote.Operation.health, failed.phase);
-        try std.testing.expectEqual(component, failed.component.?);
-        try std.testing.expect(affected.dirty);
-        try std.testing.expectEqual(@as(usize, 0), affected.called(.finalize));
-        if (component == .victorialogs) try std.testing.expect(!fake.vm.dirty and !fake.vm.inactive);
-        affected.fail = null;
+        try std.testing.expect(current.dirty);
+        try std.testing.expectEqual(@as(usize, 1), current.called(.finalize));
+        current.fail = null;
         var recovered: install.Report = .{};
         try install.install(arena.allocator(), fake.asRemote(), &recovered);
-        try std.testing.expectEqual(@as(usize, 2), affected.restarts);
-        try std.testing.expect(!affected.dirty);
-        if (component == .victorialogs) try std.testing.expectEqual(@as(usize, 1), fake.vm.restarts);
+        try expectRestarts(&fake, component, 3);
+        try std.testing.expectEqual(@as(usize, 1), current.reloads);
+        try std.testing.expect(!current.dirty);
     }
 }
 
-test "invalid VictoriaLogs metrics and read-only storage prevent controller finalization" {
-    const cases = .{
-        .{ "ok", error.VictoriaLogsMetricMissing },
-        .{ "vl_storage_is_read_only{path=\"/var/lib/dragontools/victorialogs\"} NaN\n", error.InvalidVictoriaLogsMetrics },
-        .{ "vl_storage_is_read_only{path=\"/var/lib/dragontools/victorialogs\"} 1\n", error.VictoriaLogsReadOnly },
-    };
-    inline for (cases) |case| {
+test "binary or activation failure stops later phases and preserves other components" {
+    for (components) |component| {
+        for ([_]remote.Operation{ .binary, .activate }) |op| {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            var fake: Fake = .{};
+            try initialInstall(arena.allocator(), &fake);
+            const current = fake.state(component);
+            current.present[@intFromEnum(remote.Operation.binary)] = false;
+            current.fail = op;
+            var failed: install.Report = .{};
+            try std.testing.expectError(error.RemoteOperationFailed, install.install(arena.allocator(), fake.asRemote(), &failed));
+            try std.testing.expectEqual(component, failed.component.?);
+            try std.testing.expectEqual(op, failed.phase);
+            try std.testing.expectEqual(@as(usize, 1), current.called(.health));
+            try std.testing.expectEqual(@as(usize, 1), current.called(.finalize));
+            try expectRestarts(&fake, null, 1);
+            if (op == .activate) try std.testing.expect(current.dirty);
+        }
+    }
+}
+
+test "conflicting users and unexpected directory symlinks fail explicitly before later phases" {
+    for (components) |component| {
+        for ([_]remote.Operation{ .user, .directories }) |op| {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            var fake: Fake = .{};
+            try initialInstall(arena.allocator(), &fake);
+            const current = fake.state(component);
+            current.fail = op;
+            current.failure_code = if (op == .user) 41 else 43;
+            var failed: install.Report = .{};
+            const expected = if (op == .user) error.ServiceAccountConflict else error.UnexpectedManagedSymlink;
+            try std.testing.expectError(expected, install.install(arena.allocator(), fake.asRemote(), &failed));
+            try std.testing.expectEqual(component, failed.component.?);
+            try std.testing.expectEqual(@as(usize, 1), current.called(.binary));
+            try std.testing.expectEqual(@as(usize, 0), failed.changes);
+        }
+    }
+}
+
+test "controller rejection of invalid application metrics prevents finalization" {
+    for (components) |component| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
         var fake: Fake = .{};
-        fake.vl.health_output = case[0];
+        const current = fake.state(component);
+        current.health_output = "not application metrics";
         var report: install.Report = .{};
-        try std.testing.expectError(case[1], install.install(arena.allocator(), fake.asRemote(), &report));
-        try std.testing.expectEqual(install.Component.victorialogs, report.component.?);
+        const result = install.install(arena.allocator(), fake.asRemote(), &report);
+        try std.testing.expectError(switch (component) {
+            .victoriametrics => error.InvalidHealthResponse,
+            .victorialogs => error.VictoriaLogsMetricMissing,
+            .victoriatraces => error.VictoriaTracesMetricMissing,
+        }, result);
+        try std.testing.expectEqual(component, report.component.?);
         try std.testing.expectEqual(remote.Operation.health, report.phase);
-        try std.testing.expect(fake.vl.dirty);
-        try std.testing.expectEqual(@as(usize, 0), fake.vl.called(.finalize));
-        try std.testing.expectEqual(@as(usize, 1), fake.vm.called(.finalize));
-        try std.testing.expect(!fake.vm.dirty and !fake.vm.inactive);
-        fake.vl.health_output = null;
-        var recovered: install.Report = .{};
-        try install.install(arena.allocator(), fake.asRemote(), &recovered);
-        try std.testing.expect(!fake.vl.dirty);
-        try std.testing.expectEqual(@as(usize, 1), fake.vm.restarts);
-        try std.testing.expectEqual(@as(usize, 2), fake.vl.restarts);
+        try std.testing.expect(current.dirty);
+        try std.testing.expectEqual(@as(usize, 0), current.called(.finalize));
     }
 }
 
-test "verify checks both components without mutation and fails on unhealthy VictoriaLogs" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    var fake: Fake = .{};
-    try initialInstall(arena.allocator(), &fake);
-    var report: install.Report = .{};
-    try verify.verify(arena.allocator(), fake.asRemote(), &report);
-    try std.testing.expectEqual(@as(usize, 0), report.changes);
-    for ([_]ComponentState{ fake.vm, fake.vl }) |state| {
-        try std.testing.expectEqual(@as(usize, 2), state.called(.health));
-        try std.testing.expectEqual(@as(usize, 1), state.called(.activate));
-        try std.testing.expectEqual(@as(usize, 1), state.called(.finalize));
+test "verify checks all three without mutation and fails on any unhealthy component" {
+    for (components) |component| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var fake: Fake = .{};
+        try initialInstall(arena.allocator(), &fake);
+        var report: install.Report = .{};
+        try verify.verify(arena.allocator(), fake.asRemote(), &report);
+        try std.testing.expectEqual(@as(usize, 0), report.changes);
+        for (components) |checked| {
+            const current = fake.state(checked);
+            try std.testing.expectEqual(@as(usize, 2), current.called(.health));
+            try std.testing.expectEqual(@as(usize, 1), current.called(.activate));
+            try std.testing.expectEqual(@as(usize, 1), current.called(.finalize));
+        }
+        fake.state(component).fail = .health;
+        var failed: install.Report = .{};
+        try std.testing.expectError(error.RemoteOperationFailed, verify.verify(arena.allocator(), fake.asRemote(), &failed));
+        try std.testing.expectEqual(component, failed.component.?);
+        try std.testing.expectEqual(remote.Operation.health, failed.phase);
+        try expectRestarts(&fake, null, 1);
     }
-    fake.vl.health_output = "vl_storage_is_read_only{path=\"/var/lib/dragontools/victorialogs\"} 1\n";
-    var failed: install.Report = .{};
-    try std.testing.expectError(error.VictoriaLogsReadOnly, verify.verify(arena.allocator(), fake.asRemote(), &failed));
-    try std.testing.expectEqual(install.Component.victorialogs, failed.component.?);
-    try std.testing.expectEqual(remote.Operation.health, failed.phase);
-    try std.testing.expectEqual(@as(usize, 1), fake.vl.called(.finalize));
 }
 
 test "every rendered remote shell fragment parses without executing mutations" {
@@ -323,4 +497,68 @@ test "every rendered remote shell fragment parses without executing mutations" {
     var fake: Fake = .{ .check_syntax = true };
     var report: install.Report = .{};
     try install.install(arena.allocator(), fake.asRemote(), &report);
+}
+
+test "rendered activation shell orders enable reload and isolated restart using safe command substitutes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{ install.activate, install.activate_victorialogs, install.activate_victoriatraces }) |activation| {
+        // Execute only activation, with a private temporary marker path and
+        // shell functions replacing systemctl/stat. This checks shell ordering,
+        // not actual systemd behavior or privileged filesystem installation.
+        const body = try std.mem.replaceOwned(u8, a, activation, "/var/lib/dragontools/", "$DRAGONTOOLS_TEST_TMP/");
+        const script = try std.fmt.allocPrint(a,
+            \\set -eu
+            \\DRAGONTOOLS_TEST_TMP=$(mktemp -d "${{TMPDIR:-/tmp}}/dragontools-activation.XXXXXX")
+            \\trap 'rm -rf "$DRAGONTOOLS_TEST_TMP"' EXIT
+            \\stat() {{ test "$1" = -c; printf 0:0; }}
+            \\systemctl() {{
+            \\  case "$1" in
+            \\    is-enabled) case "$enabled" in yes) printf enabled;; runtime) printf enabled-runtime;; no) printf disabled; return 1;; *) return 99;; esac ;;
+            \\    is-active) test "$active" = yes ;;
+            \\    enable) test "$2" = --no-reload; enabled=yes; reload=yes; calls="$calls enable" ;;
+            \\    daemon-reload) reload=no; loaded=loaded; calls="$calls reload" ;;
+            \\    restart) test "$reload" = no; active=yes; calls="$calls restart" ;;
+            \\    start) test "$reload" = no; active=yes; calls="$calls start" ;;
+            \\    show) case "$3" in NeedDaemonReload) printf '%s' "$reload";; LoadState) printf '%s' "$loaded";; *) return 99;; esac ;;
+            \\    *) return 99 ;;
+            \\  esac
+            \\}}
+            \\activation() {{
+            \\{s}
+            \\}}
+            \\enabled=yes; active=yes; reload=no; loaded=loaded; calls=''
+            \\activation > "$DRAGONTOOLS_TEST_TMP/output"
+            \\test "$(cat "$DRAGONTOOLS_TEST_TMP/output")" = unchanged
+            \\test -z "$calls"
+            \\enabled=no; calls=''
+            \\activation > "$DRAGONTOOLS_TEST_TMP/output"
+            \\test "$(cat "$DRAGONTOOLS_TEST_TMP/output")" = changed
+            \\test "$calls" = ' enable reload'
+            \\test ! -e "$pending"
+            \\enabled=runtime; calls=''
+            \\activation > "$DRAGONTOOLS_TEST_TMP/output"
+            \\test "$calls" = ' enable reload'
+            \\test ! -e "$pending"
+            \\reload=yes; calls=''
+            \\activation > "$DRAGONTOOLS_TEST_TMP/output"
+            \\test "$calls" = ' reload'
+            \\test ! -e "$pending"
+            \\: > "$pending"; calls=''
+            \\activation > "$DRAGONTOOLS_TEST_TMP/output"
+            \\test "$calls" = ' restart'
+            \\test -f "$pending"
+            \\reload=yes; calls=''
+            \\activation > "$DRAGONTOOLS_TEST_TMP/output"
+            \\test "$calls" = ' reload restart'
+            \\rm "$pending"
+            \\active=no; calls=''
+            \\activation > "$DRAGONTOOLS_TEST_TMP/output"
+            \\test "$calls" = ' start'
+        , .{body});
+        const result = try std.process.run(a, std.testing.io, .{ .argv = &.{ "/bin/sh", "-c", script } });
+        try std.testing.expectEqualStrings("", result.stderr);
+        try std.testing.expectEqual(@as(u8, 0), result.term.exited);
+    }
 }

@@ -3,6 +3,7 @@ const parse = @import("parse.zig");
 const spec = @import("spec.zig");
 const remote = @import("../system/remote.zig");
 const policy = @import("../monitoring/policy.zig");
+const vt = @import("../components/victoriatraces.zig");
 
 /// The caller owns input storage and the operation arena. The wizard only reads,
 /// writes, and returns ordinary CLI arguments; it never executes an operation.
@@ -150,27 +151,29 @@ const overview = std.fmt.comptimePrint(
     \\  Metrics retention: {d} days. Reserve: {d}% of data filesystem capacity.
     \\  Below the reserve, ingestion stops; this is not a hard disk quota.
     \\  VictoriaLogs: logs on the station, bound to 127.0.0.1:9428.
-    \\  Logs retention: disk-bound, logical limit {s}; native cleanup at {d}%.
-    \\  Cleanup is periodic and preserves the newest two days; usage can exceed
-    \\  the threshold. No application-host ingestion is configured.
+    \\  Logs retention: disk-bound, logical limit {s}; partition budget {d}% of capacity.
+    \\  VictoriaTraces: traces on the station, bound to {s}.
+    \\  Traces retention: disk-bound, logical limit {s}; partition budget {d}% of capacity.
+    \\  Logs/traces cleanup is periodic and preserves the newest two partitions.
+    \\  Each budget excludes other writers, so adequate headroom is required.
+    \\  No application-host ingestion is configured.
     \\  SSH installation with strict host-key checks, dedicated service users,
     \\  pinned and checksum-verified binaries, and systemd hardening.
     \\
     \\Roadmap only - not installed or configured in this release
     \\  Monitoring station:
-    \\    VictoriaTraces        traces
     \\    Grafana               UI and authentication
     \\    vmalert               alert evaluation
     \\    Alertmanager          alert routing; optional Telegram
     \\  Monitored server:
-    \\    vmagent               metrics forwarding
-    \\    Vector                log forwarding
+    \\    vmagent               application /metrics scraping
+    \\    Vector                journal logs and host metrics
     \\    OpenTelemetry Collector  traces
-    \\    node_exporter         host metrics
     \\    maintenance checker   update and security checks
     \\  Security: source-IP restrictions, TLS, Grafana authentication,
     \\    bounded journald, and dedicated hardening for each new component.
-    \\  Intended defaults: traces disk-bound; disk warning {d}%, critical {d}%;
+    \\  Host metric contract waits for Vector; service-state monitoring is deferred.
+    \\  Intended defaults: disk warning {d}%, critical {d}%;
     \\    automatic OS security updates; no automatic reboot;
     \\    component updates notification only; Telegram optional.
     \\
@@ -180,7 +183,7 @@ const overview = std.fmt.comptimePrint(
     \\This overview contacts no hosts or secret providers.
     \\
 ,
-    .{ policy.metrics.retention_days, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent, policy.disk.warning_percent, policy.disk.critical_percent },
+    .{ policy.metrics.retention_days, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent, vt.listen_address, policy.traces.retention, policy.traces.cleanup_usage_percent, policy.disk.warning_percent, policy.disk.critical_percent },
 );
 
 /// Returns validated argv without the executable name, or null on cancellation
@@ -283,7 +286,7 @@ fn workflow(input: Input, command: spec.Command) !?[]const []const u8 {
     var step: Step = .host;
     var history: std.ArrayList(Step) = .empty;
     defer history.deinit(input.a);
-    if (command == .install) try input.write(std.fmt.comptimePrint("\nThis release installs VictoriaMetrics and VictoriaLogs on loopback only.\nMetrics retention is {d} days, with a {d}% data filesystem reserve.\nLogs retain as much history as fits, with a {s} logical limit and native\ncleanup at {d}% filesystem usage. Checks are periodic and preserve the newest\ntwo days, so usage can exceed the threshold. These defaults are fixed.\nTraces and application-host log ingestion remain unavailable.\n", .{ policy.metrics.retention_days, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent }));
+    if (command == .install) try input.write(std.fmt.comptimePrint("\nThis release installs VictoriaMetrics, VictoriaLogs and VictoriaTraces on loopback only.\nMetrics retention is {d} days, with a {d}% data filesystem reserve.\nLogs retain as much history as fits, with a {s} logical limit and a {d}%\nfilesystem-capacity partition budget.\nTraces use a {s} logical limit and a {d}% filesystem-capacity partition budget.\nBoth budgets exclude other writers and preserve the newest two partitions.\nCleanup is periodic; adequate capacity/headroom is required. These defaults are fixed.\nApplication-host ingestion remains unavailable. Reruns inspect actual state,\nresume pending activation, and leave healthy unchanged services running.\n", .{ policy.metrics.retention_days, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent, policy.traces.retention, policy.traces.cleanup_usage_percent }));
     if (command == .agents_install) try input.write("\nAgent installation is unavailable in this release; even --plan is rejected\nbefore SSH. This helper can collect and preview future CLI configuration.\nThe intended install includes Vector, vmagent, OpenTelemetry Collector,\nhost metrics and a maintenance/update checker. It must inspect and bound\njournald and verify signal arrival before reporting installation success.\n");
     if (command == .firewall) try input.write("\nFirewall management is unavailable; even --plan is rejected before SSH.\nIntended policy: admin IPs may access SSH and Grafana; agent IPs may submit\ntelemetry only. DragonTools will manage monitoring-related rules only and\nmust preserve unrelated administrator configuration. This helper previews\nfuture configuration; it cannot claim that access restrictions are applied.\n");
     while (true) {
@@ -370,7 +373,7 @@ fn answerStep(input: Input, answers: *Answers, step: Step) !Step {
             return answers.afterConnection();
         },
         .extras => {
-            answers.extras = try input.yesNo("Collect roadmap-only domain/TLS/IP/Telegram settings?", "Choose no for the working VictoriaMetrics and VictoriaLogs installation. Supplying roadmap flags makes the CLI reject the operation before SSH, even in plan mode.");
+            answers.extras = try input.yesNo("Collect roadmap-only domain/TLS/IP/Telegram settings?", "Choose no for the working VictoriaMetrics, VictoriaLogs and VictoriaTraces installation. Supplying roadmap flags makes the CLI reject the operation before SSH, even in plan mode.");
             if (answers.extras) try input.write("These optional integrations are unavailable. Any supplied roadmap flags\nwill be validated, then rejected before SSH, including in --plan mode.\n");
             return if (answers.extras) .domain else .review;
         },
@@ -451,7 +454,7 @@ fn commandPreview(input: Input, args: []const []const u8) !void {
 fn preview(input: Input, args: []const []const u8, options: parse.Options) !void {
     try commandPreview(input, args);
     const summary = try std.fmt.allocPrint(input.a, "{s}\nHost: {s}\nSSH user: {s}\nSSH port: {d}\n", .{ switch (options.command) {
-        .install => "Monitoring station: VictoriaMetrics and VictoriaLogs",
+        .install => "Monitoring station: VictoriaMetrics, VictoriaLogs and VictoriaTraces",
         .verify => "Verify monitoring station (read-only health checks)",
         .status => "Monitoring status (read-only state summary)",
         .agents_install => "Connect monitored server (unavailable)",
@@ -460,7 +463,7 @@ fn preview(input: Input, args: []const []const u8, options: parse.Options) !void
     }, options.host, options.user, options.port });
     try input.write(summary);
     if (options.command == .install) {
-        try input.write(try std.fmt.allocPrint(input.a, "Domain: {s}\nAdmin IPs: {d}\nAgent IPs: {d}\nTLS: {s}\nTelegram: {s}\nStorage: metrics {d} days; {d}% data filesystem reserve.\nLogs: disk-bound retention, logical limit {s}; native cleanup at {d}%.\nListeners: loopback:8428 (metrics), loopback:9428 (logs).\nTraces and application-host ingestion are unavailable.\n", .{ options.domain orelse "none", options.admin_ips.items.len, options.agent_ips.items.len, options.tls orelse "none", if (options.telegram_token_op != null) "requested (unavailable)" else "disabled", policy.metrics.retention_days, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent }));
+        try input.write(try std.fmt.allocPrint(input.a, "Domain: {s}\nAdmin IPs: {d}\nAgent IPs: {d}\nTLS: {s}\nTelegram: {s}\nStorage: metrics {d} days; {d}% data filesystem reserve.\nLogs: disk-bound retention, logical limit {s}; partition budget {d}% of filesystem capacity (other writers excluded).\nTraces: disk-bound retention, logical limit {s}; partition budget {d}% of filesystem capacity (other writers excluded).\nListeners: loopback:8428 (metrics), loopback:9428 (logs), loopback:{d} (traces).\nApplication-host ingestion is unavailable. An unchanged rerun requires no restart.\n", .{ options.domain orelse "none", options.admin_ips.items.len, options.agent_ips.items.len, options.tls orelse "none", if (options.telegram_token_op != null) "requested (unavailable)" else "disabled", policy.metrics.retention_days, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent, policy.traces.retention, policy.traces.cleanup_usage_percent, vt.port }));
     }
     if (options.command == .agents_install) try input.write(try std.fmt.allocPrint(input.a, "Station IP: {s}\nServices: {d}\n", .{ options.station_ip orelse "none", options.services.items.len }));
     if (options.command == .firewall) try input.write(try std.fmt.allocPrint(input.a, "Admin IPs: {d}\nAgent IPs: {d}\nNo firewall rules can be applied in this release.\n", .{ options.admin_ips.items.len, options.agent_ips.items.len }));
@@ -516,8 +519,8 @@ test "wizard defaults generate the same supported install plan as regular CLI" {
     try std.testing.expect(options.plan);
     try std.testing.expect(!options.unsupported());
     try std.testing.expect(script.contains("Metrics retention is 90 days"));
-    try std.testing.expect(script.contains("VictoriaMetrics and VictoriaLogs"));
-    try std.testing.expect(script.contains("logical limit 100y; native cleanup at 75%"));
+    try std.testing.expect(script.contains("VictoriaMetrics, VictoriaLogs and VictoriaTraces"));
+    try std.testing.expect(script.contains("logical limit 100y; partition budget 75%"));
     try std.testing.expect(script.contains("20%"));
     try std.testing.expect(script.contains("dragontool 'monitoring' 'install'"));
 }

@@ -19,7 +19,8 @@ pub fn health(a: std.mem.Allocator, r: remote.Remote, report: *install.Report, a
         \\check_property NeedDaemonReload no
         \\check_property DropInPaths ""
         \\systemctl is-active --quiet dragontools-victorialogs.service
-        \\systemctl is-enabled --quiet dragontools-victorialogs.service
+        \\enabled=$(systemctl is-enabled dragontools-victorialogs.service)
+        \\test "$enabled" = enabled
         \\test ! -L /etc/systemd/system/dragontools-victorialogs.service
         \\test -f /etc/systemd/system/dragontools-victorialogs.service
         \\test "$(stat -c '%u:%g:%a' /etc/systemd/system/dragontools-victorialogs.service)" = 0:0:644

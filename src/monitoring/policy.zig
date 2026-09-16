@@ -1,4 +1,4 @@
-//! Opinionated defaults, shared by the working metrics slice and future telemetry.
+//! Opinionated storage defaults and prospective alert policies.
 //! Retention/alert policy alone does not install or activate a component.
 const std = @import("std");
 
@@ -11,10 +11,12 @@ pub const metrics = .{
 pub const disk = .{
     .info_percent = @as(u8, 60),
     .warning_percent = @as(u8, 70),
-    // This is a future VL/VT native retention target, not an alert severity.
+    // Native VL/VT retention target, separate from alert severity.
     .cleanup_percent = @as(u8, 75),
     .critical_percent = @as(u8, 80),
 };
+// Pinned VL/VT compare their own partition bytes with this percentage of total
+// filesystem capacity. This is not a cap on overall usage from all writers.
 pub const logs = .{
     .retention = "100y",
     .cleanup_usage_percent = disk.cleanup_percent,
@@ -52,27 +54,6 @@ pub fn metricsReserve(capacity: u64) !u64 {
     if (capacity == 0) return error.InvalidCapacity;
     const divisor = @divExact(100, @as(u64, metrics.reserve_percent));
     return capacity / divisor + @intFromBool(capacity % divisor != 0);
-}
-
-/// Informational only: no native log/trace retention controls are applied yet.
-pub fn renderPlan(a: std.mem.Allocator) ![]const u8 {
-    return std.fmt.allocPrint(a, "\nMonitoring policy:\n" ++
-        "  metrics retention: {s}; filesystem reserve: {d}% (implemented)\n" ++
-        "  logs retention: disk-bound, logical limit {s}; planned native cleanup at {d}% filesystem usage\n" ++
-        "  traces retention: disk-bound, logical limit {s}; planned native cleanup at {d}% filesystem usage\n" ++
-        "  disk alerts: info {d}%, warning {d}%, critical {d}% (planned)\n" ++
-        "Logs, traces and alerts are not yet installed. Rule rendering is local only.\n" ++
-        "No log/trace cleanup, rule deployment or alert evaluation is performed.\n", .{
-        metrics.retention,
-        metrics.reserve_percent,
-        logs.retention,
-        logs.cleanup_usage_percent,
-        traces.retention,
-        traces.cleanup_usage_percent,
-        disk.info_percent,
-        disk.warning_percent,
-        disk.critical_percent,
-    });
 }
 
 test "storage and disk policy defaults" {
@@ -115,12 +96,4 @@ test "metrics reserve retains round-up and maximum-capacity behavior" {
     for ([_]u64{ 1, 4, 5, 6, 100, 101, std.math.maxInt(u64) }) |capacity| {
         try std.testing.expectEqual(capacity / 5 + @intFromBool(capacity % 5 != 0), try metricsReserve(capacity));
     }
-}
-test "policy plan distinguishes planned cleanup and alerting from installed metrics" {
-    const output = try renderPlan(std.testing.allocator);
-    defer std.testing.allocator.free(output);
-    try std.testing.expect(std.mem.indexOf(u8, output, "metrics retention: 90d; filesystem reserve: 20% (implemented)") != null);
-    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, output, "logical limit 100y; planned native cleanup at 75%"));
-    try std.testing.expect(std.mem.indexOf(u8, output, "info 60%, warning 70%, critical 80% (planned)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "Logs, traces and alerts are not yet installed") != null);
 }

@@ -1,8 +1,8 @@
 //! One small catalog shared by the strict parser and local UX frontends.
 const std = @import("std");
-pub const Command = enum { install, verify, status, agents_install, agents_verify, agents_status, firewall };
+pub const Command = enum { install, verify, status, agents_install, agents_verify, agents_status, firewall, install_oh_my_zsh };
 pub const Shell = enum { bash, zsh, fish };
-pub const Node = enum { root, monitoring, install, verify, status, agents, agents_install, agents_verify, agents_status, firewall, completion, completion_bash, completion_zsh, completion_fish, wizard };
+pub const Node = enum { root, monitoring, install, verify, status, agents, agents_install, agents_verify, agents_status, firewall, host, install_oh_my_zsh, completion, completion_bash, completion_zsh, completion_fish, wizard };
 pub const CommandSpec = struct {
     node: Node,
     parent: ?Node,
@@ -11,16 +11,18 @@ pub const CommandSpec = struct {
     command: ?Command = null,
 };
 pub const commands = [_]CommandSpec{
-    .{ .node = .root, .parent = null, .name = "dragontool", .description = "Opinionated monitoring over SSH" },
+    .{ .node = .root, .parent = null, .name = "dragontool", .description = "Opinionated monitoring and small host utilities over SSH" },
     .{ .node = .monitoring, .parent = .root, .name = "monitoring", .description = "Install, verify and inspect monitoring" },
-    .{ .node = .install, .parent = .monitoring, .name = "install", .description = "Install VictoriaMetrics and VictoriaLogs", .command = .install },
-    .{ .node = .verify, .parent = .monitoring, .name = "verify", .description = "Verify installed VictoriaMetrics and VictoriaLogs", .command = .verify },
+    .{ .node = .install, .parent = .monitoring, .name = "install", .description = "Install VictoriaMetrics, VictoriaLogs and VictoriaTraces", .command = .install },
+    .{ .node = .verify, .parent = .monitoring, .name = "verify", .description = "Verify installed VictoriaMetrics, VictoriaLogs and VictoriaTraces", .command = .verify },
     .{ .node = .status, .parent = .monitoring, .name = "status", .description = "Show monitoring service state", .command = .status },
     .{ .node = .agents, .parent = .monitoring, .name = "agents", .description = "Manage monitored hosts (not yet available)" },
     .{ .node = .agents_install, .parent = .agents, .name = "install", .description = "Connect a monitored host (not yet available)", .command = .agents_install },
     .{ .node = .agents_verify, .parent = .agents, .name = "verify", .description = "Verify a monitored host (not yet available)", .command = .agents_verify },
     .{ .node = .agents_status, .parent = .agents, .name = "status", .description = "Show agent state (not yet available)", .command = .agents_status },
     .{ .node = .firewall, .parent = .monitoring, .name = "firewall", .description = "Configure monitoring firewall rules (not yet available)", .command = .firewall },
+    .{ .node = .host, .parent = .root, .name = "host", .description = "Small host utilities, separate from monitoring" },
+    .{ .node = .install_oh_my_zsh, .parent = .host, .name = "install-oh-my-zsh", .description = "Install zsh and Oh My Zsh only when missing; preserve existing .zshrc", .command = .install_oh_my_zsh },
     .{ .node = .completion, .parent = .root, .name = "completion", .description = "Print a local shell completion script" },
     .{ .node = .completion_bash, .parent = .completion, .name = "bash", .description = "Print Bash completion" },
     .{ .node = .completion_zsh, .parent = .completion, .name = "zsh", .description = "Print Zsh completion" },
@@ -39,18 +41,22 @@ pub const FlagSpec = struct {
     unavailable: bool = false,
     commands: []const Command,
 };
-const all = &[_]Command{ .install, .verify, .status, .agents_install, .agents_verify, .agents_status, .firewall };
-const mutations = &[_]Command{ .install, .agents_install, .firewall };
+const all = &[_]Command{ .install, .verify, .status, .agents_install, .agents_verify, .agents_status, .firewall, .install_oh_my_zsh };
+const monitoring = &[_]Command{ .install, .verify, .status, .agents_install, .agents_verify, .agents_status, .firewall };
+const mutations = &[_]Command{ .install, .agents_install, .firewall, .install_oh_my_zsh };
+const host = &[_]Command{.install_oh_my_zsh};
 const station = &[_]Command{.install};
 const agents = &[_]Command{ .agents_install, .agents_verify };
 const network = &[_]Command{ .install, .firewall };
 pub const flags = [_]FlagSpec{
-    .{ .name = "--host", .description = "Target host (required)", .metavar = "HOST", .group = "Required", .commands = all },
+    .{ .name = "--host", .description = "Direct target host", .metavar = "HOST", .group = "Required", .commands = all },
+    .{ .name = "--ssh-host", .description = "OpenSSH host/alias; use normal SSH configuration", .metavar = "ALIAS", .group = "Connection", .commands = host },
     .{ .name = "--user", .description = "SSH user (default: root)", .metavar = "USER", .group = "Connection", .commands = all },
     .{ .name = "--port", .description = "SSH port (default: 22)", .metavar = "PORT", .group = "Connection", .commands = all },
     .{ .name = "--ssh-sock", .description = "SSH agent socket, including 1Password agent", .metavar = "PATH", .kind = .path, .group = "Connection", .commands = all },
     .{ .name = "--identity", .description = "SSH identity file (absolute path)", .metavar = "PATH", .kind = .path, .group = "Connection", .commands = all },
-    .{ .name = "--ssh-op-path", .description = "1Password private-key reference", .metavar = "REF", .kind = .reference, .group = "Connection", .unavailable = true, .commands = all },
+    .{ .name = "--ssh-op-path", .description = "1Password private-key reference", .metavar = "REF", .kind = .reference, .group = "Connection", .unavailable = true, .commands = monitoring },
+    .{ .name = "--target-user", .description = "Existing target account (default: actual SSH login user)", .metavar = "USER", .group = "Host utility", .commands = host },
     .{ .name = "--station-ip", .description = "Monitoring station IP address", .metavar = "IP", .group = "Monitoring", .unavailable = true, .commands = agents },
     .{ .name = "--service", .description = "Selected systemd service (repeatable)", .metavar = "NAME.service", .group = "Monitoring", .repeatable = true, .unavailable = true, .commands = agents },
     .{ .name = "--domain", .description = "Monitoring domain", .metavar = "DOMAIN", .group = "Monitoring", .unavailable = true, .commands = station },

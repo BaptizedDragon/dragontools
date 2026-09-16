@@ -1,6 +1,7 @@
 const std = @import("std");
 const spec = @import("spec.zig");
 const policy = @import("../monitoring/policy.zig");
+const vt = @import("../components/victoriatraces.zig");
 
 fn writePath(w: *std.Io.Writer, node: spec.Node) !void {
     if (node == .root) return w.writeAll("dragontool");
@@ -21,6 +22,11 @@ fn writeFlag(w: *std.Io.Writer, flag: spec.FlagSpec) !void {
     try w.writeByte('\n');
 }
 
+fn isRequiredConnection(flag: spec.FlagSpec, command: spec.Command) bool {
+    return std.mem.eql(u8, flag.name, "--host") or
+        (command == .install_oh_my_zsh and std.mem.eql(u8, flag.name, "--ssh-host"));
+}
+
 /// Help and completions consume the same metadata as the strict parser.
 pub fn render(a: std.mem.Allocator, node: spec.Node) ![]const u8 {
     var out: std.Io.Writer.Allocating = .init(a);
@@ -30,8 +36,8 @@ pub fn render(a: std.mem.Allocator, node: spec.Node) ![]const u8 {
     if (node == .root) try w.writeAll("DragonTools 0.1.0-dev\n\n");
     try w.print("{s}\n\nUsage:\n  ", .{item.description});
     try writePath(w, node);
-    if (item.command != null) {
-        try w.writeAll(" --host HOST [options]\n");
+    if (item.command) |command| {
+        try w.writeAll(if (command == .install_oh_my_zsh) " (--ssh-host ALIAS | --host HOST) [options]\n" else " --host HOST [options]\n");
     } else {
         var has_children = false;
         for (spec.commands) |child| {
@@ -49,22 +55,25 @@ pub fn render(a: std.mem.Allocator, node: spec.Node) ![]const u8 {
     }
 
     if (item.command) |command| {
-        try w.writeAll("\nRequired:\n");
+        try w.writeAll(if (command == .install_oh_my_zsh) "\nConnection (choose one):\n" else "\nRequired:\n");
+        if (command == .install_oh_my_zsh) try writeFlag(w, spec.flag("--ssh-host").?);
         try writeFlag(w, spec.flag("--host").?);
         // Group names and option availability are defined once in spec.zig.
         for (spec.flags, 0..) |flag, i| {
-            if (!spec.flagAllowed(flag, command) or (std.mem.eql(u8, flag.name, "--host") or std.mem.eql(u8, flag.name, "--help"))) continue;
+            if (!spec.flagAllowed(flag, command) or isRequiredConnection(flag, command) or std.mem.eql(u8, flag.name, "--help")) continue;
             var prior_group = false;
             for (spec.flags[0..i]) |previous| {
-                if (spec.flagAllowed(previous, command) and !std.mem.eql(u8, previous.name, "--host") and !std.mem.eql(u8, previous.name, "--help") and std.mem.eql(u8, previous.group, flag.group)) prior_group = true;
+                if (spec.flagAllowed(previous, command) and !isRequiredConnection(previous, command) and !std.mem.eql(u8, previous.name, "--help") and std.mem.eql(u8, previous.group, flag.group)) prior_group = true;
             }
             if (prior_group) continue;
             try w.print("\n{s}:\n", .{if (flag.group.len == 0) "Options" else flag.group});
             for (spec.flags) |grouped| {
-                if (spec.flagAllowed(grouped, command) and !std.mem.eql(u8, grouped.name, "--host") and !std.mem.eql(u8, grouped.name, "--help") and std.mem.eql(u8, grouped.group, flag.group)) try writeFlag(w, grouped);
+                if (spec.flagAllowed(grouped, command) and !isRequiredConnection(grouped, command) and !std.mem.eql(u8, grouped.name, "--help") and std.mem.eql(u8, grouped.group, flag.group)) try writeFlag(w, grouped);
             }
         }
-        try w.writeAll("\nSSH defaults: user root, port 22, environment agent/default identities.\nStrict host-key checking is always enabled. Explicit authentication modes are exclusive.\n");
+        if (command == .install_oh_my_zsh) {
+            try w.writeAll("\nAlias mode: OpenSSH resolves HostName, User, Port, IdentityAgent, IdentityFile\nand ProxyJump through normal SSH configuration. Do not combine --ssh-host\nwith direct connection options. Direct mode defaults: user root, port 22,\nenvironment agent/default identities. Strict host-key checking is always enabled.\n");
+        } else try w.writeAll("\nSSH defaults: user root, port 22, environment agent/default identities.\nStrict host-key checking is always enabled. Explicit authentication modes are exclusive.\n");
     }
     try w.writeAll("\n  --help\n      Show help for this command.\n");
 
@@ -86,7 +95,7 @@ pub fn render(a: std.mem.Allocator, node: spec.Node) ![]const u8 {
         \\  mkdir -p ~/.config/fish/completions
         \\  dragontool completion fish > ~/.config/fish/completions/dragontool.fish
         \\
-        \\DragonTools never edits shell startup files.
+        \\Completion never edits shell startup files.
         \\
     );
     if (node == .wizard) try w.writeAll(
@@ -98,7 +107,22 @@ pub fn render(a: std.mem.Allocator, node: spec.Node) ![]const u8 {
         \\The information-only path performs no remote operations.
         \\
     );
-    try w.print("\nImplemented: VictoriaMetrics and VictoriaLogs.\nVictoriaMetrics: loopback:8428; retention {s}; reserve {d}%.\nVictoriaLogs: loopback:9428; disk-bound retention; logical limit {s}; native cleanup {d}%.\nCleanup is periodic and preserves the newest two days; usage can exceed the threshold.\n", .{ policy.metrics.retention, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent });
+    if (node == .host or node == .install_oh_my_zsh) {
+        try w.writeAll(
+            \\
+            \\Installs zsh and pinned Oh My Zsh only when missing on Ubuntu/Debian.
+            \\The default target is the actual SSH login user; --target-user selects an
+            \\existing account. Its home comes from host account information.
+            \\Existing Oh My Zsh and .zshrc are preserved. A minimal .zshrc is created
+            \\only if absent. The login shell is reported and never changed automatically.
+            \\Reruns inspect actual state; an unchanged installation requires no changes.
+            \\--plan is local and performs no SSH. This utility does not modify monitoring.
+            \\
+        );
+        return out.toOwnedSlice();
+    }
+    if (node == .root) try w.writeAll("\nHost utility: host install-oh-my-zsh installs only missing shell setup.\n");
+    try w.print("\nImplemented: VictoriaMetrics, VictoriaLogs and VictoriaTraces.\nVictoriaMetrics: loopback:8428; retention {s}; reserve {d}%.\nVictoriaLogs: loopback:9428; disk-bound retention; logical limit {s}; native partition budget {d}% of filesystem capacity.\nVictoriaTraces: loopback:{d}; disk-bound retention; logical limit {s}; native partition budget {d}% of filesystem capacity.\nLogs/traces preserve the newest two partitions. Cleanup is periodic.\nEach native partition budget excludes other writers; adequate headroom is required.\nReruns inspect actual state and recover pending activation. Healthy unchanged services are not restarted.\n", .{ policy.metrics.retention, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent, vt.port, policy.traces.retention, policy.traces.cleanup_usage_percent });
     try w.writeAll(
         \\Agents, firewall, TLS, Telegram and the other station components are unavailable.
         \\Unavailable options are validated, then rejected before SSH, including with --plan.
@@ -113,7 +137,7 @@ test "hierarchical help lists only the current command children" {
     defer a.free(root);
     try std.testing.expect(std.mem.indexOf(u8, root, "  monitoring\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, root, "  completion\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, root, "VictoriaMetrics and VictoriaLogs") != null);
+    try std.testing.expect(std.mem.indexOf(u8, root, "VictoriaMetrics, VictoriaLogs and VictoriaTraces") != null);
     const agents = try render(a, .agents);
     defer a.free(agents);
     try std.testing.expect(std.mem.indexOf(u8, agents, "dragontool monitoring agents <command>") != null);
@@ -148,4 +172,20 @@ test "completion and wizard help explain local behavior" {
     const wizard = try render(a, .wizard);
     defer a.free(wizard);
     try std.testing.expect(std.mem.indexOf(u8, wizard, "regular CLI validation") != null);
+}
+
+test "host help describes alias resolution and preservation without monitoring options" {
+    const a = std.testing.allocator;
+    const container = try render(a, .host);
+    defer a.free(container);
+    try std.testing.expect(std.mem.indexOf(u8, container, "dragontool host <command>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, container, "  install-oh-my-zsh\n") != null);
+    const command = try render(a, .install_oh_my_zsh);
+    defer a.free(command);
+    for ([_][]const u8{ "dragontool host install-oh-my-zsh (--ssh-host ALIAS | --host HOST)", "--target-user", "actual SSH login user", "IdentityAgent", "ProxyJump", "Existing Oh My Zsh and .zshrc are preserved", "--plan is local" }) |expected| {
+        try std.testing.expect(std.mem.indexOf(u8, command, expected) != null);
+    }
+    for ([_][]const u8{ "  --tls", "  --service", "  --ssh-op-path", "VictoriaMetrics" }) |excluded| {
+        try std.testing.expect(std.mem.indexOf(u8, command, excluded) == null);
+    }
 }

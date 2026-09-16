@@ -14,18 +14,29 @@ pub const detect_command =
 pub const victoriametrics_preflight =
     \\set -eu
     \\test ! -L /etc/systemd/system/dragontools-victoriametrics.service || exit 43
-    \\if test -e /etc/systemd/system/dragontools-victoriametrics.service; then grep -qx '# Managed by DragonTools' /etc/systemd/system/dragontools-victoriametrics.service || exit 40; fi
-    \\test -z "$(systemctl show -p DropInPaths --value dragontools-victoriametrics.service)" || exit 42
+    \\if test -e /etc/systemd/system/dragontools-victoriametrics.service; then test -f /etc/systemd/system/dragontools-victoriametrics.service || exit 40; grep -qx '# Managed by DragonTools' /etc/systemd/system/dragontools-victoriametrics.service || exit 40; fi
+    \\dropins=$(systemctl show -p DropInPaths --value dragontools-victoriametrics.service)
+    \\test -z "$dropins" || exit 42
     \\test ! -L /var/lib/dragontools/victoriametrics-restart-required || exit 43
-    \\if test -e /var/lib/dragontools/victoriametrics-restart-required; then test -f /var/lib/dragontools/victoriametrics-restart-required || exit 40; fi
+    \\if test -e /var/lib/dragontools/victoriametrics-restart-required; then test -f /var/lib/dragontools/victoriametrics-restart-required && test "$(stat -c '%u:%g' /var/lib/dragontools/victoriametrics-restart-required)" = 0:0 || exit 40; fi
 ;
 pub const victorialogs_preflight =
     \\set -eu
     \\test ! -L /etc/systemd/system/dragontools-victorialogs.service || exit 43
-    \\if test -e /etc/systemd/system/dragontools-victorialogs.service; then grep -qx '# Managed by DragonTools' /etc/systemd/system/dragontools-victorialogs.service || exit 40; fi
-    \\test -z "$(systemctl show -p DropInPaths --value dragontools-victorialogs.service)" || exit 42
+    \\if test -e /etc/systemd/system/dragontools-victorialogs.service; then test -f /etc/systemd/system/dragontools-victorialogs.service || exit 40; grep -qx '# Managed by DragonTools' /etc/systemd/system/dragontools-victorialogs.service || exit 40; fi
+    \\dropins=$(systemctl show -p DropInPaths --value dragontools-victorialogs.service)
+    \\test -z "$dropins" || exit 42
     \\test ! -L /var/lib/dragontools/victorialogs-restart-required || exit 43
-    \\if test -e /var/lib/dragontools/victorialogs-restart-required; then test -f /var/lib/dragontools/victorialogs-restart-required || exit 40; fi
+    \\if test -e /var/lib/dragontools/victorialogs-restart-required; then test -f /var/lib/dragontools/victorialogs-restart-required && test "$(stat -c '%u:%g' /var/lib/dragontools/victorialogs-restart-required)" = 0:0 || exit 40; fi
+;
+pub const victoriatraces_preflight =
+    \\set -eu
+    \\test ! -L /etc/systemd/system/dragontools-victoriatraces.service || exit 43
+    \\if test -e /etc/systemd/system/dragontools-victoriatraces.service; then test -f /etc/systemd/system/dragontools-victoriatraces.service || exit 40; grep -qx '# Managed by DragonTools' /etc/systemd/system/dragontools-victoriatraces.service || exit 40; fi
+    \\dropins=$(systemctl show -p DropInPaths --value dragontools-victoriatraces.service)
+    \\test -z "$dropins" || exit 42
+    \\test ! -L /var/lib/dragontools/victoriatraces-restart-required || exit 43
+    \\if test -e /var/lib/dragontools/victoriatraces-restart-required; then test -f /var/lib/dragontools/victoriatraces-restart-required && test "$(stat -c '%u:%g' /var/lib/dragontools/victoriatraces-restart-required)" = 0:0 || exit 40; fi
 ;
 pub fn parse(output: []const u8) !Host {
     var lines = std.mem.tokenizeScalar(u8, output, '\n');

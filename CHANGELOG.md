@@ -2,32 +2,62 @@
 
 ## 0.1.0-dev — unreleased
 
+- Add the separate `host install-oh-my-zsh` convenience command with native OpenSSH
+  alias support, explicit direct-SSH fallback, existing target-account lookup,
+  contextual help/completion and a local plan. Strict host-key checks remain enabled.
+- Install only missing zsh and pinned Oh My Zsh source; preserve existing Oh My Zsh
+  directories and regular `.zshrc` files. Create a minimal `.zshrc` only if absent,
+  leave the login shell unchanged, and make unchanged reruns mutation-free.
+  Private staging, checked source archives and path-conflict refusal support safe
+  retries without broad package or dotfile management. Monitoring is unchanged.
+- Add host parser, fake-remote, failure/recovery and CLI smoke coverage, plus an
+  explicit disposable-host checklist. Local tests do not claim real-host validation.
+- Install VictoriaTraces v0.11.0 as the third real backend, using reviewed amd64/arm64
+  archive and extracted-binary pins, a dedicated account/data directory, atomic
+  versioned binaries/current link, and a concrete hardened systemd unit. Bind HTTP
+  to loopback:10428 and explicitly disable the extra gRPC listener.
+- Verify traces application identity, reported writable storage, unit/argv, binaries,
+  effective hardening, paths, and listener before finalization. Extend install,
+  verify, status, plans, and wizard/help to all three independently managed components.
+- Strengthen safe reruns: reuse matching resources without downloads or unit rewrites,
+  repair only required metadata, reload only stale unit state, and isolate starts,
+  enables, restarts, and pending-marker recovery per component. Verification stays
+  read-only; no controller-side state database is added.
+- Correct native retention documentation for both pinned logs/traces releases:
+  `100y` logical retention and native 75% partition budgets against total filesystem
+  capacity, excluding other writers. Periodic cleanup preserves two newest daily
+  partitions; it does not impose a combined shared-disk usage ceiling.
+- Plan Vector for journald logs and host metrics, vmagent for application Prometheus
+  endpoints, and OTel Collector for application OTLP. Disable host/service rule
+  rendering until verified metric contracts exist; keep log rendering provisional
+  and all alert runtime unavailable.
+- Add a three-component disposable-host integration runner and explicit rerun
+  examples. Require future Codex completion reports to show exact tests, runnable
+  commands, expected output, and the current ASCII architecture.
 - Install VictoriaLogs v1.52.0 alongside VictoriaMetrics using reviewed amd64/arm64
   archive and executable pins, a dedicated account/data directory, an atomic
   versioned binary, a separate hardened unit, and loopback:9428 binding.
-- Apply VictoriaLogs `100y` logical retention and native cleanup at 75% filesystem
-  usage from existing policy. Document periodic checks, newest-two-days retention,
+- Apply VictoriaLogs `100y` logical retention and a native 75% partition budget
+  from existing policy. Document periodic checks, newest-two-partitions retention,
   and the need for capacity/headroom beyond this cleanup target.
 - Verify VictoriaLogs health, application metrics, writable storage, managed unit,
   running binary/configuration, and listener before clearing per-component restart
   intent. Keep unchanged VictoriaMetrics running during VictoriaLogs repair/failure.
-- Extend install, verify, status, plans, wizard/help and availability docs to both
+- Extend install, verify, status, plans, wizard/help and availability docs to the installed
   components. Add per-component failure/idempotency tests and an opt-in disposable
-  Ubuntu lifecycle runner. Application-host ingestion, agents, traces, dashboards,
+  Ubuntu lifecycle runner. Application-host ingestion, agents, dashboards,
   alert evaluation/delivery, firewall, and TLS remain unavailable; no VM runtime
   validation is inferred from unit/fake-remote tests.
 - Add a single monitoring policy module for metrics `90d` retention and 20%
-  filesystem reserve, logs/traces `100y` logical retention with native
-  cleanup at 75% usage, and 60/70/80% operational disk states. Preserve the existing
+  filesystem reserve, logs/traces `100y` logical retention with a native 75%
+  setting, and 60/70/80% operational disk states. Preserve the existing
   VictoriaMetrics reserve calculation and installation behavior.
-- Add deterministic local vmalert YAML renderers for six host alerts, selected-unit
-  ServiceDown/ServiceRestartLoop alerts, and a separate VictoriaLogs `vlogs` pack
-  for ErrorBurst and CriticalLogEvent. Share policy defaults, validate/escape unit
-  names, and keep log contents and secrets out of annotations.
-- Extend install plans and documentation with explicit storage and alert policy.
-  Rule generation is implemented; rule deployment/evaluation,
-  collector setup, traces installation, and notification delivery remain
-  unavailable. Add policy and renderer tests without claiming runtime validation.
+- Define host/service alert policy and render a separate provisional VictoriaLogs
+  `vlogs` pack for ErrorBurst and CriticalLogEvent. Keep log contents and secrets
+  out of annotations; host/service expressions await verified agent contracts.
+- Document explicit storage/alert policy and distinguish partial rendering from
+  unavailable rule deployment, evaluator/collector setup, and notification delivery.
+  Add policy and renderer tests without claiming runtime validation.
 - Add a shared command/flag model, contextual help, and local Bash, Zsh, and Fish
   completion with nested commands, relevant options, enum values, and native path
   completion. Document user-managed completion installation without startup edits.
