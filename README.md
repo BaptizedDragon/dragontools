@@ -59,15 +59,102 @@ of Grafana over HTTPS; it is not configured now. Intended public inbound remains
 **TCP 22 from the administrator IP only**; DragonTools changes no firewall rule
 and adds no 80/443/3000 rule.
 
-On a fresh Grafana SQLite database, sign in using Grafana's standard initial
-`admin` / `admin` credentials and **change the password immediately at the first
-login prompt**. DragonTools does not place an administrator password in generated
-configuration, print credentials in operation output, or reset existing accounts
-on reruns. Authentication stays enabled, anonymous access and auth proxy are
-disabled, and user signup is disabled. The bootstrap password is publicly known:
-complete the first login promptly on a trusted host; target-local users can also
-reach loopback. Keep the new password in your password manager. The CLI's checks
-do not need this password after it changes. [Upstream first-login flow](https://grafana.com/docs/grafana/latest/setup-grafana/sign-in-to-grafana/).
+Grafana credentials are optional managed inputs. Without credential references,
+existing installation behavior remains supported and output explicitly warns that
+administrator credentials are unmanaged. On a fresh unmanaged database, complete
+Grafana's standard `admin` / `admin` first login and change the password immediately.
+Existing accounts are preserved in unmanaged mode. To manage credentials through
+1Password, use the explicit configuration below; no resolved credentials are stored
+in ordinary configuration or printed by DragonTools. Authentication stays enabled,
+while anonymous access, auth proxy and signup stay disabled.
+
+## Monitoring configuration and Grafana credentials
+
+`--config` reads one explicit, small TOML file for monitoring `install`, `verify`,
+and `status`. There is no implicit file discovery. The version-1 schema accepts an
+OpenSSH alias and Grafana username/password secret references; component tuning,
+literal passwords, unknown keys and duplicate keys are rejected.
+
+The checked-in [examples/monitoring.toml](examples/monitoring.toml) contains these
+**example** references. Replace the alias and vault/item/field paths with your own:
+
+```toml
+version = 1
+
+[connection]
+ssh_host = "monitoring"
+
+[grafana]
+username = { op = "op://BaptizedDragon/Grafana/username" }
+password = { op = "op://BaptizedDragon/Grafana/password" }
+```
+
+A reference contains no resolved secret and is safe to keep in configuration or
+version control, subject to your policy about revealing vault/item names. These
+paths are examples, never global defaults. Both references must be supplied.
+1Password is optional; only installations using these references need `op`, and
+it runs **locally on the controller**. The monitoring host never needs 1Password,
+its CLI, or its session credentials.
+
+```bash
+# Authenticate or unlock using your normal local 1Password CLI setup.
+op signin
+
+zig build -Doptimize=ReleaseSafe
+./zig-out/bin/dragontool monitoring install --config examples/monitoring.toml --plan
+./zig-out/bin/dragontool monitoring install --config examples/monitoring.toml
+./zig-out/bin/dragontool monitoring verify --config examples/monitoring.toml
+./zig-out/bin/dragontool monitoring status --config examples/monitoring.toml
+
+# Desired credentials already work: no password reset or service restart.
+./zig-out/bin/dragontool monitoring install --config examples/monitoring.toml
+```
+
+Explicit CLI values override the corresponding configuration values. The direct
+CLI equivalent is:
+
+```bash
+./zig-out/bin/dragontool monitoring install \
+  --ssh-host monitoring \
+  --grafana-user-op 'op://BaptizedDragon/Grafana/username' \
+  --grafana-password-op 'op://BaptizedDragon/Grafana/password'
+```
+
+`--plan` validates syntax and describes credentials as configured via secret
+references; it never invokes `op` or SSH. `status` reports service state and does
+not resolve administrator credentials. Install and configured verification resolve
+both references before contacting the host. Missing `op`, locked/signed-out access,
+missing references, empty values and subprocess failures produce safe errors;
+provider stderr and resolved username/password values are suppressed.
+
+A configured install first checks whether the desired administrator credentials
+already authenticate. A successful check is a no-op. Otherwise it reconciles the
+administrator through Grafana's supported interfaces, verifies the desired login,
+and only then finalizes. It can migrate an existing manually changed password
+without knowledge of that password. Credential-only reconciliation does not restart
+Grafana or affect VictoriaMetrics, VictoriaLogs or VictoriaTraces. Management targets
+the original local administrator (ID 1); incompatible or externally authenticated
+accounts and desired-login collisions fail safely. Fresh initialization uses the
+desired credentials before service startup, without first exposing the default login.
+Standalone `verify` checks configured credentials through a read-only API request
+and never repairs them. Grafana itself may update ordinary authentication metadata.
+
+Usernames must be UTF-8, at most 190 bytes, without a colon, control characters or
+leading/trailing whitespace. Passwords must be UTF-8, 4 bytes to 16 KiB, without CR,
+LF or NUL. DragonTools uses the supported Grafana CLI's stdin password mode and
+supported user API for existing accounts; it does not directly edit credential SQL.
+
+The resulting SQLite database retains Grafana's normal password hash. DragonTools
+retains no plaintext administrator password on the host after successful
+reconciliation, does not embed it in `grafana.ini` or systemd, and transports resolved
+values through protected SSH stdin rather than command arguments. No secret
+temporary file is created. Details and recovery limits are in [the design](design.md#monitoring-configuration-and-grafana-credentials).
+
+DragonTools output, remote command arguments and credential-helper output exclude
+both resolved values. Grafana still owns its account identity and authentication
+metadata; its own operational/audit logs can include the administrator username.
+The helper never prints the password. This native Grafana logging boundary has
+been reviewed in pinned source, not validated on a disposable host.
 
 In Grafana, **Metrics** is the default Prometheus datasource at
 `http://127.0.0.1:8428`. **Traces** uses the built-in Jaeger datasource at
@@ -96,11 +183,34 @@ Allow space for the roughly 0.45 GB archive plus the roughly 1.3 GB extracted tr
 (and the prior tree during repair). Full-tree integrity is read on every run, so an
 unchanged install can still take time while leaving files and services unchanged.
 
-An unchanged rerun reports:
+Install and verification show each component before noticeable work, then calm
+inspection, change and verification progress. A configured unchanged rerun includes:
 
 ```text
+[1/4] VictoriaMetrics
+      inspecting...
+      verifying...
+      healthy; no changes
+[2/4] VictoriaLogs
+      inspecting...
+      verifying...
+      healthy; no changes
+[3/4] VictoriaTraces
+      inspecting...
+      verifying...
+      healthy; no changes
+[4/4] Grafana
+      inspecting...
+      verifying...
+      administrator credentials verified
+      healthy; no changes
 No changes required.
 ```
+
+Changed components report `applying required changes...` and
+`healthy; changes applied`. After a readiness retry has waited about two seconds, a single
+`waiting for readiness...` message is shown for that component. Progress is flushed
+promptly, without logging commands, individual SSH roundtrips or secret values.
 
 `verify` is read-only and fails if any component fails its checks. Storage backend
 checks include managed units, running/disk executable identity, hardening, private
@@ -109,8 +219,10 @@ storage metrics. Grafana checks service state, loopback listener ownership,
 application identity, pinned installation, deterministic configuration, and
 non-secret provisioned datasource records through a read-only SQLite connection.
 It also queries Metrics and Jaeger endpoints as the Grafana service account.
-These checks establish provisioning and backend reachability, **not an authenticated
-request through Grafana's datasource proxy or query engine**. Save & test/Explore
+With credentials configured, verification also makes a read-only authenticated
+Grafana API request and confirms the administrator identity. These checks establish
+provisioning, backend reachability and configured authentication, **not a datasource
+request through Grafana's proxy/query engine or full browser validation**. Save & test/Explore
 in the authenticated UI remains a disposable-host integration gate. No synthetic
 logs/traces are injected and application telemetry arrival is not claimed.
 `status` reports all four service states; use `verify` for health.
@@ -297,6 +409,7 @@ restarting healthy services. There is no controller-side state database.
 | Directory | Matching type, owner, group, and mode are a no-op; only supported metadata repairs are made |
 | Binary | Valid pinned binary is reused; a missing/changed binary is verified and installed atomically |
 | Grafana config/provisioning | Deterministic managed files are reused unchanged; content changes record only Grafana restart intent |
+| Grafana credentials | Configured credentials authenticate before mutation; correct credentials skip reset and restart; omitted references leave credentials unmanaged |
 | Unit | Identical content is reused; changed content is replaced atomically; metadata-only repair does not restart |
 | Service | Active/persistently enabled and unchanged is a no-op; inactive starts; disabled or runtime-only enablement is repaired; only the affected dirty component restarts |
 | Verification | Always read-only and safe to repeat |

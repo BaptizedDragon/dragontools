@@ -105,8 +105,10 @@ pub fn install(a: std.mem.Allocator, r: remote.Remote, report: *workflow.Report,
     _ = try report.call(r, .config, try files.writeCommand(a, config.ini_path, config.ini, grafana.pending));
     _ = try report.call(r, .provisioning, try files.writeCommand(a, config.datasources_path, config.datasources, grafana.pending));
     _ = try report.call(r, .unit, try files.writeCommand(a, unit.unit_path, try unit.render(a), grafana.pending));
+    try @import("grafana_credentials.zig").bootstrap(a, r, report);
     _ = try report.call(r, .activate, workflow.activate_grafana);
     try @import("grafana_verify.zig").health(a, r, report, arch);
+    try @import("grafana_credentials.zig").reconcile(a, r, report);
     _ = try report.call(r, .finalize, "rm -f /var/lib/dragontools/grafana-restart-required");
 }
 

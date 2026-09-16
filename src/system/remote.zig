@@ -1,5 +1,6 @@
 const std = @import("std");
-pub const Operation = enum { detect, user, directories, capacity, binary, config, provisioning, unit, activate, health, finalize, status, service_exists, host_inspect, host_packages, host_source, host_zshrc, host_verify, host_shell };
+const Secret = @import("../secrets/secret.zig").Secret;
+pub const Operation = enum { detect, user, directories, capacity, binary, config, provisioning, unit, activate, health, credentials, finalize, status, service_exists, host_inspect, host_packages, host_source, host_zshrc, host_verify, host_shell };
 pub const Result = struct { code: u8, output: []const u8 = "" };
 /// Monotonic readiness timing, injectable without real waiting in tests.
 pub const Clock = struct {
@@ -12,6 +13,7 @@ pub const Remote = struct {
     context: *anyopaque,
     execute: *const fn (*anyopaque, Operation, []const u8) anyerror!Result,
     execute_timed: ?*const fn (*anyopaque, Operation, []const u8, u32) anyerror!Result = null,
+    execute_secret: ?*const fn (*anyopaque, Operation, []const u8, *const Secret, u32) anyerror!Result = null,
     clock: ?Clock = null,
     pub fn run(self: Remote, op: Operation, command: []const u8) !Result {
         return self.execute(self.context, op, command);
@@ -19,6 +21,10 @@ pub const Remote = struct {
     pub fn runTimed(self: Remote, op: Operation, command: []const u8, budget_ms: u32) !Result {
         if (self.execute_timed) |execute| return execute(self.context, op, command, budget_ms);
         return self.run(op, command);
+    }
+    pub fn runSecret(self: Remote, op: Operation, command: []const u8, payload: *const Secret, budget_ms: u32) !Result {
+        const execute = self.execute_secret orelse return error.SecretTransportUnavailable;
+        return execute(self.context, op, command, payload, budget_ms);
     }
 };
 pub fn quote(a: std.mem.Allocator, value: []const u8) ![]const u8 {

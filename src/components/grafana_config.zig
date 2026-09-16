@@ -4,8 +4,9 @@ const std = @import("std");
 pub const ini_path = "/etc/dragontools/grafana/grafana.ini";
 pub const datasources_path = "/etc/dragontools/grafana/provisioning/datasources/dragontools.yaml";
 
-// The initial admin uses Grafana's first-login flow. Do not put credentials here
-// or attempt admin/admin authentication during verification after first startup.
+// Credentials never belong in this persistent configuration. Explicit secret
+// references use the isolated CLI/API helper; otherwise the upstream first-login
+// flow remains available and administrator credentials are unmanaged.
 // Pinned settings: https://github.com/grafana/grafana/blob/v13.2.2/conf/defaults.ini
 pub const ini =
     \\# Managed by DragonTools

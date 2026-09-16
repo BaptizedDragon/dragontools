@@ -37,7 +37,7 @@ pub fn render(a: std.mem.Allocator, node: spec.Node) ![]const u8 {
     try w.print("{s}\n\nUsage:\n  ", .{item.description});
     try writePath(w, node);
     if (item.command) |command| {
-        try w.writeAll(if (spec.flagAllowed(spec.flag("--ssh-host").?, command)) " (--ssh-host ALIAS | --host HOST) [options]\n" else " --host HOST [options]\n");
+        try w.writeAll(if (spec.flagAllowed(spec.flag("--config").?, command)) " (--config PATH | --ssh-host ALIAS | --host HOST) [options]\n" else if (spec.flagAllowed(spec.flag("--ssh-host").?, command)) " (--ssh-host ALIAS | --host HOST) [options]\n" else " --host HOST [options]\n");
     } else {
         var has_children = false;
         for (spec.commands) |child| {
@@ -74,6 +74,7 @@ pub fn render(a: std.mem.Allocator, node: spec.Node) ![]const u8 {
         if (spec.flagAllowed(spec.flag("--ssh-host").?, command)) {
             try w.writeAll("\nAlias mode: OpenSSH resolves HostName, User, Port, IdentityAgent, IdentityFile\nand ProxyJump through normal SSH configuration. Do not combine --ssh-host\nwith direct connection options. Direct mode defaults: user root, port 22,\nenvironment agent/default identities. Strict host-key checking is always enabled.\n");
         } else try w.writeAll("\nSSH defaults: user root, port 22, environment agent/default identities.\nStrict host-key checking is always enabled. Explicit authentication modes are exclusive.\n");
+        if (spec.flagAllowed(spec.flag("--config").?, command)) try w.writeAll("\nConfiguration is explicit: no default file is searched. Version 1 supports only\nconnection.ssh_host and Grafana username/password { op = \"op://...\" } references.\nRelative config paths are allowed. Literal credentials and unknown keys fail.\nCLI values override config; --host replaces the configured SSH alias.\nBoth Grafana references are required together after merging. Help, completion,\nstatus and --plan never resolve secrets; install and verify resolve them locally.\nWithout references, Grafana administrator credentials remain unmanaged.\n");
     }
     try w.writeAll("\n  --help\n      Show help for this command.\n");
 
@@ -155,7 +156,10 @@ test "workflow help has contextual options and explicit availability" {
     const a = std.testing.allocator;
     const install = try render(a, .install);
     defer a.free(install);
-    try std.testing.expect(std.mem.indexOf(u8, install, "dragontool monitoring install (--ssh-host ALIAS | --host HOST)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, install, "dragontool monitoring install (--config PATH | --ssh-host ALIAS | --host HOST)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, install, "--grafana-user-op") != null);
+    try std.testing.expect(std.mem.indexOf(u8, install, "--grafana-password-op") != null);
+    try std.testing.expect(std.mem.indexOf(u8, install, "status and --plan never resolve secrets") != null);
     try std.testing.expect(std.mem.indexOf(u8, install, "--tls") != null);
     try std.testing.expect(std.mem.indexOf(u8, install, "[unavailable: rejected before SSH]") != null);
     const verify = try render(a, .verify);

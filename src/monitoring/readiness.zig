@@ -11,6 +11,8 @@ pub const Check = enum {
     storage_ready,
     provisioning_ready,
     backend_ready,
+    credentials_bootstrap,
+    credentials_authenticated,
 };
 pub const active_ms = 15_000;
 pub const http_ms = 30_000;
@@ -40,7 +42,9 @@ pub fn ready(_: std.mem.Allocator, _: []const u8) !void {}
 pub fn poll(a: std.mem.Allocator, r: remote.Remote, report: *install.Report, check: Check, deadline_ms: u32, command: []const u8, validator: Validator) !void {
     report.phase = .health;
     report.check = check;
-    const deadline = now(r) + deadline_ms;
+    report.startVerification();
+    const started = now(r);
+    const deadline = started + deadline_ms;
     var delay_ms: u32 = 500;
     while (true) {
         const remaining = deadline - now(r);
@@ -60,7 +64,9 @@ pub fn poll(a: std.mem.Allocator, r: remote.Remote, report: *install.Report, che
         const left = deadline - now(r);
         if (left <= 0) return error.ReadinessTimedOut;
         if (ready_now) return;
+        if (now(r) - started >= 2000) report.waitingForReadiness();
         try sleep(r, @intCast(@min(left, delay_ms)));
+        if (now(r) - started >= 2000) report.waitingForReadiness();
         delay_ms = 1000;
     }
 }

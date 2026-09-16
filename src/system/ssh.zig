@@ -8,7 +8,7 @@ pub const Ssh = struct {
     options: Options,
     elevation: Elevation = .root,
     pub fn asRemote(self: *Ssh) remote.Remote {
-        return .{ .context = self, .execute = execute, .execute_timed = executeTimed, .clock = .{ .context = self, .now_ms = nowMs, .sleep_ms = sleepMs } };
+        return .{ .context = self, .execute = execute, .execute_timed = executeTimed, .execute_secret = executeSecret, .clock = .{ .context = self, .now_ms = nowMs, .sleep_ms = sleepMs } };
     }
     fn nowMs(ctx: *anyopaque) i64 {
         const self: *Ssh = @ptrCast(@alignCast(ctx));
@@ -50,6 +50,17 @@ pub const Ssh = struct {
     }
     fn execute(ctx: *anyopaque, _: remote.Operation, command: []const u8) !remote.Result {
         return executeWithTimeout(ctx, command, .none);
+    }
+    fn executeSecret(ctx: *anyopaque, _: remote.Operation, command: []const u8, payload: *const @import("../secrets/secret.zig").Secret, budget_ms: u32) !remote.Result {
+        const self: *Ssh = @ptrCast(@alignCast(ctx));
+        const result = try @import("../secrets/process.zig").run(std.heap.page_allocator, self.io, try self.argv(command), payload, 128, budget_ms);
+        defer result.deinit();
+        // Only fixed protocol tokens leave the sensitive capture boundary.
+        if (result.code != 0) return .{ .code = result.code };
+        for ([_][]const u8{ "changed", "unchanged" }) |token| {
+            if (std.mem.eql(u8, result.output.protectedBytes(), token)) return .{ .code = 0, .output = token };
+        }
+        return error.InvalidCredentialResponse;
     }
     fn executeTimed(ctx: *anyopaque, _: remote.Operation, command: []const u8, budget_ms: u32) !remote.Result {
         const self: *Ssh = @ptrCast(@alignCast(ctx));

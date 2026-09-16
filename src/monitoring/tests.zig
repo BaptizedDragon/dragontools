@@ -3,6 +3,7 @@ const remote = @import("../system/remote.zig");
 const install = @import("install.zig");
 const verify = @import("verify.zig");
 const readiness = @import("readiness.zig");
+const Secret = @import("../secrets/secret.zig").Secret;
 const operation_count = @typeInfo(remote.Operation).@"enum".fields.len;
 const check_count = @typeInfo(readiness.Check).@"enum".fields.len;
 const components = [_]install.Component{ .victoriametrics, .victorialogs, .victoriatraces, .grafana };
@@ -61,6 +62,12 @@ const Fake = struct {
     now_ms: i64 = 0,
     sleeps: [512]u32 = @splat(0),
     sleep_count: usize = 0,
+    credentials_initialized: bool = false,
+    credentials_valid: bool = false,
+    credential_mutations: usize = 0,
+    credential_checks: usize = 0,
+    credential_failure: bool = false,
+    credential_fail_after_reset: bool = false,
 
     fn state(self: *Fake, component: install.Component) *ComponentState {
         return switch (component) {
@@ -71,7 +78,34 @@ const Fake = struct {
         };
     }
     fn asRemote(self: *Fake) remote.Remote {
-        return .{ .context = self, .execute = execute, .clock = .{ .context = self, .now_ms = now, .sleep_ms = sleep } };
+        return .{ .context = self, .execute = execute, .execute_secret = executeSecret, .clock = .{ .context = self, .now_ms = now, .sleep_ms = sleep } };
+    }
+    fn executeSecret(ctx: *anyopaque, op: remote.Operation, command: []const u8, payload: *const Secret, budget_ms: u32) !remote.Result {
+        const self: *Fake = @ptrCast(@alignCast(ctx));
+        try std.testing.expectEqual(remote.Operation.credentials, op);
+        try std.testing.expectEqual(@as(u32, 120_000), budget_ms);
+        try std.testing.expect(std.mem.indexOf(u8, command, "credential-user-sentinel") == null);
+        try std.testing.expect(std.mem.indexOf(u8, command, "credential-password-sentinel") == null);
+        try std.testing.expect(std.mem.indexOf(u8, payload.protectedBytes(), "credential-password-sentinel") != null);
+        self.gf.calls[@intFromEnum(op)] += 1;
+        if (std.mem.endsWith(u8, command, "'bootstrap'")) {
+            if (self.credentials_initialized) return .{ .code = 0, .output = "unchanged" };
+            try std.testing.expect(self.gf.inactive);
+            self.credentials_initialized = true;
+            self.credentials_valid = true;
+            self.credential_mutations += 1;
+            return .{ .code = 0, .output = "changed" };
+        }
+        try std.testing.expect(!self.gf.inactive);
+        self.credential_checks += 1;
+        if (self.credential_failure) return .{ .code = 83 };
+        if (self.credentials_valid) return .{ .code = 0, .output = "unchanged" };
+        if (std.mem.endsWith(u8, command, "'verify'")) return .{ .code = 83 };
+        try std.testing.expect(std.mem.endsWith(u8, command, "'reconcile'"));
+        self.credentials_valid = true;
+        self.credential_mutations += 1;
+        if (self.credential_fail_after_reset) return .{ .code = 83 };
+        return .{ .code = 0, .output = "changed" };
     }
     fn now(ctx: *anyopaque) i64 {
         const self: *Fake = @ptrCast(@alignCast(ctx));
@@ -160,6 +194,7 @@ const Fake = struct {
                 return .{ .code = 0 };
             },
             .activate => {
+                if (component == .grafana) self.credentials_initialized = true;
                 if (current.disabled or current.runtime_enabled) {
                     current.enables += 1;
                     current.disabled = false;
@@ -851,4 +886,203 @@ test "rendered activation shell orders enable reload and isolated restart using 
         try std.testing.expectEqualStrings("", result.stderr);
         try std.testing.expectEqual(@as(u8, 0), result.term.exited);
     }
+}
+
+const progress = @import("progress.zig");
+const ProgressLog = struct {
+    events: [128]progress.Event = undefined,
+    count: usize = 0,
+    fn sink(self: *ProgressLog) progress.Sink {
+        return .{ .context = self, .write = write };
+    }
+    fn write(ctx: *anyopaque, event: progress.Event) void {
+        const self: *ProgressLog = @ptrCast(@alignCast(ctx));
+        self.events[self.count] = event;
+        self.count += 1;
+    }
+    fn check(self: *const ProgressLog, changed: bool) !void {
+        var started: usize = 0;
+        var finished: usize = 0;
+        var inspecting = false;
+        var verifying = false;
+        var changes = false;
+        for (self.events[0..self.count]) |event| {
+            switch (event.phase) {
+                .component_started => {
+                    try std.testing.expectEqual(started, finished);
+                    try std.testing.expectEqual(components[started], event.component);
+                    started += 1;
+                    inspecting = false;
+                    verifying = false;
+                    changes = false;
+                },
+                .inspecting => {
+                    try std.testing.expect(started > finished and !verifying);
+                    inspecting = true;
+                },
+                .converging => {
+                    try std.testing.expect(inspecting and !changes);
+                    changes = true;
+                },
+                .verifying => {
+                    try std.testing.expect(inspecting and !verifying);
+                    verifying = true;
+                },
+                .healthy_unchanged, .healthy_changed => {
+                    try std.testing.expect(inspecting and verifying);
+                    try std.testing.expectEqual(changed, changes);
+                    try std.testing.expectEqual(if (changed) progress.Phase.healthy_changed else progress.Phase.healthy_unchanged, event.phase);
+                    finished += 1;
+                },
+                else => {},
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 4), started);
+        try std.testing.expectEqual(@as(usize, 4), finished);
+    }
+};
+
+test "semantic progress begins before checks and completes changed and unchanged installs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var fake: Fake = .{};
+    var first_log: ProgressLog = .{};
+    var first: install.Report = .{ .progress = first_log.sink() };
+    try install.install(arena.allocator(), fake.asRemote(), &first);
+    try first_log.check(true);
+    var second_log: ProgressLog = .{};
+    var second: install.Report = .{ .progress = second_log.sink() };
+    try install.install(arena.allocator(), fake.asRemote(), &second);
+    try second_log.check(false);
+    try std.testing.expectEqual(@as(usize, 0), second.changes);
+    try expectRestarts(&fake, null, 1);
+    var verify_log: ProgressLog = .{};
+    var checked: install.Report = .{ .progress = verify_log.sink() };
+    try verify.verify(arena.allocator(), fake.asRemote(), &checked);
+    try verify_log.check(false);
+    try std.testing.expectEqual(@as(usize, 0), checked.changes);
+}
+
+test "semantic progress cannot turn a deterministic failure into completion" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var fake: Fake = .{};
+    fake.vm.fail = .health;
+    var log: ProgressLog = .{};
+    var report: install.Report = .{ .progress = log.sink() };
+    try std.testing.expectError(error.RemoteOperationFailed, install.install(arena.allocator(), fake.asRemote(), &report));
+    try std.testing.expectEqual(install.Component.victoriametrics, report.component.?);
+    try std.testing.expectEqual(remote.Operation.health, report.phase);
+    try std.testing.expectEqual(readiness.Check.managed_state, report.check.?);
+    try std.testing.expectEqual(progress.Phase.component_started, log.events[0].phase);
+    for (log.events[0..log.count]) |event| {
+        try std.testing.expect(event.phase != .healthy_changed and event.phase != .healthy_unchanged and event.phase != .waiting);
+        try std.testing.expectEqual(install.Component.victoriametrics, event.component);
+    }
+    try std.testing.expect(fake.vm.dirty);
+}
+
+const credential_fixture = "{\"username\":\"credential-user-sentinel\",\"password\":\"credential-password-sentinel\"}";
+
+test "configured Grafana credentials bootstrap before activation then verify and rerun without reset" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const payload = try Secret.init(std.testing.allocator, credential_fixture);
+    defer payload.deinit();
+    var fake: Fake = .{};
+    var log: ProgressLog = .{};
+    var first: install.Report = .{ .grafana_credentials = payload, .progress = log.sink() };
+    try install.install(a, fake.asRemote(), &first);
+    try std.testing.expectEqual(@as(usize, 1), fake.credential_mutations);
+    try std.testing.expectEqual(@as(usize, 1), fake.credential_checks);
+    try std.testing.expect(!fake.gf.dirty);
+    var verified = false;
+    for (log.events[0..log.count]) |event| {
+        if (event.phase == .credentials_verified) verified = true;
+        if (event.component == .grafana and event.phase == .healthy_changed) try std.testing.expect(verified);
+        try std.testing.expect(event.phase != .credentials_unmanaged);
+        try std.testing.expect(std.mem.indexOf(u8, event.text(), "sentinel") == null);
+    }
+    try std.testing.expect(verified);
+    var second: install.Report = .{ .grafana_credentials = payload };
+    try install.install(a, fake.asRemote(), &second);
+    try std.testing.expectEqual(@as(usize, 0), second.changes);
+    try std.testing.expectEqual(@as(usize, 1), fake.credential_mutations);
+    try expectRestarts(&fake, null, 1);
+    var checked: install.Report = .{ .grafana_credentials = payload };
+    try verify.verify(a, fake.asRemote(), &checked);
+    try std.testing.expectEqual(@as(usize, 0), checked.changes);
+    try std.testing.expectEqual(@as(usize, 1), fake.credential_mutations);
+    try std.testing.expectEqual(@as(usize, 3), fake.credential_checks);
+}
+
+test "existing Grafana credentials reconcile without restarting any component" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var fake: Fake = .{};
+    try initialInstall(a, &fake);
+    const payload = try Secret.init(std.testing.allocator, credential_fixture);
+    defer payload.deinit();
+    var updated: install.Report = .{ .grafana_credentials = payload };
+    try install.install(a, fake.asRemote(), &updated);
+    try std.testing.expectEqual(@as(usize, 1), updated.changes);
+    try std.testing.expectEqual(@as(usize, 1), fake.credential_mutations);
+    try expectRestarts(&fake, null, 1);
+    var unchanged: install.Report = .{ .grafana_credentials = payload };
+    try install.install(a, fake.asRemote(), &unchanged);
+    try std.testing.expectEqual(@as(usize, 0), unchanged.changes);
+    try std.testing.expectEqual(@as(usize, 1), fake.credential_mutations);
+    try expectRestarts(&fake, null, 1);
+}
+
+test "credential verification failure preserves Grafana restart intent and prevents finalization" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var fake: Fake = .{};
+    try initialInstall(a, &fake);
+    fake.gf.present[@intFromEnum(remote.Operation.config)] = false;
+    fake.credential_fail_after_reset = true;
+    const payload = try Secret.init(std.testing.allocator, credential_fixture);
+    defer payload.deinit();
+    const finalized = fake.gf.called(.finalize);
+    var failed: install.Report = .{ .grafana_credentials = payload };
+    try std.testing.expectError(error.GrafanaCredentialVerificationFailed, install.install(a, fake.asRemote(), &failed));
+    try std.testing.expectEqual(install.Component.grafana, failed.component.?);
+    try std.testing.expectEqual(remote.Operation.credentials, failed.phase);
+    try std.testing.expectEqual(readiness.Check.credentials_authenticated, failed.check.?);
+    try std.testing.expect(fake.gf.dirty);
+    try std.testing.expectEqual(finalized, fake.gf.called(.finalize));
+    try std.testing.expectEqual(@as(usize, 1), fake.credential_mutations);
+    fake.credential_fail_after_reset = false;
+    var recovered: install.Report = .{ .grafana_credentials = payload };
+    try install.install(a, fake.asRemote(), &recovered);
+    try std.testing.expect(!fake.gf.dirty);
+    try std.testing.expectEqual(finalized + 1, fake.gf.called(.finalize));
+    try std.testing.expectEqual(@as(usize, 1), fake.credential_mutations);
+    var unchanged: install.Report = .{ .grafana_credentials = payload };
+    try install.install(a, fake.asRemote(), &unchanged);
+    try std.testing.expectEqual(@as(usize, 0), unchanged.changes);
+    try std.testing.expectEqual(@as(usize, 1), fake.credential_mutations);
+    try expectRestarts(&fake, .grafana, 3);
+}
+
+test "standalone configured credential verification cannot mutate credentials or finalize" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var fake: Fake = .{};
+    try initialInstall(a, &fake);
+    fake.gf.dirty = true;
+    const payload = try Secret.init(std.testing.allocator, credential_fixture);
+    defer payload.deinit();
+    const finalized = fake.gf.called(.finalize);
+    var checked: install.Report = .{ .grafana_credentials = payload };
+    try std.testing.expectError(error.GrafanaCredentialVerificationFailed, verify.verify(a, fake.asRemote(), &checked));
+    try std.testing.expectEqual(@as(usize, 0), fake.credential_mutations);
+    try std.testing.expectEqual(finalized, fake.gf.called(.finalize));
+    try std.testing.expect(fake.gf.dirty);
+    try expectRestarts(&fake, null, 1);
 }

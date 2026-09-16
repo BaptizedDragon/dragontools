@@ -31,25 +31,39 @@ networks. Current VictoriaMetrics, VictoriaLogs, and VictoriaTraces bind loopbac
 claimed beyond this boundary.
 
 
-Grafana's fresh local database uses its upstream initial administrator flow. Change
-the standard initial password immediately at first login through the SSH tunnel.
-DragonTools embeds no administrator password in generated files, never logs it,
-and does not reset an existing database. Anonymous access, auth proxy and user
-signup are disabled. This does not protect bootstrap credentials from a hostile
-local user; the target OS and local administrators remain trusted. No firewall
-ports, TLS endpoint, third-party plugin or remote ingestion are installed.
-Grafana verification reads only non-secret datasource fields from SQLite and
-queries local backends as its service account; it does not resolve administrator
-credentials or claim authenticated datasource-proxy validation.
+Without configured administrator secret references, a fresh Grafana database uses
+its upstream first-login flow. Change the standard initial password immediately
+through the SSH tunnel; existing accounts remain unmanaged and are not reset.
+Explicit references opt in to reconciliation and read-only authenticated identity
+verification. Authentication is checked before mutation so correct credentials do
+not trigger a reset or restart. Anonymous access, auth proxy and user signup remain
+disabled. Target-local users can reach loopback and the target OS/administrators
+remain trusted. No firewall ports, TLS, third-party plugin or ingestion is added.
+Grafana verification reads non-secret datasource fields from SQLite, queries local
+backends as its service account, and uses a read-only authenticated administrator
+API check when configured. It does not claim datasource-proxy or browser validation.
 
 ## Secrets and privileges
 
 Secret handles redact formatted output and wipe owned memory. Resolved secrets must
 never enter ordinary command strings, process arguments, systemd Environment lines,
-world-readable files, logs, errors or plans. Generic file writing is non-secret only.
-No secret resolver or persistent credential handling is enabled yet. Future consumers
-must use systemd credentials as described in architecture.md, with encrypted
-root-only sources and a reviewed plaintext fallback only when explicitly selected.
+world-readable files, DragonTools logs, errors or plans. Generic file writing is non-secret only.
+The optional local 1Password resolver reads explicit Grafana references before
+SSH. Both username and password are sensitive, opaque and redacted; provider stderr
+is suppressed. References can be committed without secret values, but may reveal
+vault/item names. Plans, status, help and completion never resolve them. The host
+receives resolved values only through protected SSH stdin; no `op` binary, session
+or provider credentials are uploaded. Successful reconciliation leaves Grafana's
+normal credential hash and no DragonTools plaintext password on the host.
+The credential helper discards all Grafana CLI stdout/stderr and returns fixed
+semantic results. Grafana itself retains account identities and authentication
+metadata; upstream operational/audit logging may include a username, including
+on authenticated HTTP errors. This is separate from DragonTools' redacted output.
+The helper never logs the password. Native Grafana logging has been reviewed in
+pinned source; disposable-host credential integration has not been run.
+Future persistent TLS/notification consumers must use systemd credentials as
+described in architecture.md, with encrypted root-only sources and a reviewed
+plaintext fallback only when explicitly selected.
 
 Service hardening limits privileges and filesystem writes. It is not protection
 against an already-compromised root account or controller. An artifact digest verifies

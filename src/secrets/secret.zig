@@ -1,6 +1,6 @@
 const std = @import("std");
 /// Opaque storage prevents accidental structural formatting from printing bytes.
-/// A future resolver owns this value; transport must use a protected input stream.
+/// Resolvers own this value; transport must use a protected input stream.
 pub const Secret = opaque {
     const Storage = struct { bytes: []u8, allocator: std.mem.Allocator };
     pub fn init(a: std.mem.Allocator, bytes: []const u8) !*Secret {
@@ -17,6 +17,12 @@ pub const Secret = opaque {
     }
     pub fn format(_: *const Secret, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.writeAll("[REDACTED]");
+    }
+    /// Only validation, serialization and protected stdin may access these bytes.
+    /// Never pass them to logging, argv, or ordinary file writers.
+    pub fn protectedBytes(self: *const Secret) []const u8 {
+        const s: *const Storage = @ptrCast(@alignCast(self));
+        return s.bytes;
     }
 };
 test "secret custom and structural formatting never expose bytes" {

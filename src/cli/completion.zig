@@ -258,6 +258,13 @@ test "shell completion encodes the nested tree and contextual flags" {
         try std.testing.expect(std.mem.indexOf(u8, output, "'install:--update-managed-zshrc'") == null);
         try std.testing.expect(std.mem.indexOf(u8, output, "'install_oh_my_zsh:--tls'") == null);
         try std.testing.expect(std.mem.indexOf(u8, output, "'install:--ssh-host'") != null);
+        try std.testing.expect(std.mem.indexOf(u8, output, "'install:--config'") != null);
+        try std.testing.expect(std.mem.indexOf(u8, output, "'verify:--config'") != null);
+        try std.testing.expect(std.mem.indexOf(u8, output, "'status:--config'") != null);
+        try std.testing.expect(std.mem.indexOf(u8, output, "'install:--grafana-user-op'") != null);
+        try std.testing.expect(std.mem.indexOf(u8, output, "'verify:--grafana-password-op'") != null);
+        try std.testing.expect(std.mem.indexOf(u8, output, "'status:--grafana-password-op'") == null);
+        try std.testing.expect(std.mem.indexOf(u8, output, "'install_oh_my_zsh:--config'") == null);
         try std.testing.expect(std.mem.indexOf(u8, output, "'monitoring:agents'") != null);
         try std.testing.expect(std.mem.indexOf(u8, output, "'agents:install'") != null);
         try std.testing.expect(std.mem.indexOf(u8, output, "'install:--tls'") != null);
@@ -296,5 +303,6 @@ test "fish completion declares constrained values and forces native path complet
     try std.testing.expect(std.mem.indexOf(u8, output, "commandline -xpc") == null);
     try std.testing.expect(std.mem.indexOf(u8, output, "__dragontool_context install' -l 'tls' -x -a 'manual cloudflare'") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "__dragontool_context install' -l 'identity' -r -F") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "__dragontool_context install' -l 'config' -r -F") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "__dragontool_context verify' -l 'tls'") == null);
 }

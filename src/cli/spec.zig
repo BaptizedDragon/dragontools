@@ -47,11 +47,14 @@ const mutations = &[_]Command{ .install, .agents_install, .firewall, .install_oh
 const host = &[_]Command{.install_oh_my_zsh};
 const native_ssh = &[_]Command{ .install, .verify, .status, .install_oh_my_zsh };
 const station = &[_]Command{.install};
+const configured_station = &[_]Command{ .install, .verify, .status };
+const grafana_credentials = &[_]Command{ .install, .verify };
 const agents = &[_]Command{ .agents_install, .agents_verify };
 const network = &[_]Command{ .install, .firewall };
 pub const flags = [_]FlagSpec{
     .{ .name = "--host", .description = "Direct target host", .metavar = "HOST", .group = "Required", .commands = all },
     .{ .name = "--ssh-host", .description = "OpenSSH host/alias; use normal SSH configuration", .metavar = "ALIAS", .group = "Connection", .commands = native_ssh },
+    .{ .name = "--config", .description = "Explicit monitoring TOML file; CLI options override its values", .metavar = "PATH", .kind = .path, .group = "Configuration", .commands = configured_station },
     .{ .name = "--user", .description = "SSH user (default: root)", .metavar = "USER", .group = "Connection", .commands = all },
     .{ .name = "--port", .description = "SSH port (default: 22)", .metavar = "PORT", .group = "Connection", .commands = all },
     .{ .name = "--ssh-sock", .description = "SSH agent socket, including 1Password agent", .metavar = "PATH", .kind = .path, .group = "Connection", .commands = all },
@@ -60,6 +63,8 @@ pub const flags = [_]FlagSpec{
     .{ .name = "--target-user", .description = "Existing target account (default: actual SSH login user)", .metavar = "USER", .group = "Host utility", .commands = host },
     .{ .name = "--set-default-shell", .description = "Set the login shell to discovered zsh only if different and listed in /etc/shells", .kind = .boolean, .group = "Host utility", .commands = host },
     .{ .name = "--update-managed-zshrc", .description = "Update only an exact DragonTools .zshrc template; preserve other existing files", .kind = .boolean, .group = "Host utility", .commands = host },
+    .{ .name = "--grafana-user-op", .description = "Grafana administrator username reference; resolve locally with 1Password", .metavar = "REF", .kind = .reference, .group = "Grafana", .commands = grafana_credentials },
+    .{ .name = "--grafana-password-op", .description = "Grafana administrator password reference; pair with a username reference", .metavar = "REF", .kind = .reference, .group = "Grafana", .commands = grafana_credentials },
     .{ .name = "--station-ip", .description = "Monitoring station IP address", .metavar = "IP", .group = "Monitoring", .unavailable = true, .commands = agents },
     .{ .name = "--service", .description = "Selected systemd service (repeatable)", .metavar = "NAME.service", .group = "Monitoring", .repeatable = true, .unavailable = true, .commands = agents },
     .{ .name = "--domain", .description = "Monitoring domain", .metavar = "DOMAIN", .group = "Monitoring", .unavailable = true, .commands = station },

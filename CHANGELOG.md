@@ -2,6 +2,21 @@
 
 ## 0.1.0-dev — unreleased
 
+- Add explicit version-1 monitoring TOML configuration for an OpenSSH alias and
+  Grafana administrator secret references. CLI values override file values;
+  local plans and status never resolve secrets. Literal passwords are rejected.
+- Resolve optional Grafana username/password references with the local 1Password
+  CLI through a small redacted secret boundary. Transfer secret values through
+  protected stdin, suppress provider/remote output, and keep secrets out of
+  configuration, units, argv and progress.
+- Reconcile configured Grafana administrator credentials through supported
+  Grafana interfaces, including existing manually changed passwords. Authenticate
+  first so correct credentials skip resets and service restarts; configured verify
+  authenticates read-only. Preserve the explicitly unmanaged path without refs.
+- Add calm semantic component progress for install and verification, including
+  unchanged completion and a single delayed readiness message per component.
+  Preserve bounded retries, safe errors and independent restart finalization.
+
 - Separate deterministic monitoring verification from bounded startup readiness
   for VictoriaMetrics, VictoriaLogs, VictoriaTraces and Grafana. Retry active,
   HTTP and telemetry checks for up to 15/30/45 seconds, with a 500 ms first retry

@@ -50,8 +50,17 @@ paths. Do not add generic package/dotfile management or arbitrary shell hooks.
 
 Grafana uses loopback:3000 with local authentication enabled and provisioned Metrics/Traces.
 Preserve its independent restart intent for binary, unit and configuration changes.
-Do not retain administrator credentials for verification; distinguish read-only
-provisioning/backend checks from authenticated Grafana datasource runtime validation.
+Resolve configured administrator secret references locally before SSH; plans and
+status never resolve them. Keep both resolved username and password opaque and
+redacted, out of argv/configuration/logs, and transfer only through protected stdin.
+Check desired authentication before credential mutation; unchanged credentials
+must never trigger a reset or restart. Use supported Grafana interfaces, never
+write its credential database directly. Standalone verify remains read-only.
+Do not retain administrator plaintext after reconciliation. Distinguish the
+read-only authenticated identity check and provisioning/backend checks from
+Grafana datasource query/UI validation. Monitoring configuration stays explicit
+and narrow; CLI overrides file values. Progress carries fixed semantic events,
+never arbitrary strings, commands or secret values.
 The Logs datasource plugin and dashboards remain deferred.
 
 Keep unsupported components explicitly unavailable. Never return installation

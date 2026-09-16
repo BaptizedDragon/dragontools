@@ -6,6 +6,14 @@ const terminal = @import("cli/terminal.zig");
 const policy = @import("monitoring/policy.zig");
 const vt = @import("components/victoriatraces.zig");
 const plan = @import("monitoring/plan.zig");
+const progress = @import("monitoring/progress.zig");
+const ProgressOutput = struct {
+    io: std.Io,
+    fn write(context: *anyopaque, event: progress.Event) void {
+        const self: *ProgressOutput = @ptrCast(@alignCast(context));
+        print(self.io, event.text());
+    }
+};
 fn print(io: std.Io, message: []const u8) void {
     std.Io.File.stdout().writeStreamingAll(io, message) catch {};
 }
@@ -43,6 +51,7 @@ fn run(init: std.process.Init) !void {
             return;
         }
     }
+    try cli.loadAndMerge(a, init.io, &options);
     try execute(init, options);
 }
 /// Both CLI arguments and wizard answers reach this one existing operation path.
@@ -57,12 +66,28 @@ fn execute(init: std.process.Init, options: cli.Options) !void {
         return;
     }
     if (options.plan) {
-        print(init.io, try plan.render(a));
+        print(init.io, try plan.renderWithCredentials(a, options.grafana_user_op != null));
         return;
     }
+    // Resolve locally before even the first SSH inspection. Status and plan
+    // never need secret values. All sensitive allocations have short lifetimes.
+    const credentials = if ((options.command == .install or options.command == .verify) and options.grafana_user_op != null) credentials: {
+        var provider: @import("secrets/onepassword.zig").Local = .{ .io = init.io };
+        const references = @import("secrets/reference.zig");
+        break :credentials @import("secrets/grafana.zig").payload(std.heap.page_allocator, provider.resolver(), try references.parseOnePassword(options.grafana_user_op.?), try references.parseOnePassword(options.grafana_password_op.?)) catch |err| {
+            print(init.io, switch (err) {
+                error.GrafanaUsernameResolutionFailed => "Unable to resolve Grafana administrator username from configured secret reference. Check the local 1Password CLI and its authentication.\n",
+                error.GrafanaPasswordResolutionFailed => "Unable to resolve Grafana administrator password from configured secret reference. Check the local 1Password CLI and its authentication.\n",
+                else => "Unable to use configured Grafana administrator credentials. Secret contents are omitted.\n",
+            });
+            return err;
+        };
+    } else null;
+    defer if (credentials) |secret| secret.deinit();
     var ssh: @import("system/ssh.zig").Ssh = .{ .allocator = a, .io = init.io, .options = options };
     const r = ssh.asRemote();
-    var report: @import("monitoring/install.zig").Report = .{};
+    var progress_output: ProgressOutput = .{ .io = init.io };
+    var report: @import("monitoring/install.zig").Report = .{ .grafana_credentials = credentials, .progress = .{ .context = &progress_output, .write = ProgressOutput.write } };
     switch (options.command) {
         .install, .verify => {
             print(init.io, if (options.command == .install) "Installing VictoriaMetrics, VictoriaLogs, VictoriaTraces and Grafana over SSH...\n" else "Verifying VictoriaMetrics, VictoriaLogs, VictoriaTraces and Grafana over SSH...\n");
@@ -76,7 +101,7 @@ fn execute(init: std.process.Init, options: cli.Options) !void {
                 return err;
             };
             if (options.command == .install and report.changes == 0) print(init.io, "No changes required.\n");
-            print(init.io, try std.fmt.allocPrint(a, "VictoriaMetrics: loopback:8428\n  healthy; self-scraped metrics queryable\n  retention: {s}; free-space reserve: {d} bytes ({d}% of filesystem capacity)\nVictoriaLogs: loopback:9428\n  healthy; writable storage\n  retention: disk-bound; logical limit: {s}; native partition budget: {d}% of filesystem capacity\nVictoriaTraces: loopback:{d}\n  healthy; writable storage\n  retention: disk-bound; logical limit: {s}; native partition budget: {d}% of filesystem capacity\n  Logs/traces cleanup is periodic and preserves the newest two partitions; other writers can fill the filesystem earlier.\nGrafana: loopback:3000\n  healthy; local authentication enabled\n  Metrics and Traces datasource records and backend queries checked\n  authenticated Grafana query/UI validation remains a manual integration check\nAccess through an explicit SSH tunnel; change the initial administrator password at first login.\n", .{ policy.metrics.retention, report.reserve_bytes, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent, vt.port, policy.traces.retention, policy.traces.cleanup_usage_percent }));
+            print(init.io, try std.fmt.allocPrint(a, "VictoriaMetrics: loopback:8428\n  healthy; self-scraped metrics queryable\n  retention: {s}; free-space reserve: {d} bytes ({d}% of filesystem capacity)\nVictoriaLogs: loopback:9428\n  healthy; writable storage\n  retention: disk-bound; logical limit: {s}; native partition budget: {d}% of filesystem capacity\nVictoriaTraces: loopback:{d}\n  healthy; writable storage\n  retention: disk-bound; logical limit: {s}; native partition budget: {d}% of filesystem capacity\n  Logs/traces cleanup is periodic and preserves the newest two partitions; other writers can fill the filesystem earlier.\nGrafana: loopback:3000\n  healthy; local authentication enabled\n  administrator credentials {s}\n  Metrics and Traces datasource records and backend queries checked\n  authenticated datasource queries and browser UI validation remain manual integration checks\nAccess through an explicit SSH tunnel.{s}\n", .{ policy.metrics.retention, report.reserve_bytes, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent, vt.port, policy.traces.retention, policy.traces.cleanup_usage_percent, if (credentials != null) "verified" else "unmanaged", if (credentials != null) "" else " Change the initial administrator password at first login." }));
         },
         .status => {
             const output = @import("monitoring/status.zig").status(a, r, &report) catch |err| {
@@ -114,6 +139,10 @@ test {
     _ = @import("cli/wizard.zig");
     _ = @import("cli/terminal.zig");
     _ = @import("secrets/secret.zig");
+    _ = @import("secrets/reference.zig");
+    _ = @import("secrets/process.zig");
+    _ = @import("secrets/onepassword.zig");
+    _ = @import("secrets/grafana.zig");
     _ = @import("system/remote.zig");
     _ = @import("system/ssh.zig");
     _ = @import("system/host.zig");
@@ -130,6 +159,9 @@ test {
     _ = @import("components/grafana_config.zig");
     _ = @import("monitoring/grafana_verify.zig");
     _ = @import("monitoring/grafana_install.zig");
+    _ = @import("monitoring/grafana_credentials.zig");
+    _ = @import("monitoring/progress.zig");
+    _ = @import("monitoring/readiness.zig");
     _ = @import("monitoring/tests.zig");
     _ = @import("monitoring/policy.zig");
     _ = @import("monitoring/rules.zig");

@@ -104,3 +104,38 @@ test "deterministic and transport failures fail once with no wait" {
     try std.testing.expectError(error.SshConnectionFailed, readiness.poll(std.testing.allocator, disconnected.asRemote(), &report, .http_ready, 30_000, "probe", validate));
     try std.testing.expectEqual(@as(usize, 1), disconnected.calls);
 }
+
+const WaitingLog = struct {
+    fake: *Fake,
+    count: usize = 0,
+    first_ms: i64 = 0,
+    fn emit(ctx: *anyopaque, event: @import("progress.zig").Event) void {
+        const self: *WaitingLog = @ptrCast(@alignCast(ctx));
+        if (event.phase != .waiting) return;
+        if (self.count == 0) self.first_ms = self.fake.milliseconds;
+        self.count += 1;
+    }
+};
+
+test "readiness progress waits for threshold and reports once per component without changing retries" {
+    var fake: Fake = .{ .failures = 6 };
+    var log: WaitingLog = .{ .fake = &fake };
+    var report: install.Report = .{ .progress = .{ .context = &log, .write = WaitingLog.emit } };
+    report.beginComponent(.victoriametrics);
+    try readiness.poll(std.testing.allocator, fake.asRemote(), &report, .http_ready, 30_000, "probe", validate);
+    try std.testing.expectEqual(@as(usize, 1), log.count);
+    try std.testing.expectEqual(@as(i64, 2500), log.first_ms);
+    try std.testing.expectEqual(@as(usize, 7), fake.calls);
+    try std.testing.expectEqualSlices(u32, &.{ 500, 1000, 1000, 1000, 1000, 1000 }, fake.sleeps[0..fake.sleep_count]);
+    fake.failures = fake.calls + 6;
+    try readiness.poll(std.testing.allocator, fake.asRemote(), &report, .self_scrape_ready, 45_000, "probe", validate);
+    try std.testing.expectEqual(@as(usize, 1), log.count);
+    report.beginComponent(.victorialogs);
+    fake.failures = fake.calls + 6;
+    try readiness.poll(std.testing.allocator, fake.asRemote(), &report, .storage_ready, 45_000, "probe", validate);
+    try std.testing.expectEqual(@as(usize, 2), log.count);
+    report.beginComponent(.victoriatraces);
+    fake.failures = 0;
+    try readiness.poll(std.testing.allocator, fake.asRemote(), &report, .http_ready, 30_000, "probe", validate);
+    try std.testing.expectEqual(@as(usize, 2), log.count);
+}

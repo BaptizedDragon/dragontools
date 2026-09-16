@@ -1,5 +1,7 @@
 const std = @import("std");
 const spec = @import("spec.zig");
+const config = @import("../config/monitoring.zig");
+const references = @import("../secrets/reference.zig");
 pub const Command = spec.Command;
 pub const Action = enum { monitoring, host, completion, wizard };
 pub const Options = struct {
@@ -11,6 +13,13 @@ pub const Options = struct {
     plan: bool = false,
     host: []const u8 = "",
     ssh_host: ?[]const u8 = null,
+    config_path: ?[]const u8 = null,
+    grafana_user_op: ?[]const u8 = null,
+    grafana_password_op: ?[]const u8 = null,
+    // Explicit defaults still conflict with alias mode after config merge.
+    explicit_user: bool = false,
+    explicit_port: bool = false,
+    config_values: ?config.Config = null,
     target_user: ?[]const u8 = null,
     set_default_shell: bool = false,
     update_managed_zshrc: bool = false,
@@ -30,6 +39,7 @@ pub const Options = struct {
     agent_ips: std.ArrayList([]const u8) = .empty,
 
     pub fn deinit(self: *Options, a: std.mem.Allocator) void {
+        if (self.config_values) |*values| values.deinit();
         self.services.deinit(a);
         self.admin_ips.deinit(a);
         self.agent_ips.deinit(a);
@@ -75,6 +85,13 @@ pub fn validateValue(name: []const u8, value: []const u8) !void {
     } else if (eq(name, "--port")) {
         const port = std.fmt.parseInt(u16, value, 10) catch return error.InvalidPort;
         if (port == 0) return error.InvalidPort;
+    } else if (eq(name, "--config")) {
+        // Local paths are argv data, never OpenSSH option expansion. Relative
+        // paths and spaces are valid; controls and NUL are not.
+        if (value.len == 0 or value.len > 4096) return error.InvalidPath;
+        for (value) |c| if (c < 32 or c == 127) return error.InvalidPath;
+    } else if (eq(name, "--grafana-user-op") or eq(name, "--grafana-password-op")) {
+        _ = try references.parseOnePassword(value);
     } else if (item.kind == .path) {
         if (!path(value)) return error.InvalidPath;
     } else if (item.kind == .reference) {
@@ -94,6 +111,20 @@ pub fn validateValue(name: []const u8, value: []const u8) !void {
 }
 fn assign(a: std.mem.Allocator, o: *Options, name: []const u8, value: []const u8) !void {
     try validateValue(name, value);
+    if (eq(name, "--config")) {
+        o.config_path = value;
+        return;
+    }
+    if (eq(name, "--grafana-user-op")) {
+        o.grafana_user_op = value;
+        return;
+    }
+    if (eq(name, "--grafana-password-op")) {
+        o.grafana_password_op = value;
+        return;
+    }
+    if (eq(name, "--user")) o.explicit_user = true;
+    if (eq(name, "--port")) o.explicit_port = true;
     if (eq(name, "--host")) o.host = value else if (eq(name, "--ssh-host")) o.ssh_host = value else if (eq(name, "--target-user")) o.target_user = value else if (eq(name, "--user")) o.user = value else if (eq(name, "--port")) o.port = try std.fmt.parseInt(u16, value, 10) else if (eq(name, "--ssh-sock")) o.ssh_sock = value else if (eq(name, "--identity")) o.identity = value else if (eq(name, "--ssh-op-path")) o.ssh_op_path = value else if (eq(name, "--station-ip")) o.station_ip = value else if (eq(name, "--domain")) o.domain = value else if (eq(name, "--tls")) o.tls = value else if (eq(name, "--cloudflare-token-op")) o.cloudflare_token_op = value else if (eq(name, "--telegram-bot-token-op")) o.telegram_token_op = value else if (eq(name, "--telegram-channel-id")) o.telegram_channel_id = value else if (eq(name, "--service")) try o.services.append(a, value) else if (eq(name, "--admin-ip")) try o.admin_ips.append(a, value) else if (eq(name, "--agent-ip")) try o.agent_ips.append(a, value) else return error.UnknownFlag;
 }
 pub fn parse(a: std.mem.Allocator, args: []const []const u8) !Options {
@@ -143,15 +174,53 @@ pub fn parse(a: std.mem.Allocator, args: []const []const u8) !Options {
         i += 1;
         try assign(a, &o, key, args[i]);
     }
+    try validateMerged(o, o.config_path == null);
+    return o;
+}
+
+fn validateMerged(o: Options, complete: bool) !void {
+    if (o.ssh_host) |value| try validateValue("--ssh-host", value);
+    if (o.grafana_user_op) |value| try validateValue("--grafana-user-op", value);
+    if (o.grafana_password_op) |value| try validateValue("--grafana-password-op", value);
     if (o.ssh_host != null) {
         if (o.host.len != 0) return error.ConflictingHosts;
         // Alias mode lets OpenSSH resolve every connection/authentication field.
-        if (seen.contains("--user") or seen.contains("--port") or o.ssh_sock != null or o.identity != null or o.ssh_op_path != null) return error.ConflictingSshMode;
+        if (o.explicit_user or o.explicit_port or o.ssh_sock != null or o.identity != null or o.ssh_op_path != null) return error.ConflictingSshMode;
     }
-    if (!o.help and o.host.len == 0 and o.ssh_host == null) return error.HostRequired;
+    if (complete and !o.help and o.host.len == 0 and o.ssh_host == null) return error.HostRequired;
     const modes: u8 = @intFromBool(o.ssh_sock != null) + @as(u8, @intFromBool(o.identity != null)) + @as(u8, @intFromBool(o.ssh_op_path != null));
     if (modes > 1) return error.ConflictingAuthentication;
-    return o;
+    if (complete and !o.help and (o.grafana_user_op != null) != (o.grafana_password_op != null)) return error.GrafanaCredentialReferencesRequired;
+}
+
+/// Transfer ownership only after validating the complete merge. On failure the
+/// caller still owns values and options are unchanged. Explicit argv wins.
+fn merge(o: *Options, values: config.Config) !void {
+    if (o.config_values != null) return error.MonitoringConfigAlreadyLoaded;
+    var merged = o.*;
+    if (merged.ssh_host == null and merged.host.len == 0) merged.ssh_host = values.ssh_host;
+    if (merged.grafana_user_op == null) merged.grafana_user_op = values.grafana_user_op;
+    if (merged.grafana_password_op == null) merged.grafana_password_op = values.grafana_password_op;
+    try validateMerged(merged, true);
+    merged.config_values = values;
+    o.* = merged;
+}
+
+/// Help/completion return before this function. Plans load only references; no
+/// parser/config path imports a resolver or spawns a process.
+pub fn loadAndMerge(a: std.mem.Allocator, io: std.Io, o: *Options) !void {
+    if (o.help or o.action != .monitoring) return;
+    if (o.config_path) |path_value| {
+        var values = try config.load(a, io, path_value);
+        errdefer values.deinit();
+        try merge(o, values);
+    } else try validateMerged(o.*, true);
+}
+
+fn mergeText(a: std.mem.Allocator, o: *Options, contents: []const u8) !void {
+    var values = try config.parse(a, contents);
+    errdefer values.deinit();
+    try merge(o, values);
 }
 
 test "CLI hierarchy, repeated services, and rejected injection" {
@@ -276,4 +345,92 @@ test "implemented monitoring accepts native SSH aliases without direct overrides
     var plan = try parse(a, &.{ "monitoring", "install", "--ssh-host", "monitoring", "--plan" });
     defer plan.deinit(a);
     try std.testing.expect(plan.plan);
+}
+
+const example_config =
+    \\version = 1
+    \\[connection]
+    \\ssh_host = "monitoring"
+    \\[grafana]
+    \\username = { op = "op://Example/Grafana/username" }
+    \\password = { op = "op://Example/Grafana/password" }
+;
+
+test "monitoring config merge supplies alias and paired reference values without resolution" {
+    const a = std.testing.allocator;
+    for ([_][]const u8{ "install", "verify", "status" }) |command| {
+        var options = try parse(a, &.{ "monitoring", command, "--config", "examples/monitoring.toml" });
+        defer options.deinit(a);
+        try std.testing.expect(options.ssh_host == null);
+        try mergeText(a, &options, example_config);
+        try std.testing.expectEqualStrings("monitoring", options.ssh_host.?);
+        try std.testing.expectEqualStrings("op://Example/Grafana/username", options.grafana_user_op.?);
+        try std.testing.expectEqualStrings("op://Example/Grafana/password", options.grafana_password_op.?);
+        try std.testing.expect(!options.unsupported());
+    }
+    var plan = try parse(a, &.{ "monitoring", "install", "--config", "./monitoring.toml", "--plan" });
+    defer plan.deinit(a);
+    try mergeText(a, &plan, example_config);
+    try std.testing.expect(plan.plan);
+}
+
+test "explicit CLI alias direct host and Grafana references override config individually" {
+    const a = std.testing.allocator;
+    var alias = try parse(a, &.{ "monitoring", "install", "--config", "monitoring.toml", "--ssh-host", "other", "--grafana-user-op", "op://Other/Grafana/username" });
+    defer alias.deinit(a);
+    try mergeText(a, &alias, example_config);
+    try std.testing.expectEqualStrings("other", alias.ssh_host.?);
+    try std.testing.expectEqualStrings("op://Other/Grafana/username", alias.grafana_user_op.?);
+    try std.testing.expectEqualStrings("op://Example/Grafana/password", alias.grafana_password_op.?);
+
+    var direct = try parse(a, &.{ "monitoring", "verify", "--config", "monitoring.toml", "--host", "direct.example.com", "--user", "ops", "--port", "2222", "--identity", "/tmp/key", "--grafana-password-op", "op://Other/Grafana/password" });
+    defer direct.deinit(a);
+    try mergeText(a, &direct, example_config);
+    try std.testing.expectEqualStrings("direct.example.com", direct.host);
+    try std.testing.expect(direct.ssh_host == null);
+    try std.testing.expectEqualStrings("ops", direct.user);
+    try std.testing.expectEqual(@as(u16, 2222), direct.port);
+    try std.testing.expectEqualStrings("op://Example/Grafana/username", direct.grafana_user_op.?);
+    try std.testing.expectEqualStrings("op://Other/Grafana/password", direct.grafana_password_op.?);
+
+    var overridden = try parse(a, &.{ "monitoring", "install", "--config", "monitoring.toml", "--host", "direct.example.com" });
+    defer overridden.deinit(a);
+    try mergeText(a, &overridden, "version = 1\n[connection]\nssh_host = 'ignored invalid alias'\n");
+    try std.testing.expect(overridden.ssh_host == null);
+}
+
+test "merged config preserves SSH conflicts and validates incomplete credential pairs" {
+    const a = std.testing.allocator;
+    for ([_][]const u8{ "--user", "--port", "--identity", "--ssh-sock" }, [_][]const u8{ "root", "22", "/tmp/key", "/tmp/sock" }) |flag, value| {
+        var options = try parse(a, &.{ "monitoring", "install", "--config", "monitoring.toml", flag, value });
+        defer options.deinit(a);
+        try std.testing.expectError(error.ConflictingSshMode, mergeText(a, &options, example_config));
+        try std.testing.expect(options.config_values == null);
+        try std.testing.expect(options.ssh_host == null);
+    }
+    var missing = try parse(a, &.{ "monitoring", "install", "--config", "monitoring.toml" });
+    defer missing.deinit(a);
+    try std.testing.expectError(error.HostRequired, mergeText(a, &missing, "version = 1"));
+    try std.testing.expectError(error.GrafanaCredentialReferencesRequired, mergeText(a, &missing, "version = 1\n[connection]\nssh_host = 'monitoring'\n[grafana]\nusername = { op = 'op://Example/Grafana/username' }"));
+    try std.testing.expectError(error.InvalidSshHost, mergeText(a, &missing, "version = 1\n[connection]\nssh_host = 'host;id'"));
+    try std.testing.expectError(error.GrafanaCredentialReferencesRequired, parse(a, &.{ "monitoring", "install", "--ssh-host", "monitoring", "--grafana-user-op", "op://Example/Grafana/username" }));
+    var pair = try parse(a, &.{ "monitoring", "verify", "--ssh-host", "monitoring", "--grafana-user-op", "op://Example/Grafana/username", "--grafana-password-op", "op://Example/Grafana/password" });
+    defer pair.deinit(a);
+    try std.testing.expect(!pair.unsupported());
+}
+
+test "config and Grafana flags are available only in intended command contexts" {
+    const a = std.testing.allocator;
+    try validateValue("--config", "./config folder/monitoring.toml");
+    try validateValue("--config", "monitoring.toml");
+    try std.testing.expectError(error.InvalidPath, validateValue("--config", "config\n.toml"));
+    try std.testing.expectError(error.InvalidPath, validateValue("--config", ""));
+    try std.testing.expectError(error.FlagNotAllowed, parse(a, &.{ "host", "install-oh-my-zsh", "--config", "monitoring.toml" }));
+    try std.testing.expectError(error.FlagNotAllowed, parse(a, &.{ "monitoring", "status", "--ssh-host", "monitoring", "--grafana-user-op", "op://Example/Grafana/username" }));
+    try std.testing.expectError(error.FlagNotAllowed, parse(a, &.{ "monitoring", "agents", "install", "--config", "monitoring.toml" }));
+    try std.testing.expectError(error.DuplicateFlag, parse(a, &.{ "monitoring", "install", "--config", "a.toml", "--config", "b.toml" }));
+    var help_options = try parse(a, &.{ "monitoring", "install", "--config", "/does/not/exist.toml", "--help" });
+    defer help_options.deinit(a);
+    try loadAndMerge(a, std.testing.io, &help_options);
+    try std.testing.expect(help_options.config_values == null);
 }

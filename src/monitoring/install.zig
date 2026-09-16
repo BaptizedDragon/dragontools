@@ -8,21 +8,8 @@ const vt = @import("../components/victoriatraces.zig");
 const units = @import("../system/systemd.zig");
 const vl_unit = @import("../components/victorialogs_unit.zig");
 const vt_unit = @import("../components/victoriatraces_unit.zig");
-pub const Component = enum {
-    victoriametrics,
-    victorialogs,
-    victoriatraces,
-    grafana,
-
-    pub fn name(self: Component) []const u8 {
-        return switch (self) {
-            .victoriametrics => "VictoriaMetrics",
-            .victorialogs => "VictoriaLogs",
-            .victoriatraces => "VictoriaTraces",
-            .grafana => "Grafana",
-        };
-    }
-};
+const progress = @import("progress.zig");
+pub const Component = progress.Component;
 pub const Report = struct {
     phase: remote.Operation = .detect,
     check: ?@import("readiness.zig").Check = null,
@@ -30,8 +17,40 @@ pub const Report = struct {
     changes: usize = 0,
     reserve_bytes: u64 = 0,
     completed: usize = 0,
+    progress: ?progress.Sink = null,
+    grafana_credentials: ?*const @import("../secrets/secret.zig").Secret = null,
+    component_changes_before: usize = 0,
+    convergence_reported: bool = false,
+    verification_reported: bool = false,
+    waiting_reported: bool = false,
+    pub fn emit(self: *Report, phase: progress.Phase) void {
+        if (self.progress) |sink| if (self.component) |component| sink.emit(.{ .component = component, .phase = phase });
+    }
+    pub fn beginComponent(self: *Report, component: Component) void {
+        self.component = component;
+        self.component_changes_before = self.changes;
+        self.convergence_reported = false;
+        self.verification_reported = false;
+        self.waiting_reported = false;
+        self.emit(.component_started);
+        self.emit(.inspecting);
+    }
+    pub fn endComponent(self: *Report) void {
+        self.emit(if (self.changes == self.component_changes_before) .healthy_unchanged else .healthy_changed);
+    }
+    pub fn startVerification(self: *Report) void {
+        if (self.verification_reported) return;
+        self.verification_reported = true;
+        self.emit(.verifying);
+    }
+    pub fn waitingForReadiness(self: *Report) void {
+        if (self.waiting_reported) return;
+        self.waiting_reported = true;
+        self.emit(.waiting);
+    }
     pub fn call(self: *Report, r: remote.Remote, op: remote.Operation, command: []const u8) ![]const u8 {
         self.phase = op;
+        if (op == .health) self.startVerification();
         if (op != .health) self.check = null;
         const result = try r.run(op, command);
         return self.accept(result);
@@ -50,7 +69,13 @@ pub const Report = struct {
             else => return error.RemoteOperationFailed,
         }
         self.completed += 1;
-        if (std.mem.eql(u8, result.output, "changed")) self.changes += 1;
+        if (std.mem.eql(u8, result.output, "changed")) {
+            self.changes += 1;
+            if (!self.convergence_reported) {
+                self.convergence_reported = true;
+                self.emit(.converging);
+            }
+        }
         return result.output;
     }
 };
@@ -134,7 +159,7 @@ pub const activate_grafana = activation("grafana");
 pub fn install(a: std.mem.Allocator, r: remote.Remote, report: *Report) !void {
     report.component = null;
     const machine = try host.parse(try report.call(r, .detect, host.detect_command));
-    report.component = .victoriametrics;
+    report.beginComponent(.victoriametrics);
     _ = try report.call(r, .user, host.victoriametrics_preflight ++ "\n" ++ @import("../system/users.zig").ensure_victoriametrics);
     _ = try report.call(r, .directories, directories);
     report.reserve_bytes = try fs.reserve(try fs.capacity(try report.call(r, .capacity, capacity_command)));
@@ -144,8 +169,9 @@ pub fn install(a: std.mem.Allocator, r: remote.Remote, report: *Report) !void {
     _ = try report.call(r, .activate, activate);
     try @import("verify.zig").health(a, r, report, machine.arch);
     _ = try report.call(r, .finalize, "rm -f /var/lib/dragontools/victoriametrics-restart-required");
+    report.endComponent();
 
-    report.component = .victorialogs;
+    report.beginComponent(.victorialogs);
     _ = try report.call(r, .user, host.victorialogs_preflight ++ "\n" ++ @import("../system/users.zig").ensure_victorialogs);
     _ = try report.call(r, .directories, victorialogs_directories);
     _ = try report.call(r, .binary, try vl.binaryCommand(a, machine.arch));
@@ -153,8 +179,9 @@ pub fn install(a: std.mem.Allocator, r: remote.Remote, report: *Report) !void {
     _ = try report.call(r, .activate, activate_victorialogs);
     try @import("victorialogs_verify.zig").health(a, r, report, machine.arch);
     _ = try report.call(r, .finalize, "rm -f /var/lib/dragontools/victorialogs-restart-required");
+    report.endComponent();
 
-    report.component = .victoriatraces;
+    report.beginComponent(.victoriatraces);
     _ = try report.call(r, .user, host.victoriatraces_preflight ++ "\n" ++ @import("../system/users.zig").ensure_victoriatraces);
     _ = try report.call(r, .directories, victoriatraces_directories);
     _ = try report.call(r, .binary, try vt.binaryCommand(a, machine.arch));
@@ -162,7 +189,9 @@ pub fn install(a: std.mem.Allocator, r: remote.Remote, report: *Report) !void {
     _ = try report.call(r, .activate, activate_victoriatraces);
     try @import("victoriatraces_verify.zig").health(a, r, report, machine.arch);
     _ = try report.call(r, .finalize, "rm -f /var/lib/dragontools/victoriatraces-restart-required");
+    report.endComponent();
 
-    report.component = .grafana;
+    report.beginComponent(.grafana);
     try @import("grafana_install.zig").install(a, r, report, machine.arch);
+    report.endComponent();
 }

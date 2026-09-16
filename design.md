@@ -382,10 +382,13 @@ tmp/devices, protected home/system/kernel/control groups, restricted SUID/SGID a
 personality, and a sole persistent write path under the Grafana data directory.
 Real systemd/runtime compatibility remains a disposable-host integration gate.
 
-Authentication uses upstream's normal first-login administrator flow. A fresh SQLite
-database has the standard `admin` / `admin` credentials; the operator must change the
-password immediately at the first login prompt through SSH forwarding. DragonTools
-neither embeds nor logs a password and never resets an existing account. The loopback
+Without configured secret references, authentication uses upstream's normal
+first-login administrator flow. A fresh SQLite database has the standard
+`admin` / `admin` credentials; the operator must change the password immediately
+through SSH forwarding. This mode reports administrator credentials as unmanaged
+and never resets an existing account. Explicitly configured secret references
+opt in to reconciliation described below; no plaintext administrator value is
+embedded in generated configuration or units. The loopback
 boundary still permits local users to reach bootstrap authentication; the target must
 be trusted and initialized promptly. [Grafana first login](https://grafana.com/docs/grafana/latest/setup-grafana/sign-in-to-grafana/),
 [pinned defaults](https://github.com/grafana/grafana/blob/v13.2.2/conf/defaults.ini).
@@ -404,8 +407,8 @@ The recommended VictoriaLogs integration requires its dedicated official plugin;
 a reviewed deterministic plugin installation is deferred. No Logs datasource or
 Grafana-to-VictoriaLogs edge is claimed. [VictoriaLogs Grafana integration](https://docs.victoriametrics.com/victorialogs/integrations/grafana/).
 
-Grafana's verifier remains read-only and needs no administrator credential. It
-checks active/persistently-enabled systemd state, loaded and managed unit identity,
+Grafana's verifier remains read-only. Its base checks need no administrator
+credential. It checks active/persistently-enabled systemd state, loaded and managed unit identity,
 running/disk executable identity, full installation integrity, effective hardening,
 managed path metadata, the process-owned loopback listener, and Grafana HTTP identity.
 It refuses `GF_*` overrides in the actual process environment, including inherited
@@ -418,8 +421,10 @@ Read-only SQLite access depends on the pinned schema and explicitly disabled WAL
 Python 3's standard SQLite module is a checked prerequisite. [Pinned datasource schema](https://github.com/grafana/grafana/blob/v13.2.2/pkg/services/sqlstore/migrations/datasource_mig.go).
 
 This establishes the provisioned records and backend reachability after password
-changes, without weakening authentication or storing credentials. It does not test an
-authenticated Grafana datasource-proxy/query-engine request. The authenticated UI's
+changes, without weakening authentication or retaining credentials. When secret
+references are configured, a read-only authenticated Grafana API check also verifies
+the administrator identity. It does not test a Grafana datasource-proxy/query-engine
+request. The authenticated UI's
 Save & test and Explore must still be exercised on a disposable supported host;
 local renderer/fake-remote tests do not establish that runtime boundary. Empty
 Jaeger services are valid before trace ingestion. No synthetic telemetry is injected.
@@ -443,6 +448,120 @@ Immediate access is `ssh -L 127.0.0.1:3000:127.0.0.1:3000 monitoring`, then
 `http://127.0.0.1:3000` on the administrator's laptop. No firewall, Cloudflare, DNS,
 or TLS configuration changes. Public inbound remains administrator-restricted SSH
 only. A later HTTPS frontend for `monitoring.baptizeddragon.com` is not installed.
+
+## Monitoring configuration and Grafana credentials
+
+`--config PATH` is explicit and supported for monitoring install, verify and status.
+No conventional-path search, includes, interpolation or generic application config
+is introduced. `config/monitoring.zig` accepts a bounded 64 KiB version-1 TOML subset:
+`version = 1`, `[connection].ssh_host`, and `[grafana]` username/password inline
+`{ op = "op://vault/item/field" }` references. Single-line basic/literal strings,
+basic escapes and comments are supported. Unknown or duplicate keys/tables,
+literal secret values, array/dotted/nested/multiline forms and unsupported sources
+fail without echoing their contents. The config contains references only and is
+suitable for version control subject to vault/item-name disclosure policy.
+
+Explicit CLI fields override the corresponding config fields. `--host` explicitly
+selects direct SSH instead of a configured alias; direct user/port/authentication
+overrides alone still conflict with alias mode. Username/password references must
+be a complete pair after merging. `--grafana-user-op` and `--grafana-password-op`
+are available for install and verify. Status can share the same file, but checks
+only service state and does not resolve its credential references. Help does not
+load the config. Plan reads and validates config/reference syntax, describes
+credentials as configured via secret references, and never invokes `op` or SSH.
+
+The small `SecretRef` boundary prevents Grafana from depending on `op` directly.
+1Password is optional and controller-local. The concrete resolver spawns `op read`
+with separate validated arguments, never through a shell. Both resolved fields are
+opaque redacted values, held outside the operation arena and wiped after use.
+Resolution failure, missing/unavailable `op`, empty values and provider subprocess
+errors occur before remote mutation and suppress raw stderr and values. No
+1Password credentials, executable or session state are uploaded to the host.
+
+A configured installation checks desired authentication before credential mutation.
+If those credentials identify the administrator already, reconciliation is a no-op;
+it never resets the password or restarts Grafana merely because refs are present.
+For existing installations with a manually changed password, privileged Grafana
+CLI/API operations reconcile the desired account without requiring that old
+password. The CLI always selects the pinned executable and the actual DragonTools
+home/config/data paths, rather than defaulting to another SQLite database.
+DragonTools does not directly write Grafana's credential database. Standalone
+verification authenticates read-only and fails instead of reconciling a mismatch.
+
+The concrete helper runs as `dt-grafana` with core dumps disabled and reads one
+bounded JSON credential payload from protected stdin. It creates no secret tempfile.
+For a missing or not-yet-initialized database, with the service inactive, it invokes
+the pinned `current/bin/grafana cli --homepath=... --config=... admin
+reset-admin-password --password-from-stdin --user-id 1`. The pinned Grafana CLI
+performs initial database setup using the desired `GF_SECURITY_ADMIN_USER` and
+`GF_SECURITY_ADMIN_PASSWORD` in that child process environment only. Both child
+output streams are discarded; service startup never uses those environment
+variables or a persistent EnvironmentFile, and never starts with default
+credentials first. Home/config paths select the configured persistent SQLite DB.
+
+Existing installations manage only the original local administrator, user ID 1.
+Read-only account metadata inspection refuses a missing, disabled, non-admin,
+external or service account, as well as a desired login/email collision. A
+successful authenticated `GET /api/user` with the exact desired login skips all
+credential mutation. Otherwise the supported CLI resets the password from stdin,
+and supported `PUT /api/user` reconciles the login while preserving name, email and
+theme. A password already corrected before an interrupted rename is not reset again.
+The final authenticated identity check must succeed. No direct SQL credential
+mutation or assumption that startup settings reset an existing password is used.
+[Grafana CLI command](https://github.com/grafana/grafana/blob/v13.2.2/pkg/cmd/grafana-cli/commands/commands.go),
+[password reset implementation](https://github.com/grafana/grafana/blob/v13.2.2/pkg/cmd/grafana-cli/commands/reset_password_command.go),
+[initial database setup](https://github.com/grafana/grafana/blob/v13.2.2/pkg/services/sqlstore/sqlstore.go),
+[user API](https://github.com/grafana/grafana/blob/v13.2.2/pkg/api/user.go).
+
+Usernames must be valid UTF-8, at most 190 bytes, without a colon, control characters
+or leading/trailing whitespace. Passwords are valid UTF-8, 4 bytes to 16 KiB, without
+CR, LF or NUL because the supported CLI reads one input line. These limits are
+validated without printing values. Standalone credential verification issues GET
+only; Grafana may update its own authentication last-seen metadata as part of a
+normal login. DragonTools makes no configuration or credential writes in verify.
+
+DragonTools command arguments, progress, errors and helper output exclude both
+resolved values. The helper discards the CLI's stdout/stderr. Grafana owns account
+identity and authentication metadata, including its normal failed-login records.
+Successful `/api/user` responses are not request-logged with the pinned default
+router logging setting, and failed basic authentication uses fixed error text.
+An authenticated HTTP error can still carry the username in Grafana's own request
+context log. Operational/audit logging stays under Grafana's normal policy; the
+helper never prints a password. These native boundaries were reviewed in
+[the pinned context handler](https://github.com/grafana/grafana/blob/v13.2.2/pkg/services/contexthandler/contexthandler.go)
+and [request logger](https://github.com/grafana/grafana/blob/v13.2.2/pkg/middleware/loggermw/logger.go),
+without claiming disposable-host validation.
+
+Resolved values travel through the protected SSH stdin path, never argv or rendered
+shell commands. The normal `grafana.ini`, provisioning and systemd unit contain no
+resolved administrator values. After successful reconciliation, only Grafana's
+normal credential storage persists: DragonTools retains no remote plaintext admin
+password. Credentials are verified before successful completion; interruption or
+failure does not clear component restart intent or falsely report credentials as
+current. Reruns inspect and authenticate actual state again.
+
+Credential reconciliation is scoped to Grafana. VictoriaMetrics, VictoriaLogs and
+VictoriaTraces keep their independent installation, readiness and restart markers.
+Local fake resolver, transport and Grafana fixtures establish sequencing and
+redaction, not live 1Password access or real Grafana/systemd runtime behavior.
+Authenticated datasource query-engine and browser UI validation remain separate
+integration checks even when the read-only administrator API check succeeds.
+
+## Semantic monitoring progress
+
+`Report` exposes an optional injectable event sink. Events contain only a fixed
+component and phase enum; there is no string payload for CLI values, command text,
+remote output or secrets. The CLI renders and writes each event immediately.
+Installation and verification name each component before inspection, then report
+required changes, verification and healthy changed/unchanged completion. Progress
+is presentation only and never changes error categories or operation results.
+
+The existing bounded readiness loop is unchanged in policy. After roughly two
+seconds of unsuccessful readiness probes, it emits `waiting for readiness...`
+once per component, never every retry. Immediate success adds no delay; deterministic
+failure is still not retried. A successful delayed probe permits normal finalization,
+and timeout still retains restart intent. The final unchanged install line remains
+`No changes required.`
 
 ## Safe reruns across all mutating workflows
 
@@ -535,8 +654,9 @@ self-signed certificate success. `monitoring tls renew` remains future work.
 Persistent secrets will use `systemd-creds` encrypted root-only storage and
 `LoadCredentialEncrypted=`; an explicit protected-file fallback would use
 `LoadCredential=` and root:root 0600. TLS/notification consumers read only the systemd
-credential path. The current opaque Secret infrastructure redacts and wipes; no
-resolver/storage consumer exists, so relevant CLI options fail before SSH.
+credential path. The opaque Secret infrastructure redacts and wipes; Grafana now has a controller-local
+1Password resolver and protected reconciliation consumer. TLS/notification consumers
+remain unavailable, so their options still fail before SSH.
 
 ## Alert policy and partial rendering
 

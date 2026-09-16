@@ -274,12 +274,36 @@ and modification times around the rerun, and inspect download evidence: no archi
 request or provisioning rewrite should occur. `verify` must preserve the same
 process identities and files.
 
-Open `http://127.0.0.1:3000` locally. On a fresh database, sign in with the standard
+Open `http://127.0.0.1:3000` locally. Without configured credential references, on a
+fresh database sign in with the standard
 initial `admin` / `admin` credentials and immediately change the password at the
 prompt. Do not include it in test logs, CLI arguments or repository files. Confirm
 that anonymous requests cannot browse datasources and authentication remains
 required. Reinstall/verify after changing the password: both must work without the
 CLI knowing it, and the new password must remain intact.
+
+For managed credentials, use an explicit config based on
+`examples/monitoring.toml` with disposable references and the same test alias.
+Authenticate the local `op` CLI through its normal setup. Plan must neither resolve
+references nor contact the host. Record only safe outcome categories, never
+resolved values, provider output or secret-bearing commands.
+
+```bash
+./zig-out/bin/dragontool monitoring install --config monitoring-test.toml --plan
+./zig-out/bin/dragontool monitoring install --config monitoring-test.toml
+./zig-out/bin/dragontool monitoring verify --config monitoring-test.toml
+./zig-out/bin/dragontool monitoring install --config monitoring-test.toml
+```
+
+Check fresh initialization with the desired login, then an existing manually
+changed password reconciled from the configured references. Repeat with the
+already-correct credentials and require `No changes required.`, no password reset,
+no restart, and stable identities for all four services. Configured standalone
+verify must authenticate read-only; mismatched credentials must fail without
+reconciliation. Exercise failure/retry and inspect protected temporary-secret
+cleanup without printing contents. Ensure no plaintext value appears in unit,
+ordinary config, process arguments or DragonTools output. Live 1Password access and
+these remote behaviors are separate integration gates, not fixture-test claims.
 
 In the authenticated UI:
 
@@ -294,7 +318,8 @@ In the authenticated UI:
    pinned-plugin and authenticated health/query checks before claiming integration.
 
 The automated verifier checks read-only provisioned datasource records and backend
-queries under the Grafana UID. The UI steps above exercise Grafana's authenticated
+queries under the Grafana UID, plus a read-only authenticated administrator API
+check when credential references are configured. The UI steps above exercise Grafana's authenticated
 proxy/query engine, which local fake-remote or renderer tests do not validate.
 
 On this disposable target only, test recovery and component isolation:

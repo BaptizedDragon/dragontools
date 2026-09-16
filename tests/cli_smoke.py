@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 
 binary = Path(os.environ.get("TOOL", "zig-out/bin/dragontool")).resolve()
@@ -44,6 +45,31 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
     plan_args = ["monitoring", "install", "--host", "example.com", "--plan"]
     host_plan_args = ["host", "install-oh-my-zsh", "--ssh-host", "REDACTION-SENTINEL", "--plan"]
     host_change_flags = ("--set-default-shell", "--update-managed-zshrc")
+    config = directory / "monitoring config.toml"
+    config.write_text('''version = 1
+[connection]
+ssh_host = "monitoring"
+[grafana]
+username = { op = "op://REDACTION-SENTINEL/Grafana/username" }
+password = { op = "op://REDACTION-SENTINEL/Grafana/password" }
+''')
+    config_args = ["monitoring", "install", "--config", str(config), "--plan"]
+    configured_credentials = "administrator credentials: configured via secret references"
+    invalid_configs = []
+    for name, contents, failure in (
+        ("literal", 'version = 1\n[grafana]\npassword = "REDACTION-SENTINEL"\n', "InvalidMonitoringConfig"),
+        ("unknown", 'version = 1\n[connection]\nhost = "REDACTION-SENTINEL"\n', "UnknownMonitoringConfigKey"),
+        ("duplicate", 'version = 1\nversion = 1\n', "DuplicateMonitoringConfigKey"),
+        ("version", 'version = 2\n', "UnsupportedMonitoringConfigVersion"),
+        ("reference", 'version = 1\n[grafana]\nusername = { op = "REDACTION-SENTINEL" }\n', "InvalidSecretReference"),
+        ("oversize", "#" * (64 * 1024 + 1), "MonitoringConfigTooLarge"),
+    ):
+        invalid = directory / f"{name}.toml"
+        invalid.write_text(contents)
+        invalid_configs.append((invalid, failure))
+    partial_config = directory / "partial.toml"
+    partial_config.write_text('version = 1\n[connection]\nssh_host = "monitoring"\n'
+                              '[grafana]\nusername = { op = "op://Example/Grafana/username" }\n')
     plan_output = ""
     host_plans = {}
     cases = [
@@ -79,6 +105,22 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
         (["host", "install-oh-my-zsh", "--ssh-host", "monitoring", "--ssh-op-path", "op://vault/item/key"],
          1, "FlagNotAllowed"),
         (["monitoring", "install", "--ssh-host", "REDACTION-SENTINEL", "--plan"], 0, "Grafana: loopback:3000"),
+        (config_args, 0, configured_credentials),
+        (["monitoring", "install", "--config", os.path.relpath(config), "--plan"], 0, configured_credentials),
+        ([*config_args, "--ssh-host", "other"], 0, configured_credentials),
+        ([*config_args, "--host", "example.com", "--user", "ops", "--port", "2222"], 0, configured_credentials),
+        ([*config_args, "--user", "root"], 1, "ConflictingSshMode"),
+        ([*config_args, "--port", "22"], 1, "ConflictingSshMode"),
+        ([*config_args, "--grafana-user-op", "op://Other/Grafana/username"], 0, configured_credentials),
+        (["monitoring", "install", "--config", str(partial_config), "--plan"], 1, "GrafanaCredentialReferencesRequired"),
+        (["monitoring", "install", "--config", str(partial_config), "--grafana-password-op", "op://Other/Grafana/password", "--plan"], 0, configured_credentials),
+        (["monitoring", "verify", "--config", str(directory / "missing.toml"), "--help"], 0, "Usage:"),
+        (["monitoring", "install", "--config", str(directory / "missing.toml"), "--plan"], 1, "UnableToReadMonitoringConfig"),
+        (["monitoring", "install", "--config", str(directory), "--plan"], 1, "InvalidMonitoringConfigFile"),
+        (["monitoring", "install", "--ssh-host", "monitoring", "--grafana-user-op", "op://Example/Grafana/username", "--plan"], 1, "GrafanaCredentialReferencesRequired"),
+        (["monitoring", "install", "--ssh-host", "monitoring", "--grafana-user-op", "op://Example/Grafana/username", "--grafana-password-op", "op://Example/Grafana/password", "--plan"], 0, configured_credentials),
+        (["monitoring", "status", "--config", str(config), "--grafana-user-op", "op://Example/Grafana/username"], 1, "FlagNotAllowed"),
+        (["host", "install-oh-my-zsh", "--config", str(config)], 1, "FlagNotAllowed"),
         (["monitoring", "agents", "install", "--host", "example.com",
           "--service", "one.service", "--service", "two.service"], 1, "NotImplemented"),
         (["monitoring", "agents", "verify", "--host", "example.com"], 1, "NotImplemented"),
@@ -101,6 +143,8 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
         (["monitoring", "install", "--host", "example.com", "--admin-ip", "192.0.2.11", "--plan"], 1, "NotImplemented"),
         (["monitoring", "install", "--host", "example.com", "--domain", "monitor.example.com", "--plan"], 1, "NotImplemented"),
     ]
+    for invalid, failure in invalid_configs:
+        cases.append((["monitoring", "install", "--config", str(invalid), "--ssh-host", "monitoring", "--plan"], 1, failure))
     for command in ("install", "verify", "status"):
         base = ["monitoring", command, "--ssh-host", "monitoring"]
         cases.append(([*base, "--host", "example.com"], 1, "ConflictingHosts"))
@@ -186,6 +230,7 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
         help_output[tuple(path)] = result.stdout
     install_help = help_output[("monitoring", "install")]
     assert "--tls" in install_help and "--host" in install_help and "--ssh-host" in install_help
+    assert all(flag in install_help for flag in ("--config", "--grafana-user-op", "--grafana-password-op"))
     assert "--service" not in install_help, install_help
     host_help = help_output[("host",)]
     assert "install-oh-my-zsh" in host_help, host_help
@@ -200,6 +245,9 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
         assert flag not in install_help, (flag, install_help)
     verify_help = help_output[("monitoring", "verify")]
     assert "--host" in verify_help and "--ssh-host" in verify_help
+    assert all(flag in verify_help for flag in ("--config", "--grafana-user-op", "--grafana-password-op"))
+    status_help = help_output[("monitoring", "status")]
+    assert "--config" in status_help and "  --grafana-user-op" not in status_help
     assert "  --tls" not in verify_help and "  --plan" not in verify_help, verify_help
     agents_help = help_output[("monitoring", "agents", "install")]
     assert "--service" in agents_help and "--station-ip" in agents_help
@@ -216,7 +264,7 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
         assert local_run(["completion", shell]).stdout == result.stdout, shell
         for text in ("monitoring", "agents", "firewall", "host", "install-oh-my-zsh",
                      "ssh-host", "target-user", "set-default-shell", "update-managed-zshrc",
-                     "tls", "manual", "cloudflare"):
+                     "tls", "manual", "cloudflare", "config", "grafana-user-op", "grafana-password-op"):
             assert text in result.stdout, (shell, text)
         script = directory / f"dragontool.{shell}"
         script.write_text(result.stdout)
@@ -259,10 +307,12 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
         assert {"install", "verify", "status"} <= bash_complete(["dragontool", "monitoring", "agents", ""])
         install_flags = bash_complete(["dragontool", "monitoring", "install", "--"])
         assert {"--host", "--ssh-host", "--tls", "--plan", "--identity"} <= install_flags
+        assert {"--config", "--grafana-user-op", "--grafana-password-op"} <= install_flags
         assert "--service" not in install_flags and "--station-ip" not in install_flags
         assert not set(host_change_flags) & install_flags
         verify_flags = bash_complete(["dragontool", "monitoring", "verify", "--"])
         assert {"--host", "--ssh-host"} <= verify_flags and "--tls" not in verify_flags and "--plan" not in verify_flags
+        assert {"--config", "--grafana-user-op", "--grafana-password-op"} <= verify_flags
         assert bash_complete(["dragontool", "monitoring", "install", "--tls", ""]) == {"manual", "cloudflare"}
         assert bash_complete(["dragontool", "monitoring", "install", "--tls", "c"]) == {"cloudflare"}
         # A value that looks like a command must not switch the completion context.
@@ -271,7 +321,9 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
         identity = directory / "identity-file"
         identity.write_text("path-completion fixture, not a private key\n")
         assert str(identity) in bash_complete(["dragontool", "monitoring", "install", "--identity", str(directory / "identity-")])
-        checked += 15
+        assert str(config) in bash_complete(["dragontool", "monitoring", "install", "--config", str(directory / "monitoring")])
+        assert "--grafana-user-op" not in bash_complete(["dragontool", "monitoring", "status", "--"])
+        checked += 17
     else:
         print("SKIP: Bash completion behavior (shell not installed)")
 
@@ -303,8 +355,10 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
         assert zsh_candidates(["dragontool", "monitoring", "install", "--tls", ""]) == {"manual", "cloudflare"}
         verify_flags = zsh_candidates(["dragontool", "monitoring", "verify", "--"])
         assert {"--host", "--ssh-host"} <= verify_flags and "--tls" not in verify_flags and "--plan" not in verify_flags
+        assert {"--config", "--grafana-user-op", "--grafana-password-op"} <= verify_flags
         assert zsh_candidates(["dragontool", "monitoring", "install", "--identity", ""]) == {"NATIVE_PATH_COMPLETION"}
-        checked += 10
+        assert zsh_candidates(["dragontool", "monitoring", "verify", "--config", ""]) == {"NATIVE_PATH_COMPLETION"}
+        checked += 11
     else:
         print("SKIP: Zsh completion behavior (shell not installed)")
 
@@ -333,6 +387,7 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
         assert fish_complete("dragontool monitoring install --tls ") == {"manual", "cloudflare"}
         verify_flags = fish_complete("dragontool monitoring verify --")
         assert {"--host", "--ssh-host"} <= verify_flags and "--tls" not in verify_flags and "--plan" not in verify_flags
+        assert {"--config", "--grafana-user-op", "--grafana-password-op"} <= verify_flags
         assert fish_complete("dragontool monitoring install --tls c") == {"cloudflare"}
         assert not fish_complete("dragontool monitoring install --host ")
         assert not fish_complete("dragontool monitoring install --ssh-op-path ")
@@ -340,7 +395,9 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
         identity.write_text("path-completion fixture, not a private key\n")
         assert str(identity) in fish_complete(f"dragontool monitoring install --identity {directory}/fish-identity-")
         assert "--tls" in fish_complete("dragontool monitoring install --host 'agents' --")
-        checked += 15
+        assert "--grafana-user-op" not in fish_complete("dragontool monitoring status --")
+        assert not fish_complete("dragontool monitoring install --grafana-user-op ")
+        checked += 17
     else:
         print("SKIP: Fish completion behavior (shell not installed)")
 
@@ -361,6 +418,66 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
             assert "REDACTION-SENTINEL" not in result.stdout + result.stderr
             assert not provider_marker.exists(), "Failed SSH invoked a secret/network provider"
             checked += 1
+
+    # A normal status command reads references from config but must never resolve
+    # them. It only reaches the intentionally failing fake SSH transport.
+    marker.unlink(missing_ok=True)
+    status = subprocess.run([str(binary), "monitoring", "status", "--config", str(config)],
+                            env=env, input="", capture_output=True, text=True, timeout=15)
+    assert marker.exists() and status.returncode == 1, (status.stdout, status.stderr)
+    assert "Failed at status;" in status.stdout, status.stdout
+    assert not provider_marker.exists(), "Status resolved configured Grafana credentials"
+    assert "REDACTION-SENTINEL" not in status.stdout + status.stderr
+    checked += 1
+
+    # Resolution failure happens before SSH and cannot reveal provider output or
+    # configured reference paths. The real 1Password CLI is never invoked.
+    marker.unlink(missing_ok=True)
+    op = directory / "op"
+    op.write_text('#!/bin/sh\n: > "$DRAGONTOOLS_PROVIDER_MARKER"\n'
+                  'printf "REDACTION-SENTINEL provider stdout\\n"\n'
+                  'printf "REDACTION-SENTINEL provider stderr\\n" >&2\nexit 92\n')
+    op.chmod(0o755)
+    for command in ("install", "verify"):
+        provider_marker.unlink(missing_ok=True)
+        result = subprocess.run([str(binary), "monitoring", command, "--config", str(config)],
+                                env=env, input="", capture_output=True, text=True, timeout=15)
+        assert result.returncode == 1 and provider_marker.exists(), (result.stdout, result.stderr)
+        assert not marker.exists(), "Credential resolution failure reached SSH"
+        assert "REDACTION-SENTINEL" not in result.stdout + result.stderr
+        checked += 1
+    provider_marker.unlink(missing_ok=True)
+
+    for empty_field, expected_error in (("username", "GrafanaUsernameResolutionFailed"),
+                                        ("password", "GrafanaPasswordResolutionFailed")):
+        values = {"username": "REDACTION-SENTINEL-user", "password": "REDACTION-SENTINEL-password"}
+        values[empty_field] = ""
+        op.write_text(f"#!{sys.executable}\nimport os, sys\nvalues = {values!r}\n"
+                      + "with open(os.environ['DRAGONTOOLS_PROVIDER_MARKER'], 'a') as output: output.write('resolved\\n')\n"
+                      + "sys.stdout.write(values[sys.argv[-1].rsplit('/', 1)[1]])\n")
+        for command in ("install", "verify"):
+            provider_marker.unlink(missing_ok=True)
+            result = subprocess.run([str(binary), "monitoring", command, "--config", str(config)],
+                                    env=env, input="", capture_output=True, text=True, timeout=15)
+            output = result.stdout + result.stderr
+            assert result.returncode == 1 and expected_error in output, output
+            assert provider_marker.exists() and not marker.exists(), "Empty secret reached SSH"
+            assert "REDACTION-SENTINEL" not in output, output
+            checked += 1
+    provider_marker.unlink(missing_ok=True)
+
+    missing_provider_bin = directory / "without-op"
+    missing_provider_bin.mkdir()
+    shutil.copy(ssh, missing_provider_bin / "ssh")
+    without_op = dict(env, PATH=str(missing_provider_bin))
+    for command in ("install", "verify"):
+        result = subprocess.run([str(binary), "monitoring", command, "--config", str(config)],
+                                env=without_op, input="", capture_output=True, text=True, timeout=15)
+        output = result.stdout + result.stderr
+        assert result.returncode == 1 and "GrafanaUsernameResolutionFailed" in output, output
+        assert not marker.exists() and not provider_marker.exists(), "Missing op reached SSH or a provider"
+        assert "REDACTION-SENTINEL" not in output, output
+        checked += 1
 
     for connection in (["--ssh-host", "monitoring"],
                        ["--host", "example.com", "--user", "root"]):
@@ -401,5 +518,73 @@ esac
         assert "REDACTION-SENTINEL" not in result.stdout + result.stderr
         assert "vm_app_version" not in result.stdout + result.stderr, "Remote command was exposed"
         assert not provider_marker.exists()
+        checked += 1
+
+    # Exercise real controller process/SSH wiring with successful fake replies.
+    # This validates transport and progress only; it executes no remote helper.
+    # Dummy resolved values must reach credential checks solely through stdin.
+    dummy_credentials = {
+        "username": "PRIVATE-GRAFANA-USERNAME",
+        "password": "PRIVATE-GRAFANA-PASSWORD '\"$(literal)\\value\t",
+    }
+    op.write_text(f"#!{sys.executable}\n" + "import os, sys\n"
+                  + f"values = {dummy_credentials!r}\n"
+                  + "assert len(sys.argv) == 4 and sys.argv[1:3] == ['read', '--no-newline']\n"
+                  + "field = sys.argv[3].rsplit('/', 1)[1]\n"
+                  + "assert field in values\n"
+                  + "with open(os.environ['DRAGONTOOLS_PROVIDER_MARKER'], 'a') as output: output.write('resolved\\n')\n"
+                  + "sys.stdout.write(values[field])\n")
+    ssh.write_text(f"#!{sys.executable}\n" + f"expected = {dummy_credentials!r}\n" + '''
+import json, os, sys
+from pathlib import Path
+assert all(value not in argument for value in expected.values() for argument in sys.argv)
+command = sys.argv[-1]
+marker = Path(os.environ['DRAGONTOOLS_TEST_MARKER'])
+metrics = {"status": "success", "data": {"resultType": "vector", "result": [
+    {"metric": {"__name__": "vm_app_version"}, "value": [1, "1"]}]}}
+if "Pinned Grafana credential operations" in command:
+    assert json.load(sys.stdin) == expected
+    with marker.open('a') as output: output.write('stdin credentials verified\\n')
+    sys.stdout.write('unchanged')
+elif '/etc/os-release' in command:
+    sys.stdout.write('ubuntu\\n24.04\\nx86_64\\n')
+elif 'stat -f -c' in command:
+    sys.stdout.write('1000000 4096')
+elif 'dragontools-victoriametrics-self_scrape_ready' in command:
+    sys.stdout.write(json.dumps(metrics))
+elif 'dragontools-victorialogs-storage_ready' in command:
+    sys.stdout.write('vl_storage_is_read_only{path="/var/lib/dragontools/victorialogs"} 0\\n')
+elif 'dragontools-victoriatraces-storage_ready' in command:
+    sys.stdout.write('vt_storage_is_read_only{path="/var/lib/dragontools/victoriatraces"} 0\\n')
+elif 'dragontools-grafana-http_ready' in command:
+    sys.stdout.write('{"grafana":{"database":"ok","version":"13.2.2"}}')
+elif 'dragontools-grafana-backend_ready' in command:
+    sys.stdout.write(json.dumps({"metrics": metrics, "traces": {
+        "data": [], "errors": None, "total": 0, "limit": 0, "offset": 0}}))
+else:
+    sys.stdout.write('unchanged')
+''')
+    for command in ("install", "verify", "install"):
+        marker.unlink(missing_ok=True)
+        provider_marker.unlink(missing_ok=True)
+        result = subprocess.run([str(binary), "monitoring", command, "--config", str(config)],
+                                env=env, input="", capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, (command, result.stdout, result.stderr)
+        output = result.stdout + result.stderr
+        assert all(value not in output for value in dummy_credentials.values()), output
+        assert "REDACTION-SENTINEL" not in output, output
+        assert provider_marker.read_text() == "resolved\nresolved\n"
+        checks = 2 if command == "install" else 1
+        assert marker.read_text() == "stdin credentials verified\n" * checks
+        for number, component in enumerate(("VictoriaMetrics", "VictoriaLogs", "VictoriaTraces", "Grafana"), 1):
+            heading = f"[{number}/4] {component}"
+            assert heading in result.stdout, result.stdout
+            component_output = result.stdout.split(heading, 1)[1].split("[", 1)[0]
+            assert "verifying..." in component_output and "healthy; no changes" in component_output
+            assert component_output.index("verifying...") < component_output.index("healthy; no changes")
+        assert "administrator credentials verified" in result.stdout
+        assert "administrator credentials updated" not in result.stdout
+        if command == "install":
+            assert "No changes required." in result.stdout
         checked += 1
 print(f"PASS: {checked} CLI smoke checks")

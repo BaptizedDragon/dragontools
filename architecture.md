@@ -11,7 +11,9 @@ provider abstraction, arbitrary shell hooks, or plugin system.
 
 ## Implemented boundary
 
-`cli/parse.zig` validates all supplied inputs before SSH. `main.zig` rejects
+`cli/parse.zig` merges explicit monitoring configuration and validates all supplied
+inputs before SSH. CLI values override file values; the small version-1 TOML
+schema contains only an OpenSSH alias and Grafana secret references. `main.zig` rejects
 unimplemented integrations. `monitoring/install.zig` detects the host once, then
 installs and verifies VictoriaMetrics, VictoriaLogs, VictoriaTraces, then Grafana. Each concrete
 component workflow handles its account, directories, binary, unit, activation,
@@ -23,6 +25,12 @@ A `Report` records the current component and phase, completed operations, and co
 exact count of every filesystem mutation). Remote failures stop the sequence.
 Verification also records a semantic check name, so a failure can identify
 `self_scrape_ready` without exposing command text or remote stderr.
+Its optional `monitoring/progress.zig` sink receives fixed component/phase enums;
+CLI rendering writes each event promptly. Component names precede inspection,
+changes are distinguished from verification, and completion reports changed or
+unchanged from that component's confirmed change count. Readiness polling emits
+one waiting event per component after roughly two seconds. The sink receives no
+remote output, options, references or resolved values and cannot change results.
 
 `system/remote.zig` is a minimal command boundary with injectable execution for
 unit tests. It is an internal interface, not a public arbitrary execution API.
@@ -57,6 +65,9 @@ These components and datasource edges are implemented by monitoring today:
 ```text
 ADMIN LAPTOP                            MONITORING HOST
 DragonTools -- strict OpenSSH :22 ----> systemd
+  +-- explicit monitoring TOML
+  +-- optional local 1Password CLI
+      (secret refs -> protected stdin)
 Browser 127.0.0.1:3000 -- SSH tunnel --> Grafana OSS 13.2.2
                                           127.0.0.1:3000; local authentication
                                           |
@@ -258,12 +269,20 @@ Root-owned deterministic files under `/etc/dragontools/grafana` configure the
 explicit `127.0.0.1:3000` listener, console logging to journald, local authentication,
 and Metrics/Traces provisioning. No third-party plugin or dashboard is installed.
 
-On a fresh database Grafana's standard `admin` / `admin` bootstrap flow applies;
-the administrator must change the password at the first login prompt through the
-SSH tunnel. No password is generated, logged, reset or embedded by DragonTools.
-Anonymous access, auth proxy and signup are disabled. Database reuse preserves
-account/password changes across installs. Target-local users can reach loopback,
-so complete initialization promptly on a trusted host.
+Without configured secret references, Grafana's standard `admin` / `admin` fresh
+bootstrap flow applies, followed by an immediate password change through the SSH
+tunnel. This compatible mode explicitly reports unmanaged administrator credentials
+and preserves existing accounts. Configured credentials instead resolve locally
+and are authenticated before mutation. Correct credentials require no reset or
+restart; a mismatch uses supported Grafana administrator interfaces and is verified
+before completion. No plaintext credential is embedded in the unit or ordinary
+configuration, and none remains remotely after successful reconciliation. Fresh
+setup passes desired values only in the pinned CLI child's environment and stdin before service startup; existing setup authenticates, then
+uses CLI password reset and the user API only if needed. The original local
+administrator (ID 1) is the explicit account boundary; incompatible accounts or
+login collisions fail. No secret temporary files or service EnvironmentFile exist.
+Anonymous access, auth proxy and signup remain disabled. Target-local users can
+reach loopback, so initialize promptly on a trusted host.
 
 Metrics uses Grafana's built-in Prometheus datasource at `127.0.0.1:8428`;
 Traces uses the built-in Jaeger datasource at `127.0.0.1:10428/select/jaeger`.
@@ -277,10 +296,13 @@ require a systemd daemon reload unless unit state independently needs one.
 Verification checks service state, unit and running identity, installation integrity,
 private listener ownership, HTTP identity, configuration, and non-secret datasource
 records through read-only SQLite. Queries to the provisioned backend endpoints run
-as `dt-grafana`, proving reachability and response contracts. This avoids retaining
-administrator credentials and remains valid after password changes. It does not
-exercise authenticated requests through Grafana's proxy/query engine; authenticated
-Save & test and Explore remain an explicit disposable-host integration gate.
+as `dt-grafana`, proving reachability and response contracts. With configured
+credentials, verification additionally authenticates a read-only Grafana identity
+request and confirms administrator privileges. Verification never changes accounts
+or resets passwords. This does not exercise datasource requests through Grafana's
+proxy/query engine; Save & test and Explore remain an explicit disposable-host
+integration gate. Unconfigured verification continues to check public health,
+managed provisioning and private backend access without administrator credentials.
 
 ## Service hardening
 
@@ -376,7 +398,15 @@ owned outside the long-lived operation arena; the constructor copies its input,
 so the resolver must also wipe its original buffer. This limits accidental exposure,
 not privileged process memory inspection, swap or crash dumps. Zig has no enforced
 private fields; code review must prohibit pointer casts that bypass the boundary.
-No current operation resolves, transmits or persists a secret.
+Grafana is the first protected consumer: `SecretRef` represents a source without
+resolving it, and the concrete local 1Password resolver uses spawned argv for
+`op read`. Both username and password remain sensitive. Resolution precedes SSH;
+empty or unavailable values fail with safe categories and suppressed stderr.
+Plans, help, completion and status never resolve secret values. Only the protected
+transport path may access secret bytes to write stdin; it does not render them into
+remote shell text or command arguments. Credential reconciliation uses supported
+Grafana interfaces and keeps only Grafana's normal credential hash persistently.
+No general provider/plugin framework or controller state store is added.
 
 Normal and 1Password SSH agents work through a socket; an explicit identity file is
 passed to OpenSSH. Optional `op://` private-key references are modeled but rejected.

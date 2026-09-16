@@ -103,15 +103,20 @@ pub fn validateMetrics(a: std.mem.Allocator, output: []const u8) !void {
 pub fn verify(a: std.mem.Allocator, r: remote.Remote, report: *install.Report) !void {
     report.component = null;
     const machine = try host.parse(try report.call(r, .detect, host.detect_command));
-    report.component = .victoriametrics;
+    report.beginComponent(.victoriametrics);
     report.reserve_bytes = try fs.reserve(try fs.capacity(try report.call(r, .capacity, install.capacity_command)));
     try health(a, r, report, machine.arch);
-    report.component = .victorialogs;
+    report.endComponent();
+    report.beginComponent(.victorialogs);
     try @import("victorialogs_verify.zig").health(a, r, report, machine.arch);
-    report.component = .victoriatraces;
+    report.endComponent();
+    report.beginComponent(.victoriatraces);
     try @import("victoriatraces_verify.zig").health(a, r, report, machine.arch);
-    report.component = .grafana;
+    report.endComponent();
+    report.beginComponent(.grafana);
     try @import("grafana_verify.zig").health(a, r, report, machine.arch);
+    try @import("grafana_credentials.zig").verify(a, r, report);
+    report.endComponent();
 }
 
 test "health fails on malformed, error and empty query responses" {
