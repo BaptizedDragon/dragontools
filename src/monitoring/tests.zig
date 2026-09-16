@@ -2,9 +2,12 @@ const std = @import("std");
 const remote = @import("../system/remote.zig");
 const install = @import("install.zig");
 const verify = @import("verify.zig");
+const readiness = @import("readiness.zig");
 const operation_count = @typeInfo(remote.Operation).@"enum".fields.len;
+const check_count = @typeInfo(readiness.Check).@"enum".fields.len;
 const components = [_]install.Component{ .victoriametrics, .victorialogs, .victoriatraces, .grafana };
-const vm_metrics = "{\"status\":\"success\",\"data\":{\"result\":[{\"metric\":{\"__name__\":\"vm_app_version\"},\"value\":[1,\"1\"]}]}}";
+const vm_metrics = "{\"status\":\"success\",\"data\":{\"resultType\":\"vector\",\"result\":[{\"metric\":{\"__name__\":\"vm_app_version\"},\"value\":[1,\"1\"]}]}}";
+const empty_vm_metrics = "{\"status\":\"success\",\"data\":{\"resultType\":\"vector\",\"result\":[]}}";
 const vl_metrics = "vl_storage_is_read_only{path=\"/var/lib/dragontools/victorialogs\"} 0\n";
 const vt_metrics = "vt_storage_is_read_only{path=\"/var/lib/dragontools/victoriatraces\"} 0\n";
 
@@ -33,9 +36,16 @@ const ComponentState = struct {
     fail_after_enable: bool = false,
     failure_code: u8 = 1,
     health_output: ?[]const u8 = null,
+    check_calls: [check_count]usize = @splat(0),
+    not_ready: [check_count]usize = @splat(0),
+    fail_check: ?readiness.Check = null,
+    empty_self_scrapes: usize = 0,
 
     fn called(self: ComponentState, op: remote.Operation) usize {
         return self.calls[@intFromEnum(op)];
+    }
+    fn checked(self: ComponentState, check: readiness.Check) usize {
+        return self.check_calls[@intFromEnum(check)];
     }
 };
 const Fake = struct {
@@ -48,6 +58,9 @@ const Fake = struct {
     check_syntax: bool = false,
     // systemd 255 invalidates NeedDaemonReload globally after EnableUnitFiles.
     enable_state_outdated: bool = false,
+    now_ms: i64 = 0,
+    sleeps: [512]u32 = @splat(0),
+    sleep_count: usize = 0,
 
     fn state(self: *Fake, component: install.Component) *ComponentState {
         return switch (component) {
@@ -58,7 +71,24 @@ const Fake = struct {
         };
     }
     fn asRemote(self: *Fake) remote.Remote {
-        return .{ .context = self, .execute = execute };
+        return .{ .context = self, .execute = execute, .clock = .{ .context = self, .now_ms = now, .sleep_ms = sleep } };
+    }
+    fn now(ctx: *anyopaque) i64 {
+        const self: *Fake = @ptrCast(@alignCast(ctx));
+        return self.now_ms;
+    }
+    fn sleep(ctx: *anyopaque, duration_ms: u32) !void {
+        const self: *Fake = @ptrCast(@alignCast(ctx));
+        try std.testing.expect(self.sleep_count < self.sleeps.len);
+        self.sleeps[self.sleep_count] = duration_ms;
+        self.sleep_count += 1;
+        self.now_ms += duration_ms;
+    }
+    fn checkFor(command: []const u8) !readiness.Check {
+        inline for (@typeInfo(readiness.Check).@"enum".fields) |field| {
+            if (std.mem.indexOf(u8, command, "-" ++ field.name) != null) return @enumFromInt(field.value);
+        }
+        return error.MissingVerificationCheck;
     }
     fn execute(ctx: *anyopaque, op: remote.Operation, command: []const u8) !remote.Result {
         const self: *Fake = @ptrCast(@alignCast(ctx));
@@ -100,13 +130,30 @@ const Fake = struct {
                 return .{ .code = 0, .output = "1000000 4096" };
             },
             .health => {
+                const check = try checkFor(command);
+                const index = @intFromEnum(check);
+                current.check_calls[index] += 1;
                 if (current.inactive or current.disabled or current.runtime_enabled or !current.loaded or current.stale_unit or self.enable_state_outdated) return .{ .code = 1 };
-                return .{ .code = 0, .output = current.health_output orelse switch (component) {
+                if (current.fail_check == check) return .{ .code = 1 };
+                if (current.not_ready[index] > 0) {
+                    current.not_ready[index] -= 1;
+                    return .{ .code = 75 };
+                }
+                if (check == .self_scrape_ready and current.empty_self_scrapes > 0) {
+                    current.empty_self_scrapes -= 1;
+                    return .{ .code = 0, .output = empty_vm_metrics };
+                }
+                const has_payload = switch (component) {
+                    .victoriametrics => check == .self_scrape_ready,
+                    .victorialogs, .victoriatraces => check == .storage_ready,
+                    .grafana => check == .http_ready or check == .backend_ready,
+                };
+                return .{ .code = 0, .output = if (has_payload) current.health_output orelse switch (component) {
                     .victoriametrics => vm_metrics,
                     .victorialogs => vl_metrics,
                     .victoriatraces => vt_metrics,
                     .grafana => @import("grafana_verify.zig").healthy_fixture,
-                } };
+                } else "" };
             },
             .finalize => {
                 current.dirty = false;
@@ -203,9 +250,11 @@ test "all four components converge once and inspect without mutation on a second
         for ([_]remote.Operation{ .user, .directories, .binary, .unit }) |op| {
             try std.testing.expectEqual(@as(usize, 1), current.writes[@intFromEnum(op)]);
         }
-        try std.testing.expectEqual(@as(usize, 2), current.called(.health));
+        try std.testing.expectEqual(@as(usize, 2), current.checked(.managed_state));
+        try std.testing.expectEqual(@as(usize, 2), current.checked(.http_ready));
         try std.testing.expect(!current.dirty);
     }
+    try std.testing.expectEqual(@as(usize, 0), fake.sleep_count);
     try std.testing.expectEqual(@as(usize, 2), fake.vm.called(.capacity));
     try std.testing.expectEqual(@as(usize, 0), fake.vl.called(.capacity));
     try std.testing.expectEqual(@as(usize, 0), fake.vt.called(.capacity));
@@ -214,6 +263,159 @@ test "all four components converge once and inspect without mutation on a second
         try std.testing.expectEqual(@as(usize, 1), fake.gf.writes[@intFromEnum(op)]);
         try std.testing.expectEqual(@as(usize, 2), fake.gf.called(op));
         try std.testing.expectEqual(@as(usize, 0), fake.vm.called(op) + fake.vl.called(op) + fake.vt.called(op));
+    }
+}
+
+test "each component retries two transient HTTP failures then finalizes and remains unchanged" {
+    for (components) |component| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var fake: Fake = .{};
+        const current = fake.state(component);
+        current.not_ready[@intFromEnum(readiness.Check.http_ready)] = 2;
+        try initialInstall(arena.allocator(), &fake);
+        try std.testing.expectEqual(@as(usize, 3), current.checked(.http_ready));
+        try std.testing.expectEqual(@as(usize, 1), current.checked(.managed_state));
+        try std.testing.expectEqualSlices(u32, &.{ 500, 1000 }, fake.sleeps[0..fake.sleep_count]);
+        try std.testing.expectEqual(@as(i64, 1500), fake.now_ms);
+        try std.testing.expect(!current.dirty);
+        try std.testing.expectEqual(@as(usize, 1), current.called(.finalize));
+        var unchanged: install.Report = .{};
+        try install.install(arena.allocator(), fake.asRemote(), &unchanged);
+        try std.testing.expectEqual(@as(usize, 0), unchanged.changes);
+        try std.testing.expectEqual(@as(usize, 4), current.checked(.http_ready));
+        try std.testing.expectEqual(@as(usize, 2), fake.sleep_count);
+        try expectRestarts(&fake, null, 1);
+        for (components) |checked_component| {
+            try std.testing.expectEqual(@as(usize, 1), fake.state(checked_component).downloads);
+        }
+    }
+}
+
+test "VictoriaMetrics waits across the configured self-scrape interval for stored telemetry" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var fake: Fake = .{};
+    // Probes at 0, 0.5, 1.5, ... 14.5 seconds find an empty query result.
+    // The first probe after the 15-second self-scrape can see vm_app_version.
+    fake.vm.empty_self_scrapes = 16;
+    try initialInstall(arena.allocator(), &fake);
+    try std.testing.expectEqual(@as(usize, 17), fake.vm.checked(.self_scrape_ready));
+    try std.testing.expectEqual(@as(usize, 1), fake.vm.checked(.http_ready));
+    try std.testing.expectEqual(@as(i64, 15500), fake.now_ms);
+    try std.testing.expectEqual(@as(u32, 500), fake.sleeps[0]);
+    for (fake.sleeps[1..fake.sleep_count]) |duration| try std.testing.expectEqual(@as(u32, 1000), duration);
+    try std.testing.expectEqual(@as(usize, 1), fake.vm.called(.finalize));
+    try std.testing.expect(!fake.vm.dirty);
+    var unchanged: install.Report = .{};
+    try install.install(arena.allocator(), fake.asRemote(), &unchanged);
+    try std.testing.expectEqual(@as(usize, 0), unchanged.changes);
+    try std.testing.expectEqual(@as(usize, 16), fake.sleep_count);
+    try expectRestarts(&fake, null, 1);
+}
+
+fn telemetryCheck(component: install.Component) readiness.Check {
+    return switch (component) {
+        .victoriametrics => .self_scrape_ready,
+        .victorialogs, .victoriatraces => .storage_ready,
+        .grafana => .provisioning_ready,
+    };
+}
+
+test "readiness deadlines fail with semantic checks and preserve each component restart intent" {
+    for (components) |component| {
+        for ([_]readiness.Check{ .service_active, .http_ready, telemetryCheck(component) }) |check| {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            var fake: Fake = .{};
+            const current = fake.state(component);
+            current.not_ready[@intFromEnum(check)] = std.math.maxInt(usize);
+            var failed: install.Report = .{};
+            try std.testing.expectError(error.ReadinessTimedOut, install.install(arena.allocator(), fake.asRemote(), &failed));
+            try std.testing.expectEqual(component, failed.component.?);
+            try std.testing.expectEqual(remote.Operation.health, failed.phase);
+            try std.testing.expectEqual(check, failed.check.?);
+            try std.testing.expectEqual(@as(i64, switch (check) {
+                .service_active => 15000,
+                .http_ready => 30000,
+                else => 45000,
+            }), fake.now_ms);
+            try std.testing.expect(current.checked(check) > 1);
+            try std.testing.expect(current.dirty);
+            try std.testing.expectEqual(@as(usize, 0), current.called(.finalize));
+            // The next install inspects the persisted marker, recovers, then
+            // finalizes; no artifact is downloaded a second time.
+            current.not_ready[@intFromEnum(check)] = 0;
+            var recovered: install.Report = .{};
+            try install.install(arena.allocator(), fake.asRemote(), &recovered);
+            try std.testing.expect(!current.dirty);
+            try std.testing.expectEqual(@as(usize, 1), current.called(.finalize));
+            try std.testing.expectEqual(@as(usize, 1), current.downloads);
+            try expectRestarts(&fake, component, 2);
+            var unchanged: install.Report = .{};
+            try install.install(arena.allocator(), fake.asRemote(), &unchanged);
+            try std.testing.expectEqual(@as(usize, 0), unchanged.changes);
+            try expectRestarts(&fake, component, 2);
+        }
+    }
+}
+
+test "deterministic verification failures are attempted once without readiness waits" {
+    for (components) |component| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var fake: Fake = .{};
+        const current = fake.state(component);
+        current.fail_check = .managed_state;
+        var failed: install.Report = .{};
+        try std.testing.expectError(error.RemoteOperationFailed, install.install(arena.allocator(), fake.asRemote(), &failed));
+        try std.testing.expectEqual(component, failed.component.?);
+        try std.testing.expectEqual(readiness.Check.managed_state, failed.check.?);
+        try std.testing.expectEqual(@as(usize, 1), current.checked(.managed_state));
+        try std.testing.expectEqual(@as(usize, 0), current.checked(.service_active));
+        try std.testing.expectEqual(@as(usize, 0), fake.sleep_count);
+        try std.testing.expect(current.dirty);
+        try std.testing.expectEqual(@as(usize, 0), current.called(.finalize));
+    }
+}
+
+test "runtime identity failures stop a readiness stage immediately rather than retrying" {
+    for (components) |component| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var fake: Fake = .{};
+        const current = fake.state(component);
+        // Runtime stages recheck process identity and listener policy; their
+        // ordinary nonzero failures must not be treated like exit 75 readiness.
+        current.fail_check = .http_ready;
+        var failed: install.Report = .{};
+        try std.testing.expectError(error.RemoteOperationFailed, install.install(arena.allocator(), fake.asRemote(), &failed));
+        try std.testing.expectEqual(readiness.Check.http_ready, failed.check.?);
+        try std.testing.expectEqual(@as(usize, 1), current.checked(.http_ready));
+        try std.testing.expectEqual(@as(usize, 0), fake.sleep_count);
+        try std.testing.expect(current.dirty);
+        try std.testing.expectEqual(@as(usize, 0), current.called(.finalize));
+    }
+}
+
+test "standalone verification retries readiness without mutating or clearing restart intent" {
+    for (components) |component| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var fake: Fake = .{};
+        try initialInstall(arena.allocator(), &fake);
+        const current = fake.state(component);
+        current.dirty = true;
+        current.not_ready[@intFromEnum(readiness.Check.http_ready)] = 2;
+        var checked: install.Report = .{};
+        try verify.verify(arena.allocator(), fake.asRemote(), &checked);
+        try std.testing.expectEqual(@as(usize, 0), checked.changes);
+        try std.testing.expect(current.dirty);
+        try std.testing.expectEqual(@as(usize, 1), current.called(.finalize));
+        try std.testing.expectEqual(@as(usize, 1), current.called(.activate));
+        try std.testing.expectEqual(@as(usize, 4), current.checked(.http_ready));
+        try std.testing.expectEqualSlices(u32, &.{ 500, 1000 }, fake.sleeps[0..fake.sleep_count]);
+        try expectRestarts(&fake, null, 1);
     }
 }
 
@@ -499,7 +701,7 @@ test "binary or activation failure stops later phases and preserves other compon
             try std.testing.expectError(error.RemoteOperationFailed, install.install(arena.allocator(), fake.asRemote(), &failed));
             try std.testing.expectEqual(component, failed.component.?);
             try std.testing.expectEqual(op, failed.phase);
-            try std.testing.expectEqual(@as(usize, 1), current.called(.health));
+            try std.testing.expectEqual(@as(usize, 1), current.checked(.managed_state));
             try std.testing.expectEqual(@as(usize, 1), current.called(.finalize));
             try expectRestarts(&fake, null, 1);
             if (op == .activate) try std.testing.expect(current.dirty);
@@ -533,19 +735,24 @@ test "controller rejection of invalid application metrics prevents finalization"
         defer arena.deinit();
         var fake: Fake = .{};
         const current = fake.state(component);
-        current.health_output = "not application metrics";
+        current.health_output = switch (component) {
+            .victoriametrics, .grafana => "not application metrics",
+            .victorialogs => "vl_storage_is_read_only{path=\"/var/lib/dragontools/victorialogs\"} invalid\n",
+            .victoriatraces => "vt_storage_is_read_only{path=\"/var/lib/dragontools/victoriatraces\"} invalid\n",
+        };
         var report: install.Report = .{};
         const result = install.install(arena.allocator(), fake.asRemote(), &report);
         try std.testing.expectError(switch (component) {
             .victoriametrics => error.InvalidHealthResponse,
-            .victorialogs => error.VictoriaLogsMetricMissing,
-            .victoriatraces => error.VictoriaTracesMetricMissing,
+            .victorialogs => error.InvalidVictoriaLogsMetrics,
+            .victoriatraces => error.InvalidVictoriaTracesMetrics,
             .grafana => error.InvalidGrafanaHealthResponse,
         }, result);
         try std.testing.expectEqual(component, report.component.?);
         try std.testing.expectEqual(remote.Operation.health, report.phase);
         try std.testing.expect(current.dirty);
         try std.testing.expectEqual(@as(usize, 0), current.called(.finalize));
+        try std.testing.expectEqual(@as(usize, 0), fake.sleep_count);
     }
 }
 
@@ -560,7 +767,8 @@ test "verify checks all four without mutation and fails on any unhealthy compone
         try std.testing.expectEqual(@as(usize, 0), report.changes);
         for (components) |checked| {
             const current = fake.state(checked);
-            try std.testing.expectEqual(@as(usize, 2), current.called(.health));
+            try std.testing.expectEqual(@as(usize, 2), current.checked(.managed_state));
+            try std.testing.expectEqual(@as(usize, 2), current.checked(.http_ready));
             try std.testing.expectEqual(@as(usize, 1), current.called(.activate));
             try std.testing.expectEqual(@as(usize, 1), current.called(.finalize));
         }

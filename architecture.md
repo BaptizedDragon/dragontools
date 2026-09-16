@@ -21,6 +21,8 @@ its account phase checks that component's unit, drop-ins, and restart marker for
 conflicts, so a refusal identifies the affected component.
 A `Report` records the current component and phase, completed operations, and confirmed changed operations (not an
 exact count of every filesystem mutation). Remote failures stop the sequence.
+Verification also records a semantic check name, so a failure can identify
+`self_scrape_ready` without exposing command text or remote stderr.
 
 `system/remote.zig` is a minimal command boundary with injectable execution for
 unit tests. It is an internal interface, not a public arbitrary execution API.
@@ -117,6 +119,16 @@ run inspects actual files and service state, resumes pending activation, and cle
 each marker only after that component verifies. Existing markers are not blindly
 rewritten. Read-only `monitoring verify` never repairs files, reloads systemd,
 restarts services, or clears restart intent. No prior run is assumed successful.
+
+`monitoring/readiness.zig` separates one-shot deterministic verification from
+bounded runtime probes. Managed units, artifact hashes, symlinks, service users,
+hardening, actual process arguments and unexpected public listeners fail without
+retry. Activation gets 15 seconds, HTTP readiness 30 seconds, and telemetry or
+datasource readiness 45 seconds. Probes run immediately; only a not-ready result
+schedules a 500 ms first retry, then 1-second intervals. The remote boundary has
+an injectable clock so tests exercise deadlines without real sleeps. A successful
+delayed probe follows ordinary finalization; a timeout keeps the component's
+restart intent. No readiness probe mutates remote state.
 
 ## CLI metadata and interactive frontend
 

@@ -6,6 +6,7 @@ const install = @import("install.zig");
 const grafana = @import("../components/grafana.zig");
 const config = @import("../components/grafana_config.zig");
 const unit = @import("../components/grafana_unit.zig");
+const readiness = @import("readiness.zig");
 
 // This only queries non-secret datasource metadata. No user/password/token or
 // secure_json_data column is selected. Pinning the schema is intentional:
@@ -44,18 +45,31 @@ pub const database_check =
     \\            return sqlite3.SQLITE_OK
     \\        return sqlite3.SQLITE_DENY
     \\    db.set_authorizer(authorize)
-    \\    rows = db.execute("SELECT uid, name, type, access, url, is_default, read_only, basic_auth, with_credentials, json_extract(json_data, '$.httpMethod'), json_extract(json_data, '$.prometheusType'), json_extract(json_data, '$.prometheusVersion') FROM data_source WHERE org_id = 1 AND uid IN ('dragontools-metrics', 'dragontools-traces') ORDER BY uid").fetchall()
-    \\    require(rows == [
-    \\        ("dragontools-metrics", "Metrics", "prometheus", "proxy", "http://127.0.0.1:8428", 1, 1, 0, 0, "POST", "Prometheus", "2.24.0"),
-    \\        ("dragontools-traces", "Traces", "jaeger", "proxy", "http://127.0.0.1:10428/select/jaeger", 0, 1, 0, 0, None, None, None),
-    \\    ])
+    \\    rows = db.execute("SELECT org_id, uid, name, type, access, url, is_default, read_only, basic_auth, with_credentials, json_extract(json_data, '$.httpMethod'), json_extract(json_data, '$.prometheusType'), json_extract(json_data, '$.prometheusVersion') FROM data_source WHERE uid IN ('dragontools-metrics', 'dragontools-traces') ORDER BY uid").fetchall()
+    \\    expected = [
+    \\        (1, "dragontools-metrics", "Metrics", "prometheus", "proxy", "http://127.0.0.1:8428", 1, 1, 0, 0, "POST", "Prometheus", "2.24.0"),
+    \\        (1, "dragontools-traces", "Traces", "jaeger", "proxy", "http://127.0.0.1:10428/select/jaeger", 0, 1, 0, 0, None, None, None),
+    \\    ]
+    \\    # Missing rows are normal while first-start provisioning is in progress.
+    \\    # An existing incompatible or duplicate row is policy drift, not readiness.
+    \\    require(all(row in expected for row in rows) and len(set(rows)) == len(rows))
+    \\    if rows != expected:
+    \\        sys.exit(75)
     \\    db.close()
+    \\except FileNotFoundError:
+    \\    sys.exit(75)
+    \\except sqlite3.OperationalError as error:
+    \\    code = getattr(error, "sqlite_errorcode", None)
+    \\    # SQLITE_BUSY/LOCKED are bounded startup waits. Only the exact missing
+    \\    # datasource-table error is an incomplete migration; other SQL errors fail.
+    \\    sys.exit(75 if code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED) or str(error) == "no such table: data_source" else 1)
     \\except Exception:
     \\    sys.exit(1)
 ;
 
-pub const health_script =
-    \\expected=$1; unit=$2; version=$3; ini=$4; datasources=$5; database_check=$6
+// Static policy and full-tree integrity run once, outside the readiness budgets.
+pub const managed_script =
+    \\unit=$1; ini=$2; datasources=$3
     \\check_property() {
     \\  actual=$(systemctl show -p "$1" --value dragontools-grafana.service)
     \\  test "$actual" = "$2"
@@ -67,7 +81,6 @@ pub const health_script =
     \\check_property DropInPaths ""
     \\check_property Environment ""
     \\check_property EnvironmentFiles ""
-    \\systemctl is-active --quiet dragontools-grafana.service
     \\test "$(systemctl is-enabled dragontools-grafana.service)" = enabled
     \\check_property User dt-grafana
     \\check_property Group dt-grafana
@@ -92,48 +105,93 @@ pub const health_script =
     \\printf '%s' "$unit" | cmp -s - /etc/systemd/system/dragontools-grafana.service
     \\printf '%s' "$ini" | cmp -s - /etc/dragontools/grafana/grafana.ini
     \\printf '%s' "$datasources" | cmp -s - /etc/dragontools/grafana/provisioning/datasources/dragontools.yaml
-    \\pid=$(systemctl show -p MainPID --value dragontools-grafana.service)
-    \\test "$pid" -gt 0
-    \\# Manager DefaultEnvironment can override the ini without appearing in the unit.
-    \\# Match variable names only; never return, print, or capture environment values.
-    \\if grep -zq '^GF_' "/proc/$pid/environ" 2>/dev/null; then exit 1; else test "$?" = 1; fi
-    \\actual_args=$(tr '\000' '\n' < "/proc/$pid/cmdline")
-    \\expected_args=$(printf '%s\n' /opt/dragontools/components/grafana/current/bin/grafana server --homepath=/opt/dragontools/components/grafana/current --config=/etc/dragontools/grafana/grafana.ini)
-    \\test "$actual_args" = "$expected_args"
-    \\printf '%s  %s\n' "$expected" "/proc/$pid/exe" | sha256sum --check --status
-    \\test "$(readlink /opt/dragontools/components/grafana/current)" = "$version"
-    \\i=0
-    \\until grafana=$(curl --disable --noproxy '*' --fail --silent --connect-timeout 3 --max-time 5 --max-filesize 1048576 http://127.0.0.1:3000/api/health); do i=$((i+1)); test "$i" -lt 30; sleep 1; done
-    \\listeners=$(ss -H -ltnp 'sport = :3000')
-    \\printf '%s\n' "$listeners" | grep -F "pid=$pid," | grep -Eq '[[:space:]]127[.]0[.]0[.]1:3000[[:space:]]'
-    \\if printf '%s\n' "$listeners" | grep -Ev '[[:space:]]127[.]0[.]0[.]1:3000[[:space:]]' >/dev/null; then exit 1; fi
-    \\all_listeners=$(ss -H -ltnp)
-    \\owned=$(printf '%s\n' "$all_listeners" | grep -F "pid=$pid,")
-    \\if printf '%s\n' "$owned" | grep -Ev '[[:space:]]127[.]0[.]0[.]1:3000[[:space:]]' >/dev/null; then exit 1; fi
-    \\# A credential-free API request must be denied, even after the administrator changes their password.
-    \\code=$(curl --disable --noproxy '*' --silent --connect-timeout 3 --max-time 5 --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3000/api/datasources)
+;
+
+// Every runtime attempt rejects unsafe listeners and an incompatible running
+// process immediately. Only an absent process/listener or inactive state is
+// readiness, never a mismatching identity, argument, account or environment.
+pub const runtime_guard =
+    \\expected=$1
+    \\check_listeners() {
+    \\  listeners=$(ss -H -ltnp 'sport = :3000')
+    \\  if test -n "$listeners" && printf '%s\n' "$listeners" | grep -Ev '[[:space:]]127[.]0[.]0[.]1:3000[[:space:]]' >/dev/null; then exit 1; fi
+    \\  if test "$pid" -gt 0; then
+    \\    all_listeners=$(ss -H -ltnp)
+    \\    owned=$(printf '%s\n' "$all_listeners" | grep -F "pid=$pid," || :)
+    \\    if test -n "$owned" && printf '%s\n' "$owned" | grep -Ev '[[:space:]]127[.]0[.]0[.]1:3000[[:space:]]' >/dev/null; then exit 1; fi
+    \\    if test -n "$listeners"; then printf '%s\n' "$listeners" | grep -F "pid=$pid," >/dev/null || exit 1; fi
+    \\  fi
+    \\}
+    \\check_runtime() {
+    \\  pid=$(systemctl show -p MainPID --value dragontools-grafana.service)
+    \\  case "$pid" in ''|*[!0-9]*) exit 1;; esac
+    \\  check_listeners
+    \\  test "$pid" -gt 0 && test -d "/proc/$pid" || exit 75
+    \\  test "$(stat -c '%U:%G' "/proc/$pid")" = dt-grafana:dt-grafana
+    \\  # Manager DefaultEnvironment can override the ini without appearing in the unit.
+    \\  # Match variable names only; never return, print, or capture environment values.
+    \\  if grep -zq '^GF_' "/proc/$pid/environ" 2>/dev/null; then exit 1; else test "$?" = 1; fi
+    \\  actual_args=$(tr '\000' '\n' < "/proc/$pid/cmdline")
+    \\  expected_args=$(printf '%s\n' /opt/dragontools/components/grafana/current/bin/grafana server --homepath=/opt/dragontools/components/grafana/current --config=/etc/dragontools/grafana/grafana.ini)
+    \\  test "$actual_args" = "$expected_args"
+    \\  printf '%s  %s\n' "$expected" "/proc/$pid/exe" | sha256sum --check --status
+    \\  systemctl is-active --quiet dragontools-grafana.service || exit 75
+    \\  if test "$1" = listener; then test -n "$listeners" || exit 75; fi
+    \\}
+;
+pub const active_script = runtime_guard ++ "\ncheck_runtime process\n";
+pub const http_script = runtime_guard ++ "\n" ++
+    \\check_runtime listener
+    \\grafana=$(curl --disable --noproxy '*' --fail --silent --connect-timeout 3 --max-time 5 --max-filesize 1048576 http://127.0.0.1:3000/api/health) || exit 75
+    \\# Credential-free datasource access must stay denied after password changes.
+    \\code=$(curl --disable --noproxy '*' --silent --connect-timeout 3 --max-time 5 --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3000/api/datasources) || exit 75
+    \\case "$code" in 500|502|503|504) exit 75;; esac
     \\test "$code" = 401
-    \\runuser --user dt-grafana -- python3 -I -B -c "$database_check" /var/lib/dragontools/grafana/grafana.db
-    \\# These query real backend data under the Grafana account. They do not authenticate to Grafana's query API.
-    \\metrics=$(runuser --user dt-grafana -- curl --disable --noproxy '*' --fail --silent --connect-timeout 3 --max-time 5 --max-filesize 1048576 'http://127.0.0.1:8428/api/v1/query?query=vm_app_version')
-    \\traces=$(runuser --user dt-grafana -- curl --disable --noproxy '*' --fail --silent --connect-timeout 3 --max-time 5 --max-filesize 1048576 http://127.0.0.1:10428/select/jaeger/api/services)
-    \\printf '{"grafana":%s,"metrics":%s,"traces":%s,"provisioning":"verified"}' "$grafana" "$metrics" "$traces"
+    \\check_listeners
+    \\printf '{"grafana":%s}' "$grafana"
+;
+pub const provisioning_script = runtime_guard ++ "\n" ++
+    \\check_runtime listener
+    \\runuser --user dt-grafana -- python3 -I -B -c "$2" /var/lib/dragontools/grafana/grafana.db
+    \\check_listeners
+;
+pub const backend_script = runtime_guard ++ "\n" ++
+    \\check_runtime listener
+    \\# Real backend queries under the Grafana account, without Grafana credentials.
+    \\metrics=$(runuser --user dt-grafana -- curl --disable --noproxy '*' --fail --silent --connect-timeout 3 --max-time 5 --max-filesize 1048576 'http://127.0.0.1:8428/api/v1/query?query=vm_app_version') || exit 75
+    \\traces=$(runuser --user dt-grafana -- curl --disable --noproxy '*' --fail --silent --connect-timeout 3 --max-time 5 --max-filesize 1048576 http://127.0.0.1:10428/select/jaeger/api/services) || exit 75
+    \\check_listeners
+    \\printf '{"metrics":%s,"traces":%s}' "$metrics" "$traces"
 ;
 
 pub fn health(a: std.mem.Allocator, r: remote.Remote, report: *install.Report, arch: host.Arch) !void {
-    const preflight = try remote.shell(a, &.{ "sh", "-eu", "-c", @import("grafana_install.zig").preflight, "dragontools-grafana-verify-preflight" });
+    const preflight = try remote.shell(a, &.{ "sh", "-eu", "-c", @import("grafana_install.zig").preflight, "dragontools-grafana-preflight" });
     defer a.free(preflight);
     const integrity = try grafana.integrityCommand(a, arch);
     defer a.free(integrity);
     const unit_text = try unit.render(a);
     defer a.free(unit_text);
-    const health_command = try remote.shell(a, &.{ "sh", "-eu", "-c", health_script, "dragontools-grafana-health", grafana.artifact(arch).binary_sha256, unit_text, grafana.version, config.ini, config.datasources, database_check });
-    defer a.free(health_command);
-    const script = try std.fmt.allocPrint(a, "{s} && {s} && {s}", .{ preflight, integrity, health_command });
+    const policy = try remote.shell(a, &.{ "sh", "-eu", "-c", managed_script, "dragontools-grafana-policy", unit_text, config.ini, config.datasources });
+    defer a.free(policy);
+    const script = try std.fmt.allocPrint(a, "{s} && {s} && {s}", .{ preflight, integrity, policy });
     defer a.free(script);
-    const command = try remote.shell(a, &.{ "sh", "-eu", "-c", script, "dragontools-grafana-verification" });
-    defer a.free(command);
-    try validate(a, try report.call(r, .health, command));
+    const managed = try remote.shell(a, &.{ "sh", "-eu", "-c", script, "dragontools-grafana-managed_state" });
+    defer a.free(managed);
+    _ = try readiness.deterministic(a, r, report, .managed_state, managed);
+
+    const binary_hash = grafana.artifact(arch).binary_sha256;
+    const active = try remote.shell(a, &.{ "sh", "-eu", "-c", active_script, "dragontools-grafana-service_active", binary_hash });
+    defer a.free(active);
+    try readiness.poll(a, r, report, .service_active, readiness.active_ms, active, readiness.ready);
+    const http = try remote.shell(a, &.{ "sh", "-eu", "-c", http_script, "dragontools-grafana-http_ready", binary_hash });
+    defer a.free(http);
+    try readiness.poll(a, r, report, .http_ready, readiness.http_ms, http, validateHttp);
+    const provisioning = try remote.shell(a, &.{ "sh", "-eu", "-c", provisioning_script, "dragontools-grafana-provisioning_ready", binary_hash, database_check });
+    defer a.free(provisioning);
+    try readiness.poll(a, r, report, .provisioning_ready, readiness.telemetry_ms, provisioning, readiness.ready);
+    const backend = try remote.shell(a, &.{ "sh", "-eu", "-c", backend_script, "dragontools-grafana-backend_ready", binary_hash });
+    defer a.free(backend);
+    try readiness.poll(a, r, report, .backend_ready, readiness.telemetry_ms, backend, validateBackend);
 }
 
 fn member(value: std.json.Value, name: []const u8) !std.json.Value {
@@ -152,13 +210,33 @@ pub fn validate(a: std.mem.Allocator, output: []const u8) !void {
     const app = try member(result, "grafana");
     if (!textIs(try member(app, "version"), grafana.version) or !textIs(try member(app, "database"), "ok")) return error.GrafanaIdentityOrDatabaseFailed;
     if (!textIs(try member(result, "provisioning"), "verified")) return error.GrafanaProvisioningFailed;
+    try validateBackends(result, false);
+}
 
+pub fn validateHttp(a: std.mem.Allocator, output: []const u8) !void {
+    const parsed = std.json.parseFromSlice(std.json.Value, a, output, .{}) catch return error.InvalidGrafanaHealthResponse;
+    defer parsed.deinit();
+    const app = try member(parsed.value, "grafana");
+    if (!textIs(try member(app, "version"), grafana.version)) return error.GrafanaIdentityOrDatabaseFailed;
+    const database = try member(app, "database");
+    if (database != .string) return error.InvalidGrafanaHealthResponse;
+    if (!textIs(database, "ok")) return error.NotReady;
+}
+
+pub fn validateBackend(a: std.mem.Allocator, output: []const u8) !void {
+    const parsed = std.json.parseFromSlice(std.json.Value, a, output, .{}) catch return error.InvalidGrafanaHealthResponse;
+    defer parsed.deinit();
+    try validateBackends(parsed.value, true);
+}
+
+fn validateBackends(result: std.json.Value, allow_startup: bool) !void {
     const metrics = try member(result, "metrics");
     if (!textIs(try member(metrics, "status"), "success")) return error.GrafanaMetricsQueryFailed;
     const data = try member(metrics, "data");
     if (!textIs(try member(data, "resultType"), "vector")) return error.GrafanaMetricsQueryFailed;
     const samples = try member(data, "result");
-    if (samples != .array or samples.array.items.len == 0) return error.GrafanaMetricsQueryFailed;
+    if (samples != .array) return error.GrafanaMetricsQueryFailed;
+    if (samples.array.items.len == 0) return if (allow_startup) error.NotReady else error.GrafanaMetricsQueryFailed;
     var identified = false;
     for (samples.array.items) |sample| {
         const metric = try member(sample, "metric");

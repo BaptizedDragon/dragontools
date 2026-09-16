@@ -25,13 +25,18 @@ pub const Component = enum {
 };
 pub const Report = struct {
     phase: remote.Operation = .detect,
+    check: ?@import("readiness.zig").Check = null,
     component: ?Component = null,
     changes: usize = 0,
     reserve_bytes: u64 = 0,
     completed: usize = 0,
     pub fn call(self: *Report, r: remote.Remote, op: remote.Operation, command: []const u8) ![]const u8 {
         self.phase = op;
+        if (op != .health) self.check = null;
         const result = try r.run(op, command);
+        return self.accept(result);
+    }
+    pub fn accept(self: *Report, result: remote.Result) ![]const u8 {
         switch (result.code) {
             0 => {},
             10 => return error.RootPrivilegesRequired,

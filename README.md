@@ -115,6 +115,19 @@ in the authenticated UI remains a disposable-host integration gate. No synthetic
 logs/traces are injected and application telemetry arrival is not claimed.
 `status` reports all four service states; use `verify` for health.
 
+Verification separates fixed configuration checks from startup readiness. Unit,
+checksum, symlink, service-user, hardening and process-argument mismatches, and
+unexpected public listeners, fail immediately. Runtime probes check immediately,
+then retry after 500 ms and at 1-second intervals only while not ready: up to
+15 seconds for systemd activation, 30 seconds for HTTP readiness, and 45 seconds
+for telemetry or datasource readiness. VictoriaMetrics self-scraped
+`vm_app_version` can appear after its configured `-selfScrapeInterval=15s`.
+There is no unconditional startup sleep or new CLI option. A timeout fails the
+command and keeps that component's restart marker; readiness within the deadline
+allows normal finalization and an unchanged install remains a no-op. Failures name
+a safe semantic check, such as `self_scrape_ready`, without exposing remote stderr
+or executable commands.
+
 Raw storage APIs have no configured authentication and must remain loopback-only.
 Local users on the target can reach them. There is no remote ingestion, TLS,
 firewall management, alert runtime, or maintenance timer. Use a provider firewall

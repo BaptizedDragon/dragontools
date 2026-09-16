@@ -2,6 +2,16 @@
 
 ## 0.1.0-dev — unreleased
 
+- Separate deterministic monitoring verification from bounded startup readiness
+  for VictoriaMetrics, VictoriaLogs, VictoriaTraces and Grafana. Retry active,
+  HTTP and telemetry checks for up to 15/30/45 seconds, with a 500 ms first retry
+  and then 1-second intervals; never delay an already-ready service or retry
+  configuration/identity failures. Allow VictoriaMetrics' 15-second self-scrape
+  interval before requiring stored `vm_app_version` samples.
+- Retain per-component restart intent on readiness timeout and finalize normally
+  after delayed success. Add safe semantic check diagnostics and injected-clock
+  lifecycle tests for retries, failure, recovery and unchanged reruns.
+
 - Add Grafana OSS 13.2.2 as the fourth independently converged station component,
   with reviewed Linux amd64/arm64 release integrity, dedicated `dt-grafana`, persistent
   SQLite state, versioned release files, hardened systemd and loopback:3000 only.

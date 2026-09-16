@@ -1,12 +1,24 @@
 const std = @import("std");
 pub const Operation = enum { detect, user, directories, capacity, binary, config, provisioning, unit, activate, health, finalize, status, service_exists, host_inspect, host_packages, host_source, host_zshrc, host_verify, host_shell };
 pub const Result = struct { code: u8, output: []const u8 = "" };
+/// Monotonic readiness timing, injectable without real waiting in tests.
+pub const Clock = struct {
+    context: *anyopaque,
+    now_ms: *const fn (*anyopaque) i64,
+    sleep_ms: *const fn (*anyopaque, u32) anyerror!void,
+};
 /// Results are owned by the caller's operation arena. No stderr is surfaced.
 pub const Remote = struct {
     context: *anyopaque,
     execute: *const fn (*anyopaque, Operation, []const u8) anyerror!Result,
+    execute_timed: ?*const fn (*anyopaque, Operation, []const u8, u32) anyerror!Result = null,
+    clock: ?Clock = null,
     pub fn run(self: Remote, op: Operation, command: []const u8) !Result {
         return self.execute(self.context, op, command);
+    }
+    pub fn runTimed(self: Remote, op: Operation, command: []const u8, budget_ms: u32) !Result {
+        if (self.execute_timed) |execute| return execute(self.context, op, command, budget_ms);
+        return self.run(op, command);
     }
 };
 pub fn quote(a: std.mem.Allocator, value: []const u8) ![]const u8 {

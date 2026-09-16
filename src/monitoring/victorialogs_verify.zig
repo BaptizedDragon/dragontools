@@ -1,4 +1,4 @@
-//! Read-only verification of the managed VictoriaLogs service and writable storage.
+//! Read-only deterministic verification followed by bounded startup readiness checks.
 const std = @import("std");
 const remote = @import("../system/remote.zig");
 const install = @import("install.zig");
@@ -6,64 +6,111 @@ const host = @import("../system/host.zig");
 const vl = @import("../components/victorialogs.zig");
 const unit = @import("../components/victorialogs_unit.zig");
 const policy = @import("policy.zig");
+const readiness = @import("readiness.zig");
+
+const managed_state =
+    \\expected=$1; unit=$2; version=$3
+    \\check_property() {
+    \\  actual=$(systemctl show -p "$1" --value dragontools-victorialogs.service)
+    \\  test "$actual" = "$2"
+    \\}
+    \\check_property FragmentPath /etc/systemd/system/dragontools-victorialogs.service
+    \\check_property LoadState loaded
+    \\check_property UnitFileState enabled
+    \\check_property NeedDaemonReload no
+    \\check_property DropInPaths ""
+    \\test ! -L /etc/systemd/system/dragontools-victorialogs.service
+    \\test -f /etc/systemd/system/dragontools-victorialogs.service
+    \\test "$(stat -c '%u:%g:%a' /etc/systemd/system/dragontools-victorialogs.service)" = 0:0:644
+    \\printf '%s' "$unit" | cmp -s - /etc/systemd/system/dragontools-victorialogs.service
+    \\check_property User dt-victorialogs
+    \\check_property Group dt-victorialogs
+    \\check_property ProtectSystem strict
+    \\for property in NoNewPrivileges PrivateTmp PrivateDevices ProtectHome ProtectKernelTunables ProtectKernelModules ProtectControlGroups RestrictSUIDSGID LockPersonality; do
+    \\  check_property "$property" yes
+    \\done
+    \\check_property CapabilityBoundingSet ""
+    \\check_property AmbientCapabilities ""
+    \\check_property ReadWritePaths /var/lib/dragontools/victorialogs
+    \\for dir in /opt/dragontools /opt/dragontools/components /opt/dragontools/components/victorialogs "/opt/dragontools/components/victorialogs/$version" /var/lib/dragontools; do
+    \\  test ! -L "$dir" && test -d "$dir"
+    \\  test "$(stat -c '%u:%g:%a' "$dir")" = 0:0:755
+    \\done
+    \\test ! -L /var/lib/dragontools/victorialogs && test -d /var/lib/dragontools/victorialogs
+    \\test "$(stat -c '%U:%G:%a' /var/lib/dragontools/victorialogs)" = dt-victorialogs:dt-victorialogs:750
+    \\test "$(readlink /opt/dragontools/components/victorialogs/current)" = "$version"
+    \\test ! -L "/opt/dragontools/components/victorialogs/$version/victoria-logs-prod"
+    \\test -f "/opt/dragontools/components/victorialogs/$version/victoria-logs-prod"
+    \\test "$(stat -c '%u:%g:%a' "/opt/dragontools/components/victorialogs/$version/victoria-logs-prod")" = 0:0:755
+    \\printf '%s  %s\n' "$expected" /opt/dragontools/components/victorialogs/current/victoria-logs-prod | sha256sum --check --status
+;
+
+const runtime_guard =
+    \\expected=$1; retention=$2; cleanup=$3
+    \\# A missing listener is temporary; a public or extra listener is never retried.
+    \\listeners=$(ss -H -ltnp 'sport = :9428')
+    \\if test -n "$listeners"; then
+    \\  if printf '%s\n' "$listeners" | grep -Ev '[[:space:]]127[.]0[.]0[.]1:9428[[:space:]]' >/dev/null; then exit 1; fi
+    \\fi
+    \\pid=$(systemctl show -p MainPID --value dragontools-victorialogs.service)
+    \\case "$pid" in ''|*[!0-9]*) exit 1;; 0) exit 75;; esac
+    \\test -d "/proc/$pid" || exit 75
+    \\test "$(stat -c '%U:%G' "/proc/$pid")" = dt-victorialogs:dt-victorialogs
+    \\actual_args=$(tr '\000' '\n' < "/proc/$pid/cmdline")
+    \\expected_args=$(printf '%s\n' /opt/dragontools/components/victorialogs/current/victoria-logs-prod -storageDataPath=/var/lib/dragontools/victorialogs -httpListenAddr=127.0.0.1:9428 "$retention" "$cleanup")
+    \\test "$actual_args" = "$expected_args"
+    \\printf '%s  %s\n' "$expected" "/proc/$pid/exe" | sha256sum --check --status
+    \\all_listeners=$(ss -H -ltnp)
+    \\owned=$(printf '%s\n' "$all_listeners" | grep -F "pid=$pid," || :)
+    \\if test -n "$owned"; then
+    \\  if printf '%s\n' "$owned" | grep -Ev '[[:space:]]127[.]0[.]0[.]1:9428[[:space:]]' >/dev/null; then exit 1; fi
+    \\fi
+    \\if test -n "$listeners"; then
+    \\  printf '%s\n' "$listeners" | grep -F "pid=$pid," >/dev/null || exit 1
+    \\fi
+;
+
+const listener_ready =
+    \\test -n "$listeners" || exit 75
+    \\systemctl is-active --quiet dragontools-victorialogs.service || exit 75
+;
+
+fn runtimeCommand(a: std.mem.Allocator, arch: host.Arch, check: readiness.Check, tail: []const u8) ![]const u8 {
+    return remote.shell(a, &.{
+        "sh",                                                                          "-eu",                           "-c",                                         try std.fmt.allocPrint(a, "{s}\n{s}", .{ runtime_guard, tail }),
+        try std.fmt.allocPrint(a, "dragontools-victorialogs-{s}", .{@tagName(check)}), vl.artifact(arch).binary_sha256, "-retentionPeriod=" ++ policy.logs.retention, try std.fmt.allocPrint(a, "-retention.maxDiskUsagePercent={d}", .{policy.logs.cleanup_usage_percent}),
+    });
+}
 
 pub fn health(a: std.mem.Allocator, r: remote.Remote, report: *install.Report, arch: host.Arch) !void {
-    const command = try remote.shell(a, &.{
-        "sh",                              "-eu",                                        "-c",
-        \\expected=$1; unit=$2; version=$3; retention=$4; cleanup=$5
-        \\check_property() {
-        \\  actual=$(systemctl show -p "$1" --value dragontools-victorialogs.service)
-        \\  test "$actual" = "$2"
-        \\}
-        \\check_property FragmentPath /etc/systemd/system/dragontools-victorialogs.service
-        \\check_property NeedDaemonReload no
-        \\check_property DropInPaths ""
-        \\systemctl is-active --quiet dragontools-victorialogs.service
-        \\enabled=$(systemctl is-enabled dragontools-victorialogs.service)
-        \\test "$enabled" = enabled
-        \\test ! -L /etc/systemd/system/dragontools-victorialogs.service
-        \\test -f /etc/systemd/system/dragontools-victorialogs.service
-        \\test "$(stat -c '%u:%g:%a' /etc/systemd/system/dragontools-victorialogs.service)" = 0:0:644
-        \\printf '%s' "$unit" | cmp -s - /etc/systemd/system/dragontools-victorialogs.service
-        \\check_property User dt-victorialogs
-        \\check_property Group dt-victorialogs
-        \\check_property ProtectSystem strict
-        \\for property in NoNewPrivileges PrivateTmp PrivateDevices ProtectHome ProtectKernelTunables ProtectKernelModules ProtectControlGroups RestrictSUIDSGID LockPersonality; do
-        \\  check_property "$property" yes
-        \\done
-        \\check_property CapabilityBoundingSet ""
-        \\check_property AmbientCapabilities ""
-        \\check_property ReadWritePaths /var/lib/dragontools/victorialogs
-        \\for dir in /opt/dragontools /opt/dragontools/components /opt/dragontools/components/victorialogs "/opt/dragontools/components/victorialogs/$version" /var/lib/dragontools; do
-        \\  test ! -L "$dir" && test -d "$dir"
-        \\  test "$(stat -c '%u:%g:%a' "$dir")" = 0:0:755
-        \\done
-        \\test ! -L /var/lib/dragontools/victorialogs && test -d /var/lib/dragontools/victorialogs
-        \\test "$(stat -c '%U:%G:%a' /var/lib/dragontools/victorialogs)" = dt-victorialogs:dt-victorialogs:750
-        \\pid=$(systemctl show -p MainPID --value dragontools-victorialogs.service)
-        \\test "$pid" -gt 0
-        \\actual_args=$(tr '\000' '\n' < "/proc/$pid/cmdline")
-        \\expected_args=$(printf '%s\n' /opt/dragontools/components/victorialogs/current/victoria-logs-prod -storageDataPath=/var/lib/dragontools/victorialogs -httpListenAddr=127.0.0.1:9428 "$retention" "$cleanup")
-        \\test "$actual_args" = "$expected_args"
-        \\printf '%s  %s\n' "$expected" "/proc/$pid/exe" | sha256sum --check --status
-        \\test "$(readlink /opt/dragontools/components/victorialogs/current)" = "$version"
-        \\test ! -L "/opt/dragontools/components/victorialogs/$version/victoria-logs-prod"
-        \\test -f "/opt/dragontools/components/victorialogs/$version/victoria-logs-prod"
-        \\test "$(stat -c '%u:%g:%a' "/opt/dragontools/components/victorialogs/$version/victoria-logs-prod")" = 0:0:755
-        \\printf '%s  %s\n' "$expected" /opt/dragontools/components/victorialogs/current/victoria-logs-prod | sha256sum --check --status
-        \\i=0
-        \\until curl --noproxy '*' --fail --silent --connect-timeout 3 --max-time 5 http://127.0.0.1:9428/health >/dev/null; do i=$((i+1)); test "$i" -lt 15; sleep 1; done
-        \\listeners=$(ss -H -ltnp 'sport = :9428')
-        \\printf '%s\n' "$listeners" | grep -F "pid=$pid," | grep -Eq '[[:space:]]127[.]0[.]0[.]1:9428[[:space:]]'
-        \\if printf '%s\n' "$listeners" | grep -Ev '[[:space:]]127[.]0[.]0[.]1:9428[[:space:]]' >/dev/null; then exit 1; fi
-        \\# Return only application metrics for strict controller-side validation.
-        \\curl --noproxy '*' --fail --silent --connect-timeout 3 --max-time 5 --max-filesize 1048576 http://127.0.0.1:9428/metrics
-        ,
-        "dragontools-victorialogs-health", vl.artifact(arch).binary_sha256,              try unit.render(a),
-        vl.version,                        "-retentionPeriod=" ++ policy.logs.retention, try std.fmt.allocPrint(a, "-retention.maxDiskUsagePercent={d}", .{policy.logs.cleanup_usage_percent}),
-    });
-    const output = try report.call(r, .health, command);
-    try validateMetrics(output);
+    const managed = try remote.shell(a, &.{ "sh", "-eu", "-c", managed_state, "dragontools-victorialogs-managed_state", vl.artifact(arch).binary_sha256, try unit.render(a), vl.version });
+    _ = try readiness.deterministic(a, r, report, .managed_state, managed);
+    const active = try runtimeCommand(a, arch, .service_active, "systemctl is-active --quiet dragontools-victorialogs.service || exit 75");
+    try readiness.poll(a, r, report, .service_active, readiness.active_ms, active, readiness.ready);
+    const http = try runtimeCommand(a, arch, .http_ready, listener_ready ++ "\n" ++
+        "curl --disable --noproxy '*' --fail --silent --connect-timeout 3 --max-time 5 http://127.0.0.1:9428/health >/dev/null || exit 75");
+    try readiness.poll(a, r, report, .http_ready, readiness.http_ms, http, readiness.ready);
+    const storage = try runtimeCommand(a, arch, .storage_ready, listener_ready ++ "\n" ++
+        "curl --disable --noproxy '*' --fail --silent --connect-timeout 3 --max-time 5 --max-filesize 1048576 http://127.0.0.1:9428/metrics || exit 75");
+    try readiness.poll(a, r, report, .storage_ready, readiness.telemetry_ms, storage, validateReadyMetrics);
+}
+
+fn validateReadyMetrics(_: std.mem.Allocator, output: []const u8) !void {
+    validateMetrics(output) catch |err| switch (err) {
+        error.VictoriaLogsMetricMissing => {
+            // Empty/exposition-only startup output may acquire the storage gauge
+            // later. An HTML/error body is not a readiness signal to retry.
+            var lines = std.mem.splitScalar(u8, output, '\n');
+            while (lines.next()) |raw| {
+                const line = std.mem.trim(u8, raw, " \t\r");
+                if (line.len == 0 or line[0] == '#') continue;
+                const separator = std.mem.lastIndexOfAny(u8, line, " \t") orelse return error.InvalidVictoriaLogsMetrics;
+                _ = std.fmt.parseFloat(f64, line[separator + 1 ..]) catch return error.InvalidVictoriaLogsMetrics;
+            }
+            return error.NotReady;
+        },
+        else => return err,
+    };
 }
 
 // The pinned release writes this one uint64 gauge with the explicit storage path:
@@ -115,27 +162,43 @@ test "VictoriaLogs health rejects malformed, duplicate, and wrong-path samples" 
     }
 }
 
-test "VictoriaLogs verification checks effective systemd policy and managed path metadata without mutation" {
+test "VictoriaLogs readiness retries missing metric but rejects malformed or read-only storage" {
+    try std.testing.expectError(error.NotReady, validateReadyMetrics(std.testing.allocator, "# still starting\n"));
+    try validateReadyMetrics(std.testing.allocator, storage_metric ++ " 0\n");
+    try std.testing.expectError(error.NotReady, validateReadyMetrics(std.testing.allocator, "other_metric 0\n"));
+    try std.testing.expectError(error.InvalidVictoriaLogsMetrics, validateReadyMetrics(std.testing.allocator, "<html>healthy</html>"));
+    try std.testing.expectError(error.InvalidVictoriaLogsMetrics, validateReadyMetrics(std.testing.allocator, metric_name ++ " 0\n"));
+    try std.testing.expectError(error.InvalidVictoriaLogsMetrics, validateReadyMetrics(std.testing.allocator, metric_name ++ "{path=\"/wrong\"} 0\n"));
+    try std.testing.expectError(error.VictoriaLogsReadOnly, validateReadyMetrics(std.testing.allocator, storage_metric ++ " 1\n"));
+}
+
+test "VictoriaLogs verification separates static policy from guarded bounded runtime checks" {
     const Capture = struct {
-        command: []const u8 = "",
+        commands: [4][]const u8 = undefined,
+        count: usize = 0,
 
         fn execute(ctx: *anyopaque, op: remote.Operation, command: []const u8) !remote.Result {
             const self: *@This() = @ptrCast(@alignCast(ctx));
             try std.testing.expectEqual(remote.Operation.health, op);
-            self.command = command;
+            if (self.count >= self.commands.len) return error.UnexpectedRetry;
+            self.commands[self.count] = command;
+            self.count += 1;
             return .{ .code = 0, .output = storage_metric ++ " 0\n" };
         }
     };
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
+    const a = arena.allocator();
     var capture: Capture = .{};
     var report: install.Report = .{ .component = .victorialogs };
-    try health(arena.allocator(), .{ .context = &capture, .execute = Capture.execute }, &report, .arm64);
-    // These assertions inspect the actual rendered command, not a second health
-    // implementation. They cannot establish real systemd enforcement on Ubuntu.
+    try health(a, .{ .context = &capture, .execute = Capture.execute }, &report, .arm64);
+    try std.testing.expectEqual(@as(usize, 4), capture.count);
+    const managed = capture.commands[0];
     for ([_][]const u8{
-        "actual=$(systemctl show -p \"$1\" --value dragontools-victorialogs.service)\n  test \"$actual\" = \"$2\"",
+        "dragontools-victorialogs-managed_state",
         "check_property FragmentPath /etc/systemd/system/dragontools-victorialogs.service",
+        "check_property LoadState loaded",
+        "check_property UnitFileState enabled",
         "check_property NeedDaemonReload no",
         "check_property DropInPaths \"\"",
         "check_property User dt-victorialogs",
@@ -145,22 +208,96 @@ test "VictoriaLogs verification checks effective systemd policy and managed path
         "check_property CapabilityBoundingSet \"\"",
         "check_property AmbientCapabilities \"\"",
         "check_property ReadWritePaths /var/lib/dragontools/victorialogs",
-        "\"/opt/dragontools/components/victorialogs/$version\" /var/lib/dragontools; do\n  test ! -L \"$dir\" && test -d \"$dir\"",
-        "test ! -L /var/lib/dragontools/victorialogs && test -d /var/lib/dragontools/victorialogs",
         ")\" = dt-victorialogs:dt-victorialogs:750",
         "/etc/systemd/system/dragontools-victorialogs.service)\" = 0:0:644",
         "\"/opt/dragontools/components/victorialogs/$version/victoria-logs-prod\")\" = 0:0:755",
-        "test \"$actual_args\" = \"$expected_args\"",
-        "-retentionPeriod=100y",
-        "-retention.maxDiskUsagePercent=75",
-        "--connect-timeout 3 --max-time 5",
-        "--max-filesize 1048576",
-    }) |needle| try std.testing.expect(std.mem.indexOf(u8, capture.command, needle) != null);
-    try std.testing.expect(std.mem.indexOf(u8, capture.command, vl.artifact(.arm64).binary_sha256) != null);
-    for ([_][]const u8{ "systemctl daemon-reload", "systemctl restart", "systemctl start", "touch ", "rm -f ", "chmod ", "chown ", "install -" }) |mutation| {
-        try std.testing.expect(std.mem.indexOf(u8, capture.command, mutation) == null);
+        "readlink /opt/dragontools/components/victorialogs/current",
+    }) |needle| try std.testing.expect(std.mem.indexOf(u8, managed, needle) != null);
+    try std.testing.expect(std.mem.indexOf(u8, managed, vl.artifact(.arm64).binary_sha256) != null);
+    try std.testing.expect(std.mem.indexOf(u8, managed, "is-active") == null);
+    try std.testing.expect(std.mem.indexOf(u8, managed, "curl ") == null);
+    for (capture.commands[1..]) |command| {
+        for ([_][]const u8{ "test \"$actual_args\" = \"$expected_args\"", "all_listeners=$(ss -H -ltnp)", "owned=$(printf", "pid=$pid,", "/proc/$pid/exe", "dt-victorialogs:dt-victorialogs", "-retentionPeriod=100y", "-retention.maxDiskUsagePercent=75" }) |needle|
+            try std.testing.expect(std.mem.indexOf(u8, command, needle) != null);
+    }
+    for (capture.commands, [_][]const u8{ "managed_state", "service_active", "http_ready", "storage_ready" }) |command, check| {
+        try std.testing.expect(std.mem.indexOf(u8, command, try std.fmt.allocPrint(a, "dragontools-victorialogs-{s}", .{check})) != null);
+        for ([_][]const u8{ "systemctl daemon-reload", "systemctl restart", "systemctl start", "touch ", "rm -f ", "chmod ", "chown ", "install -", "sleep ", "until ", "while " }) |mutation|
+            try std.testing.expect(std.mem.indexOf(u8, command, mutation) == null);
+        const script = try std.fmt.allocPrint(a, "sh() {{ command /bin/sh -n \"$@\"; }}\n{s}", .{command});
+        const parsed = try std.process.run(a, std.testing.io, .{ .argv = &.{ "/bin/sh", "-c", script } });
+        try std.testing.expectEqualStrings("", parsed.stderr);
+        try std.testing.expectEqual(@as(u8, 0), parsed.term.exited);
     }
     try std.testing.expectEqual(remote.Operation.health, report.phase);
-    try std.testing.expectEqual(@as(usize, 1), report.completed);
+    try std.testing.expectEqual(@as(usize, 4), report.completed);
     try std.testing.expectEqual(@as(usize, 0), report.changes);
+}
+
+test "VictoriaLogs deterministic failure never reaches readiness polling" {
+    const Failure = struct {
+        calls: usize = 0,
+        fn execute(ctx: *anyopaque, _: remote.Operation, _: []const u8) !remote.Result {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            return .{ .code = 1 };
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var failure: Failure = .{};
+    var report: install.Report = .{ .component = .victorialogs };
+    try std.testing.expectError(error.RemoteOperationFailed, health(arena.allocator(), .{ .context = &failure, .execute = Failure.execute }, &report, .amd64));
+    try std.testing.expectEqual(@as(usize, 1), failure.calls);
+}
+
+test "VictoriaLogs actual runtime guard distinguishes startup absence from invariant failures" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const fixture =
+        \\set -eu
+        \\scenario=$1; shift
+        \\root=$(mktemp -d "${TMPDIR:-/tmp}/dragontools-storage-probe.XXXXXX")
+        \\trap 'rm -rf "$root"' EXIT HUP INT TERM
+        \\mkdir -p "$root/proc/123"
+        \\printf '%s\000' /opt/dragontools/components/victorialogs/current/victoria-logs-prod -storageDataPath=/var/lib/dragontools/victorialogs -httpListenAddr=127.0.0.1:9428 -retentionPeriod=100y -retention.maxDiskUsagePercent=75 > "$root/proc/123/cmdline"
+        \\if test "$scenario" = args; then printf unexpected > "$root/proc/123/cmdline"; fi
+        \\ss() {
+        \\  test "$scenario" != missing_listener || return 0
+        \\  if test "$scenario" = public; then
+        \\    printf '%s\n' 'LISTEN 0 4096 0.0.0.0:9428 0.0.0.0:* users:("fixture",pid=123,fd=3)'
+        \\  else
+        \\    printf '%s\n' 'LISTEN 0 4096 127.0.0.1:9428 0.0.0.0:* users:("fixture",pid=123,fd=3)'
+        \\  fi
+        \\  if test "$#" -eq 2 && test "$scenario" = extra; then
+        \\    printf '%s\n' 'LISTEN 0 4096 0.0.0.0:9999 0.0.0.0:* users:("fixture",pid=123,fd=4)'
+        \\  fi
+        \\}
+        \\systemctl() {
+        \\  if test "$1" = is-active; then test "$scenario" != inactive; return; fi
+        \\  if test "$scenario" = missing_pid; then printf 0; else printf 123; fi
+        \\}
+        \\stat() { if test "$scenario" = owner; then printf root:root; else printf dt-victorialogs:dt-victorialogs; fi; }
+        \\sha256sum() { test "$scenario" != checksum; }
+    ;
+    const guard = try std.mem.replaceOwned(u8, a, runtime_guard, "/proc/", "$root/proc/");
+    const script = try std.fmt.allocPrint(a, "{s}\n{s}\n{s}\nprintf ready", .{ fixture, guard, listener_ready });
+    const Case = struct { scenario: []const u8, code: u8 };
+    for ([_]Case{
+        .{ .scenario = "ready", .code = 0 },
+        .{ .scenario = "missing_pid", .code = 75 },
+        .{ .scenario = "missing_listener", .code = 75 },
+        .{ .scenario = "inactive", .code = 75 },
+        .{ .scenario = "public", .code = 1 },
+        .{ .scenario = "extra", .code = 1 },
+        .{ .scenario = "owner", .code = 1 },
+        .{ .scenario = "args", .code = 1 },
+        .{ .scenario = "checksum", .code = 1 },
+    }) |case| {
+        const result = try std.process.run(a, std.testing.io, .{ .argv = &.{ "/bin/sh", "-c", script, "fixture", case.scenario, "expected-hash", "-retentionPeriod=100y", "-retention.maxDiskUsagePercent=75" } });
+        try std.testing.expectEqual(case.code, result.term.exited);
+        try std.testing.expectEqualStrings("", result.stderr);
+        try std.testing.expectEqualStrings(if (case.code == 0) "ready" else "", result.stdout);
+    }
 }

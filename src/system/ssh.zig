@@ -8,7 +8,15 @@ pub const Ssh = struct {
     options: Options,
     elevation: Elevation = .root,
     pub fn asRemote(self: *Ssh) remote.Remote {
-        return .{ .context = self, .execute = execute };
+        return .{ .context = self, .execute = execute, .execute_timed = executeTimed, .clock = .{ .context = self, .now_ms = nowMs, .sleep_ms = sleepMs } };
+    }
+    fn nowMs(ctx: *anyopaque) i64 {
+        const self: *Ssh = @ptrCast(@alignCast(ctx));
+        return std.Io.Clock.awake.now(self.io).toMilliseconds();
+    }
+    fn sleepMs(ctx: *anyopaque, milliseconds: u32) !void {
+        const self: *Ssh = @ptrCast(@alignCast(ctx));
+        try std.Io.sleep(self.io, .fromMilliseconds(milliseconds), .awake);
     }
     pub fn argv(self: *Ssh, command: []const u8) ![]const []const u8 {
         const a = self.allocator;
@@ -41,8 +49,16 @@ pub const Ssh = struct {
         return args.toOwnedSlice(a);
     }
     fn execute(ctx: *anyopaque, _: remote.Operation, command: []const u8) !remote.Result {
+        return executeWithTimeout(ctx, command, .none);
+    }
+    fn executeTimed(ctx: *anyopaque, _: remote.Operation, command: []const u8, budget_ms: u32) !remote.Result {
         const self: *Ssh = @ptrCast(@alignCast(ctx));
-        const result = try std.process.run(self.allocator, self.io, .{ .argv = try self.argv(command), .stdout_limit = .limited(1024 * 1024), .stderr_limit = .limited(64 * 1024) });
+        const timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(budget_ms), .clock = .awake } };
+        return executeWithTimeout(ctx, command, timeout.toDeadline(self.io));
+    }
+    fn executeWithTimeout(ctx: *anyopaque, command: []const u8, timeout: std.Io.Timeout) !remote.Result {
+        const self: *Ssh = @ptrCast(@alignCast(ctx));
+        const result = try std.process.run(self.allocator, self.io, .{ .argv = try self.argv(command), .stdout_limit = .limited(1024 * 1024), .stderr_limit = .limited(64 * 1024), .timeout = timeout });
         defer {
             std.crypto.secureZero(u8, result.stderr);
             self.allocator.free(result.stderr);

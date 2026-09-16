@@ -72,7 +72,7 @@ fn execute(init: std.process.Init, options: cli.Options) !void {
                     "The failed step may have partially changed the host. Later steps were not attempted. Fix the cause and rerun the same command; pending restart intent is preserved. No rollback was attempted."
                 else
                     "Verification is read-only. Later checks were not attempted. Correct the cause and repeat verification.";
-                print(init.io, try std.fmt.allocPrint(a, "Failed at {s}; {d} steps completed, {d} change steps confirmed. Component: {s}. {s} Check SSH/prerequisites for detection failures, or inspect the managed unit and journal for later failures.\n", .{ @tagName(report.phase), report.completed, report.changes, if (report.component) |component| component.name() else "host", advice }));
+                print(init.io, try std.fmt.allocPrint(a, "Failed at {s}; {d} steps completed, {d} change steps confirmed. Component: {s}. Check: {s}. {s} Check SSH/prerequisites for detection failures, or inspect the managed unit and journal for later failures.\n", .{ @tagName(report.phase), report.completed, report.changes, if (report.component) |component| component.name() else "host", if (report.check) |check| @tagName(check) else @tagName(report.phase), advice }));
                 return err;
             };
             if (options.command == .install and report.changes == 0) print(init.io, "No changes required.\n");

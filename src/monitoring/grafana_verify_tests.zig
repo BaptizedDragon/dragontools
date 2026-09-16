@@ -36,11 +36,11 @@ test "Grafana health requires application identity stored metrics and valid Jaeg
 test "Grafana rendered verification checks actual policy and never mutates remote configuration" {
     const Capture = struct {
         a: std.mem.Allocator,
-        command: []const u8 = "",
+        commands: std.ArrayList([]const u8) = .empty,
         fn execute(ctx: *anyopaque, op: remote.Operation, command: []const u8) !remote.Result {
             const self: *@This() = @ptrCast(@alignCast(ctx));
             try std.testing.expectEqual(remote.Operation.health, op);
-            self.command = try self.a.dupe(u8, command);
+            try self.commands.append(self.a, try self.a.dupe(u8, command));
             return .{ .code = 0, .output = verify.healthy_fixture };
         }
     };
@@ -51,9 +51,12 @@ test "Grafana rendered verification checks actual policy and never mutates remot
     var report: install.Report = .{};
     try verify.health(a, .{ .context = &capture, .execute = Capture.execute }, &report, .arm64);
     var ssh: @import("../system/ssh.zig").Ssh = .{ .allocator = a, .io = std.testing.io, .options = .{ .ssh_host = "monitoring" } };
-    const argv = try ssh.argv(capture.command);
-    // Linux limits one exec argument to 128 KiB; preserve room for transport changes.
-    try std.testing.expect(argv[argv.len - 1].len < 120 * 1024);
+    for (capture.commands.items) |command| {
+        const argv = try ssh.argv(command);
+        // Linux limits one exec argument to 128 KiB.
+        try std.testing.expect(argv[argv.len - 1].len < 120 * 1024);
+    }
+    const combined = try std.mem.join(a, "\n", capture.commands.items);
     for ([_][]const u8{
         "check_property LoadState loaded",                         "check_property UnitFileState enabled",        "check_property DropInPaths \"\"",
         "check_property NeedDaemonReload no",                      "check_property Environment \"\"",             "check_property EnvironmentFiles \"\"",
@@ -65,31 +68,37 @@ test "Grafana rendered verification checks actual policy and never mutates remot
         "http://127.0.0.1:10428/select/jaeger/api/services",       "all_listeners=$(ss -H -ltnp)",                "owned=$(printf",
         "--max-filesize 1048576",                                  "?mode=ro",                                    "PRAGMA query_only=ON",
         grafana.artifact(.arm64).binary_sha256,                    grafana.artifact(.arm64).tree_sha256,
-    }) |needle| try std.testing.expect(std.mem.indexOf(u8, capture.command, needle) != null);
+    }) |needle| try std.testing.expect(std.mem.indexOf(u8, combined, needle) != null);
     // Root tree verification reads the pinned catalog and assets; the datasource
     // probe selects metadata only. Neither touches stored Grafana credentials.
     for ([_][]const u8{ "systemctl daemon-reload", "systemctl restart", "systemctl start", "systemctl enable", "touch ", "rm -f ", "chmod ", "chown ", "admin:admin", "-u admin", "SELECT *", "SELECT password", "SELECT secure_json_data" }) |mutation| {
-        try std.testing.expect(std.mem.indexOf(u8, capture.command, mutation) == null);
+        try std.testing.expect(std.mem.indexOf(u8, combined, mutation) == null);
     }
     try std.testing.expectEqual(@as(usize, 0), report.changes);
-    try std.testing.expectEqual(@as(usize, 1), report.completed);
-    // Parse the actual generated shell body, replacing only command execution.
-    const script = try std.fmt.allocPrint(a, "python3() {{ :; }}\nsh() {{ command /bin/sh -n \"$@\"; }}\n{s}", .{capture.command});
-    const result = try std.process.run(a, std.testing.io, .{ .argv = &.{ "/bin/sh", "-c", script } });
-    try std.testing.expectEqualStrings("", result.stderr);
-    try std.testing.expectEqual(@as(u8, 0), result.term.exited);
-    const inner = try std.process.run(a, std.testing.io, .{ .argv = &.{ "/bin/sh", "-n", "-c", verify.health_script } });
-    try std.testing.expectEqualStrings("", inner.stderr);
-    try std.testing.expectEqual(@as(u8, 0), inner.term.exited);
+    try std.testing.expectEqual(@as(usize, 5), report.completed);
+    try std.testing.expectEqual(@as(usize, 5), capture.commands.items.len);
+    // Parse every actual generated shell body without running its commands.
+    for (capture.commands.items) |command| {
+        const script = try std.fmt.allocPrint(a, "python3() {{ :; }}\nsh() {{ command /bin/sh -n \"$@\"; }}\n{s}", .{command});
+        const result = try std.process.run(a, std.testing.io, .{ .argv = &.{ "/bin/sh", "-c", script } });
+        try std.testing.expectEqualStrings("", result.stderr);
+        try std.testing.expectEqual(@as(u8, 0), result.term.exited);
+    }
+    for ([_][]const u8{ verify.managed_script, verify.active_script, verify.http_script, verify.provisioning_script, verify.backend_script }) |body| {
+        const inner = try std.process.run(a, std.testing.io, .{ .argv = &.{ "/bin/sh", "-n", "-c", body } });
+        try std.testing.expectEqualStrings("", inner.stderr);
+        try std.testing.expectEqual(@as(u8, 0), inner.term.exited);
+        try std.testing.expect(std.mem.indexOf(u8, body, "sleep ") == null);
+    }
 }
 
 test "Grafana environment override rejection reads NUL records without exposing values" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const start = std.mem.indexOf(u8, verify.health_script, "if grep -zq").?;
-    const end = std.mem.indexOfScalarPos(u8, verify.health_script, start, '\n').?;
-    const probe = try std.mem.replaceOwned(u8, a, verify.health_script[start..end], "/proc/$pid/environ", "$1");
+    const start = std.mem.indexOf(u8, verify.runtime_guard, "if grep -zq").?;
+    const end = std.mem.indexOfScalarPos(u8, verify.runtime_guard, start, '\n').?;
+    const probe = try std.mem.replaceOwned(u8, a, verify.runtime_guard[start..end], "/proc/$pid/environ", "$1");
     const harness =
         \\import os, pathlib, subprocess, sys, tempfile
         \\probe = sys.argv[1]
@@ -134,10 +143,10 @@ test "Grafana actual SQLite probe rejects drift and leaves database bytes metada
         \\        content = os.readlink(p) if p.is_symlink() else hashlib.sha256(p.read_bytes()).hexdigest()
         \\        result[p.name] = (s.st_mode, s.st_uid, s.st_gid, s.st_size, s.st_mtime_ns, s.st_ctime_ns, content)
         \\    return result
-        \\def check(root, db, success):
+        \\def check(root, db, expected):
         \\    before = snapshot(root)
         \\    p = subprocess.run([sys.executable, "-I", "-B", "-c", probe, str(db)], capture_output=True)
-        \\    assert (p.returncode == 0) == success, (p.returncode, p.stderr)
+        \\    assert p.returncode == expected, (p.returncode, p.stderr)
         \\    assert p.stdout == b"" and p.stderr == b""
         \\    assert snapshot(root) == before, "Read-only probe changed a file or created a sidecar"
         \\def create(path):
@@ -152,10 +161,14 @@ test "Grafana actual SQLite probe rejects drift and leaves database bytes metada
         \\    os.chmod(path, 0o600)
         \\with tempfile.TemporaryDirectory(prefix="dragontools-grafana-db-") as root:
         \\    path = pathlib.Path(root) / "grafana.db"
-        \\    check(root, path, False)
+        \\    check(root, path, 75)
+        \\    sqlite3.connect(path).close()
+        \\    os.chmod(path, 0o600)
+        \\    check(root, path, 75)
+        \\    path.unlink()
         \\    create(path)
-        \\    check(root, path, True)
-        \\    check(root, path, True)
+        \\    check(root, path, 0)
+        \\    check(root, path, 0)
         \\    for statement in [
         \\        "DELETE FROM data_source WHERE name = 'Traces'",
         \\        "UPDATE data_source SET url = 'http://127.0.0.1:10428' WHERE name = 'Traces'",
@@ -169,27 +182,89 @@ test "Grafana actual SQLite probe rejects drift and leaves database bytes metada
         \\    ]:
         \\        with sqlite3.connect(path) as db:
         \\            db.execute(statement)
-        \\        check(root, path, False)
+        \\        check(root, path, 75 if statement.startswith("DELETE ") else 1)
         \\        path.unlink()
         \\        create(path)
         \\    os.chmod(path, 0o644)
-        \\    check(root, path, False)
+        \\    check(root, path, 1)
         \\    os.chmod(path, 0o600)
         \\    link = pathlib.Path(root) / "linked.db"
         \\    link.symlink_to(path)
-        \\    check(root, link, False)
+        \\    check(root, link, 1)
         \\    link.unlink()
         \\    os.link(path, link)
-        \\    check(root, path, False)
+        \\    check(root, path, 1)
         \\    link.unlink()
         \\    writer = sqlite3.connect(path)
         \\    writer.execute("PRAGMA journal_mode=WAL")
         \\    writer.execute("UPDATE data_source SET name = name")
         \\    writer.commit()
-        \\    check(root, path, False)
+        \\    check(root, path, 1)
         \\    writer.close()
     ;
     const result = try std.process.run(arena.allocator(), std.testing.io, .{ .argv = &.{ "python3", "-I", "-B", "-c", harness, verify.database_check } });
+    try std.testing.expectEqualStrings("", result.stderr);
+    try std.testing.expectEqual(@as(u8, 0), result.term.exited);
+}
+
+test "Grafana stage validators retry database readiness and absent self scrape only" {
+    const a = std.testing.allocator;
+    try verify.validateHttp(a, verify.healthy_fixture);
+    try verify.validateBackend(a, verify.healthy_fixture);
+    const database_starting = try std.mem.replaceOwned(u8, a, verify.healthy_fixture, "\"database\":\"ok\"", "\"database\":\"starting\"");
+    defer a.free(database_starting);
+    try std.testing.expectError(error.NotReady, verify.validateHttp(a, database_starting));
+    const wrong_version = try std.mem.replaceOwned(u8, a, database_starting, grafana.version, "0.0.0");
+    defer a.free(wrong_version);
+    try std.testing.expectError(error.GrafanaIdentityOrDatabaseFailed, verify.validateHttp(a, wrong_version));
+    const empty = try std.mem.replaceOwned(u8, a, verify.healthy_fixture, "[{\"metric\":{\"__name__\":\"vm_app_version\"},\"value\":[1,\"1\"]}]", "[]");
+    defer a.free(empty);
+    try std.testing.expectError(error.NotReady, verify.validateBackend(a, empty));
+    try std.testing.expectError(error.InvalidGrafanaHealthResponse, verify.validateHttp(a, "{}"));
+    try std.testing.expectError(error.InvalidGrafanaHealthResponse, verify.validateBackend(a, "{}"));
+}
+
+test "Grafana actual runtime guard distinguishes missing readiness from deterministic unsafe state" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const guard = try std.mem.replaceOwned(u8, a, verify.runtime_guard, "/proc/$pid", "$DT_ROOT/proc/$pid");
+    const harness =
+        \\import os, pathlib, subprocess, sys, tempfile
+        \\guard = sys.argv[1]
+        \\fixture = '''
+        \\DT_ROOT=$2
+        \\systemctl() {
+        \\  if test "$1" = show; then
+        \\    case "$CASE" in no_pid|no_pid_public) printf 0;; *) printf 777;; esac
+        \\  elif test "$1" = is-active; then test "$CASE" != inactive
+        \\  else return 90; fi
+        \\}
+        \\stat() { if test "$CASE" = user; then printf root:root; else printf dt-grafana:dt-grafana; fi; }
+        \\sha256sum() { cat >/dev/null; test "$CASE" != hash; }
+        \\ss() {
+        \\  case "$CASE" in
+        \\    missing|no_pid) return 0;;
+        \\    public|no_pid_public) printf '%s\\n' 'LISTEN 0 4096 0.0.0.0:3000 0.0.0.0:* users:(("grafana",pid=777,fd=8))';;
+        \\    *) printf '%s\\n' 'LISTEN 0 4096 127.0.0.1:3000 0.0.0.0:* users:(("grafana",pid=777,fd=8))';;
+        \\  esac
+        \\  if test "$CASE" = extra && test "$#" = 3; then
+        \\    printf '%s\\n' 'LISTEN 0 4096 127.0.0.1:8443 0.0.0.0:* users:(("grafana",pid=777,fd=9))'
+        \\  fi
+        \\}
+        \\'''
+        \\with tempfile.TemporaryDirectory(prefix="dragontools-grafana-runtime-") as root:
+        \\    proc = pathlib.Path(root) / "proc" / "777"
+        \\    proc.mkdir(parents=True)
+        \\    argv = b"/opt/dragontools/components/grafana/current/bin/grafana\0server\0--homepath=/opt/dragontools/components/grafana/current\0--config=/etc/dragontools/grafana/grafana.ini\0"
+        \\    for case, expected in [("good", 0), ("missing", 75), ("no_pid", 75), ("inactive", 75), ("public", 1), ("no_pid_public", 1), ("extra", 1), ("args", 1), ("hash", 1), ("env", 1), ("user", 1)]:
+        \\        (proc / "cmdline").write_bytes(argv if case != "args" else argv + b"--unexpected\0")
+        \\        (proc / "environ").write_bytes(b"GF_SERVER_HTTP_ADDR=PRIVATE_SENTINEL\0" if case == "env" else b"PATH=/usr/bin\0")
+        \\        result = subprocess.run(["/bin/sh", "-eu", "-c", fixture + guard + "\ncheck_runtime listener\n", "probe", "hash", root], env=dict(os.environ, CASE=case), capture_output=True)
+        \\        assert result.returncode == expected, (case, result.returncode, result.stderr)
+        \\        assert result.stdout == b"" and result.stderr == b"", case
+    ;
+    const result = try std.process.run(a, std.testing.io, .{ .argv = &.{ "python3", "-I", "-B", "-c", harness, guard } });
     try std.testing.expectEqualStrings("", result.stderr);
     try std.testing.expectEqual(@as(u8, 0), result.term.exited);
 }

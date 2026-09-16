@@ -446,6 +446,27 @@ only. A later HTTPS frontend for `monitoring.baptizeddragon.com` is not installe
 
 ## Safe reruns across all mutating workflows
 
+Verification has two distinct responsibilities. Managed configuration and artifact
+identity are deterministic checks, performed without retries. Incorrect units,
+checksums, links, service users, hardening, process arguments or public listeners
+are failures even if the service is still starting. Runtime readiness is probed
+immediately and retried only for explicitly recognized transient results. Each
+stage has its own deadline: systemd active 15 seconds, HTTP 30 seconds, and
+telemetry/self-observation or Grafana datasource readiness 45 seconds. The first
+retry is after 500 ms, followed by 1-second intervals; successful probes never
+incur a blind startup sleep. VictoriaMetrics' self-scrape check waits for a valid
+`vm_app_version` query result within the telemetry deadline, respecting the
+configured 15-second self-scrape interval. A missing sample during startup is not
+treated as a permanent configuration error.
+
+Timeouts still fail verification, preserve restart intent, and stop later phases.
+Delayed success permits normal finalization; later unchanged installs remain
+no-ops. Semantic names such as `service_active`, `http_ready` and
+`self_scrape_ready` are safe failure diagnostics; arbitrary remote output remains
+suppressed. Injected execution and clock fixtures cover retries, timeouts,
+fail-fast configuration errors and restart-marker finalization. These tests do
+not establish real systemd startup timings or disposable-host integration.
+
 The remote host is the source of observable state; there is no controller-side
 state database. Every run inspects resources and service state rather than
 assuming the previous deployment finished. Correct users, directories, valid

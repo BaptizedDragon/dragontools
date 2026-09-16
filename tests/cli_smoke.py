@@ -374,4 +374,32 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
         assert "REDACTION-SENTINEL" not in result.stdout + result.stderr
         assert not provider_marker.exists(), "Failed SSH invoked a secret/network provider"
         checked += 1
+
+    # Reach a semantic readiness check through fake SSH without executing any
+    # remote command. A deterministic failure is reported once and stays redacted.
+    ssh.write_text('''#!/bin/sh
+for argument do command=$argument; done
+case "$command" in
+  *'/etc/os-release'*) printf 'ubuntu\\n24.04\\nx86_64\\n';;
+  *"stat -f -c"*) printf '1000000 4096';;
+  *'dragontools-victoriametrics-self_scrape_ready'*)
+    printf 'probe\\n' >> "$DRAGONTOOLS_TEST_MARKER"
+    printf 'REDACTION-SENTINEL remote stdout\\n'
+    printf 'REDACTION-SENTINEL remote stderr\\n' >&2
+    exit 1;;
+  *'dragontools-victoriametrics-managed_state'*|*'dragontools-victoriametrics-service_active'*|*'dragontools-victoriametrics-http_ready'*) exit 0;;
+  *) exit 91;;
+esac
+''')
+    for connection in (["--host", "example.com"], ["--ssh-host", "monitoring"]):
+        marker.unlink(missing_ok=True)
+        result = subprocess.run([str(binary), "monitoring", "verify", *connection],
+                                env=env, input="", capture_output=True, text=True, timeout=15)
+        assert result.returncode == 1, (result.stdout, result.stderr)
+        assert "Component: VictoriaMetrics. Check: self_scrape_ready." in result.stdout, result.stdout
+        assert marker.read_text() == "probe\n", "Deterministic failure was retried"
+        assert "REDACTION-SENTINEL" not in result.stdout + result.stderr
+        assert "vm_app_version" not in result.stdout + result.stderr, "Remote command was exposed"
+        assert not provider_marker.exists()
+        checked += 1
 print(f"PASS: {checked} CLI smoke checks")
