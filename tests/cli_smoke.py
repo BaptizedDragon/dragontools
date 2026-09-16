@@ -43,13 +43,17 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
 
     plan_args = ["monitoring", "install", "--host", "example.com", "--plan"]
     host_plan_args = ["host", "install-oh-my-zsh", "--ssh-host", "REDACTION-SENTINEL", "--plan"]
+    host_change_flags = ("--set-default-shell", "--update-managed-zshrc")
     plan_output = ""
+    host_plans = {}
     cases = [
         (["--help"], 0, "VictoriaTraces"),
         ([], 0, "Usage:"),
         (["wizard"], 1, "InteractiveTerminalRequired"),
         (plan_args, 0, "No remote operations performed"),
         (host_plan_args, 0, "Host personalization plan (local; SSH not attempted)."),
+        ([*host_plan_args, *host_change_flags], 0,
+         "Host personalization plan (local; SSH not attempted)."),
         ([*host_plan_args, "--target-user", "REDACTION-SENTINEL"], 0,
          "Host personalization plan (local; SSH not attempted)."),
         (["host", "install-oh-my-zsh", "--host", "example.com", "--user", "root",
@@ -97,10 +101,31 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
         (["monitoring", "install", "--host", "example.com", "--admin-ip", "192.0.2.11", "--plan"], 1, "NotImplemented"),
         (["monitoring", "install", "--host", "example.com", "--domain", "monitor.example.com", "--plan"], 1, "NotImplemented"),
     ]
+    for flag in host_change_flags:
+        cases.extend([
+            ([*host_plan_args, flag], 0, "Host personalization plan (local; SSH not attempted)."),
+            ([*host_plan_args, flag, flag], 1, "DuplicateFlag"),
+            ([*host_plan_args, flag, "true"], 1, "UnknownFlag"),
+            ([*host_plan_args, f"{flag}=true"], 1, "UnknownFlag"),
+            ([*plan_args, flag], 1, "FlagNotAllowed"),
+        ])
     for args, code, expected in cases:
         result = local_run(args, code, expected)
         if args == plan_args:
             plan_output = result.stdout
+        if args[:2] == ["host", "install-oh-my-zsh"] and code == 0 and "--plan" in args:
+            key = tuple(flag in args for flag in host_change_flags)
+            host_plans[key] = result.stdout
+
+    for (set_shell, update_rc), output in host_plans.items():
+        shell_text = ("Login shell: set to discovered zsh only if different and listed in /etc/shells."
+                      if set_shell else "Login shell: unchanged (no --set-default-shell).")
+        rc_text = (".zshrc: update only an exact known DragonTools template; preserve arbitrary or edited files."
+                   if update_rc else ".zshrc: create only if absent; preserve existing files (no --update-managed-zshrc).")
+        assert shell_text in output, (set_shell, output)
+        assert rc_text in output, (update_rc, output)
+    assert set(host_plans) == {(False, False), (True, False), (False, True), (True, True)}
+    checked += 1
 
     # All three real components have install sections; native retention remains
     # distinct from provisional alert rendering and unavailable agent/runtime paths.
@@ -151,9 +176,14 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
     host_help = help_output[("host",)]
     assert "install-oh-my-zsh" in host_help, host_help
     host_install_help = help_output[("host", "install-oh-my-zsh")]
-    for option in ("--ssh-host", "--host", "--target-user", "--plan", "--identity"):
+    for option in ("--ssh-host", "--host", "--target-user", "--plan", "--identity", *host_change_flags):
         assert option in host_install_help, (option, host_install_help)
+    for text in ("preserved by default", "user@hostname directory prompt", "/etc/shells",
+                 "even with a marker"):
+        assert text in host_install_help, (text, host_install_help)
     assert "  --tls" not in host_install_help and "  --service" not in host_install_help
+    for flag in host_change_flags:
+        assert flag not in install_help, (flag, install_help)
     verify_help = help_output[("monitoring", "verify")]
     assert "--host" in verify_help
     assert "  --tls" not in verify_help and "  --plan" not in verify_help, verify_help
@@ -171,7 +201,8 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
         assert not result.stderr, (shell, result.stderr)
         assert local_run(["completion", shell]).stdout == result.stdout, shell
         for text in ("monitoring", "agents", "firewall", "host", "install-oh-my-zsh",
-                     "ssh-host", "target-user", "tls", "manual", "cloudflare"):
+                     "ssh-host", "target-user", "set-default-shell", "update-managed-zshrc",
+                     "tls", "manual", "cloudflare"):
             assert text in result.stdout, (shell, text)
         script = directory / f"dragontool.{shell}"
         script.write_text(result.stdout)
@@ -203,7 +234,11 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
         assert bash_complete(["dragontool", "host", ""]) == {"--help", "install-oh-my-zsh"}
         host_flags = bash_complete(["dragontool", "host", "install-oh-my-zsh", "--"])
         assert {"--host", "--ssh-host", "--target-user", "--plan", "--identity"} <= host_flags
+        assert set(host_change_flags) <= host_flags
         assert "--tls" not in host_flags and "--service" not in host_flags
+        for flag in host_change_flags:
+            # Boolean flags must not consume the following option as a value.
+            assert "--ssh-host" in bash_complete(["dragontool", "host", "install-oh-my-zsh", flag, "--"])
         assert not bash_complete(["dragontool", "host", "install-oh-my-zsh", "--ssh-host", ""])
         assert {"install", "verify", "status", "agents", "firewall"} <= bash_complete(
             ["dragontool", "monitoring", ""])
@@ -211,6 +246,7 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
         install_flags = bash_complete(["dragontool", "monitoring", "install", "--"])
         assert {"--host", "--tls", "--plan", "--identity"} <= install_flags
         assert "--service" not in install_flags and "--station-ip" not in install_flags
+        assert not set(host_change_flags) & install_flags
         verify_flags = bash_complete(["dragontool", "monitoring", "verify", "--"])
         assert "--host" in verify_flags and "--tls" not in verify_flags and "--plan" not in verify_flags
         assert bash_complete(["dragontool", "monitoring", "install", "--tls", ""]) == {"manual", "cloudflare"}
@@ -221,7 +257,7 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
         identity = directory / "identity-file"
         identity.write_text("path-completion fixture, not a private key\n")
         assert str(identity) in bash_complete(["dragontool", "monitoring", "install", "--identity", str(directory / "identity-")])
-        checked += 13
+        checked += 15
     else:
         print("SKIP: Bash completion behavior (shell not installed)")
 
@@ -244,14 +280,17 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
         assert zsh_candidates(["dragontool", "host", ""]) == {"--help", "install-oh-my-zsh"}
         host_flags = zsh_candidates(["dragontool", "host", "install-oh-my-zsh", "--"])
         assert {"--ssh-host", "--target-user", "--plan", "--identity"} <= host_flags
+        assert set(host_change_flags) <= host_flags
         assert "--tls" not in host_flags and "--service" not in host_flags
+        for flag in host_change_flags:
+            assert "--ssh-host" in zsh_candidates(["dragontool", "host", "install-oh-my-zsh", flag, "--"])
         assert zsh_candidates(["dragontool", "host", "install-oh-my-zsh", "--identity", ""]) == {"NATIVE_PATH_COMPLETION"}
         assert {"install", "verify", "status"} <= zsh_candidates(["dragontool", "monitoring", "agents", ""])
         assert zsh_candidates(["dragontool", "monitoring", "install", "--tls", ""]) == {"manual", "cloudflare"}
         verify_flags = zsh_candidates(["dragontool", "monitoring", "verify", "--"])
         assert "--host" in verify_flags and "--tls" not in verify_flags and "--plan" not in verify_flags
         assert zsh_candidates(["dragontool", "monitoring", "install", "--identity", ""]) == {"NATIVE_PATH_COMPLETION"}
-        checked += 8
+        checked += 10
     else:
         print("SKIP: Zsh completion behavior (shell not installed)")
 
@@ -270,7 +309,10 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
         assert fish_complete("dragontool host ") == {"install-oh-my-zsh"}
         host_flags = fish_complete("dragontool host install-oh-my-zsh --")
         assert {"--ssh-host", "--target-user", "--plan", "--identity"} <= host_flags
+        assert set(host_change_flags) <= host_flags
         assert "--tls" not in host_flags and "--service" not in host_flags
+        for flag in host_change_flags:
+            assert "--ssh-host" in fish_complete(f"dragontool host install-oh-my-zsh {flag} --")
         assert not fish_complete("dragontool host install-oh-my-zsh --ssh-host ")
         assert not fish_complete("dragontool host install-oh-my-zsh --target-user ")
         assert {"install", "verify", "status"} <= fish_complete("dragontool monitoring agents ")
@@ -284,7 +326,7 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
         identity.write_text("path-completion fixture, not a private key\n")
         assert str(identity) in fish_complete(f"dragontool monitoring install --identity {directory}/fish-identity-")
         assert "--tls" in fish_complete("dragontool monitoring install --host 'agents' --")
-        checked += 13
+        checked += 15
     else:
         print("SKIP: Fish completion behavior (shell not installed)")
 

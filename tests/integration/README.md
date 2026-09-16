@@ -36,6 +36,39 @@ the rerun. `$HOME` in the inspection assumes the ordinary login environment matc
 the account home; use the actual `getent` home when testing a customized environment
 or `--target-user`.
 
+On a fresh disposable account initially using bash, exercise the explicit options
+with the same alias and target account on every invocation:
+
+```bash
+./zig-out/bin/dragontool host install-oh-my-zsh --ssh-host "$TEST_ALIAS" \
+  --set-default-shell --update-managed-zshrc
+
+# Read-only verification of the actual account and generated prompt:
+ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$TEST_ALIAS" 'set -eu
+record=$(getent passwd "$(id -u)")
+target_home=$(printf "%s\n" "$record" | cut -d: -f6)
+target_shell=$(printf "%s\n" "$record" | cut -d: -f7)
+test "$target_shell" = "$(command -v zsh)"
+grep -Fx -- "$target_shell" /etc/shells
+grep -Fx "# DragonTools managed .zshrc v2" "$target_home/.zshrc"
+grep -F "%n@%m %~ %#" "$target_home/.zshrc"'
+
+./zig-out/bin/dragontool host install-oh-my-zsh --ssh-host "$TEST_ALIAS" \
+  --set-default-shell --update-managed-zshrc
+
+# Reconnect to see the new login shell and prompt; exit afterward.
+ssh -o StrictHostKeyChecking=yes "$TEST_ALIAS"
+```
+
+Expected: the first opt-in run changes bash to the discovered listed zsh shell;
+the second reports `No changes required.` without invoking `chsh`. Verify this
+with account records and suitable test-host audit evidence, not only CLI text.
+New configurations display a user/hostname/directory prompt and retain Oh My Zsh
+and the git plugin. Check the actual remote hostname against the prompt even when
+it differs from the SSH alias: root uses `#`, ordinary users `%`. The configuration
+contains no hardcoded hostname. These are expected results until actually exercised
+on a host.
+
 Also exercise these cases on disposable accounts/hosts only:
 
 - A native alias with a non-root user, non-default port, quoted IdentityAgent path
@@ -44,7 +77,24 @@ Also exercise these cases on disposable accounts/hosts only:
   even when it does not load Oh My Zsh. An existing recognizable Oh My Zsh checkout
   keeps local changes and its branch unchanged.
 - `--target-user` uses an existing account's real home, including a nonstandard
-  home path, and does not change its login shell; a missing user fails.
+  home path, and does not change its login shell without `--set-default-shell`;
+  a missing user fails.
+- A zsh path absent from `/etc/shells` is rejected before a shell change. An already
+  matching shell never calls `chsh`, including after an interrupted prior change.
+- Subsequent SSH commands work with the selected account shell and silent
+  noninteractive startup files. Test a startup-induced verification failure only
+  on a disposable account with independent console access: the shell change may
+  already be committed. After repairing startup, rerunning must inspect the account
+  and skip `chsh` if its shell is already correct.
+- The exact unmarked DragonTools v0 and marked v1 `.zshrc` remain unchanged on
+  ordinary reruns and migrate only with `--update-managed-zshrc`. A current v2
+  rerun does not rewrite the file. Compare bytes, UID, GID and mode before/after
+  both operations, including an allowed non-primary file group. A migration that
+  cannot preserve the original group must refuse publication.
+- Foreign `.zshrc` files and marked templates with local edits remain byte-for-byte
+  unchanged even with `--update-managed-zshrc`. Do not run an editor concurrently
+  with migration. Adoption requires manually backing up and moving the file to an
+  unused path before rerunning; there is no force/adopt flag for foreign content.
 - Existing zsh causes no package reinstall; missing zsh is installed noninteractively.
   Unsupported distributions fail before any apt mutation.
 - Conflicting files/directories or symlinks fail without overwriting user data.

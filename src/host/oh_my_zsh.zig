@@ -1,5 +1,7 @@
 const std = @import("std");
 const remote = @import("../system/remote.zig");
+const managed_rc = @import("zshrc.zig");
+const login_shell = @import("login_shell.zig");
 
 // Official immutable codeload archive, downloaded and SHA-256 calculated during
 // review. Oh My Zsh does not publish a separate checksum/signature for this tree.
@@ -15,7 +17,13 @@ pub const archive_sha256 = "73a7017cd5cde1d76b4044df9f100c6aeae0feb9820e8529f8c9
 pub const archive_url = "https://codeload.github.com/ohmyzsh/ohmyzsh/tar.gz/" ++ revision;
 
 pub const Account = struct { name: []const u8, uid: u32, gid: u32, home: []const u8, shell: []const u8 };
-pub const Phase = enum { inspect, packages, source, zshrc, verify };
+pub const Phase = enum { inspect, packages, source, zshrc, login_shell, verify };
+pub const InstallOptions = struct {
+    target_user: ?[]const u8 = null,
+    set_default_shell: bool = false,
+    update_managed_zshrc: bool = false,
+};
+pub const ZshrcStatus = enum { created, updated, current, preserved, recognized_old, modified_managed };
 pub const Report = struct {
     phase: Phase = .inspect,
     changes: usize = 0,
@@ -23,6 +31,10 @@ pub const Report = struct {
     zsh_changed: bool = false,
     omz_changed: bool = false,
     zshrc_changed: bool = false,
+    zshrc_status: ZshrcStatus = .preserved,
+    shell_requested: bool = false,
+    shell_changed: bool = false,
+    original_shell: []const u8 = "",
     zsh_path: []const u8 = "",
 
     fn call(_: *Report, r: remote.Remote, op: remote.Operation, command: []const u8) ![]const u8 {
@@ -39,13 +51,15 @@ pub const Report = struct {
             67 => return error.NoninteractivePrivilegesRequired,
             68 => return error.OhMyZshChecksumMismatch,
             69 => return error.OhMyZshArchiveConflict,
+            70 => return error.HostConfigurationBusy,
             255 => return error.SshConnectionFailed,
             else => return error.HostOperationFailed,
         }
     }
 };
 
-// These scripts never execute a target's shell initialization or downloaded code.
+// These scripts do not source user initialization or downloaded code. OpenSSH
+// itself invokes the account's login shell to process each remote command.
 const inspect_script =
     \\set -eu
     \\PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; export PATH
@@ -53,7 +67,7 @@ const inspect_script =
     \\test -r /etc/os-release || exit 60
     \\. /etc/os-release
     \\case "${ID-}" in ubuntu|debian) ;; *) exit 60 ;; esac
-    \\for cmd in getent id stat dirname tar sha256sum mktemp mv ln rm chmod awk env mkdir cat; do command -v "$cmd" >/dev/null 2>&1 || exit 61; done
+    \\for cmd in getent id stat dirname tar sha256sum mktemp mv ln rm chmod chgrp awk env mkdir cat cmp flock; do command -v "$cmd" >/dev/null 2>&1 || exit 61; done
     \\target=$1
     \\if test -z "$target"; then target=$(id -un); fi
     \\entry=$(getent passwd "$target") || exit 62
@@ -196,34 +210,11 @@ pub const source_script = home_preflight ++ "\n" ++
     \\fi
 ;
 
-pub const zshrc_content =
-    \\export ZSH="$HOME/.oh-my-zsh"
-    \\
-    \\ZSH_THEME="robbyrussell"
-    \\
-    \\plugins=(git)
-    \\
-    \\source "$ZSH/oh-my-zsh.sh"
-    \\
-;
+pub const zshrc_content = managed_rc.content;
 
-pub const zshrc_script = home_preflight ++ "\n" ++
-    \\if test -f "$rc"; then printf unchanged; exit 0; fi
-    \\umask 077
-    \\tmp=$(mktemp -d "$home/.zshrc.dragontool.XXXXXXXXXX")
-    \\trap 'rm -rf -- "$tmp"' EXIT
-    \\trap 'exit 1' HUP INT TERM
-    \\cat > "$tmp/zshrc" <<'DRAGONTOOLS_ZSHRC'
-++ "\n" ++ zshrc_content ++
-    \\DRAGONTOOLS_ZSHRC
-    \\chmod 0644 "$tmp/zshrc"
-    \\if ln -T -- "$tmp/zshrc" "$rc" 2>/dev/null; then
-    \\  printf changed
-    \\else
-    \\  test ! -L "$rc" && test -f "$rc" || exit 65
-    \\  printf unchanged
-    \\fi
-;
+pub fn zshrcScript(a: std.mem.Allocator, update: bool) ![]const u8 {
+    return managed_rc.script(a, home_preflight, update);
+}
 
 pub const verify_script = home_preflight ++ "\n" ++
     \\test -d "$omz" && test -f "$rc"
@@ -232,11 +223,13 @@ pub const verify_script = home_preflight ++ "\n" ++
     \\printf '%s\n' "$zsh_path"
 ;
 
-pub fn install(a: std.mem.Allocator, r: remote.Remote, target_user: ?[]const u8, report: *Report) !void {
+pub fn install(a: std.mem.Allocator, r: remote.Remote, options: InstallOptions, report: *Report) !void {
     report.phase = .inspect;
-    const account = try parseAccount(try report.call(r, .host_inspect, try inspectCommand(a, target_user)));
-    if (target_user) |requested| if (!std.mem.eql(u8, requested, account.name)) return error.InvalidHostAccount;
+    report.shell_requested = options.set_default_shell;
+    const account = try parseAccount(try report.call(r, .host_inspect, try inspectCommand(a, options.target_user)));
+    if (options.target_user) |requested| if (!std.mem.eql(u8, requested, account.name)) return error.InvalidHostAccount;
     report.target = account;
+    report.original_shell = account.shell;
     const present = try report.call(r, .host_inspect, try targetCommand(a, account, preflight_script));
     if (!std.mem.eql(u8, present, "present") and !std.mem.eql(u8, present, "absent")) return error.InvalidHostResponse;
     report.phase = .packages;
@@ -251,12 +244,27 @@ pub fn install(a: std.mem.Allocator, r: remote.Remote, target_user: ?[]const u8,
     report.omz_changed = try changed(try report.call(r, .host_source, try targetCommand(a, account, source_script)));
     if (report.omz_changed) report.changes += 1;
     report.phase = .zshrc;
-    report.zshrc_changed = try changed(try report.call(r, .host_zshrc, try targetCommand(a, account, zshrc_script)));
+    report.zshrc_status = try parseZshrcStatus(try report.call(r, .host_zshrc, try targetCommand(a, account, try zshrcScript(a, options.update_managed_zshrc))));
+    report.zshrc_changed = report.zshrc_status == .created or report.zshrc_status == .updated;
     if (report.zshrc_changed) report.changes += 1;
     report.phase = .verify;
     const zsh_path = std.mem.trimEnd(u8, try report.call(r, .host_verify, try targetCommand(a, account, verify_script)), "\n");
     if (!validPath(zsh_path)) return error.InvalidHostResponse;
     report.zsh_path = zsh_path;
+    if (options.set_default_shell) {
+        report.phase = .login_shell;
+        report.shell_changed = try login_shell.change(a, r, account, zsh_path);
+        if (report.shell_changed) report.changes += 1;
+        report.phase = .verify;
+        try login_shell.verify(a, r, account, zsh_path);
+        report.target.?.shell = zsh_path;
+    }
+}
+
+fn parseZshrcStatus(value: []const u8) !ZshrcStatus {
+    if (std.mem.eql(u8, value, "recognized-old")) return .recognized_old;
+    if (std.mem.eql(u8, value, "modified-managed")) return .modified_managed;
+    return std.meta.stringToEnum(ZshrcStatus, value) orelse error.InvalidHostResponse;
 }
 
 fn changed(value: []const u8) !bool {
@@ -268,6 +276,8 @@ fn changed(value: []const u8) !bool {
 test {
     _ = @import("tests.zig");
     _ = @import("package_tests.zig");
+    _ = @import("zshrc.zig");
+    _ = @import("login_shell.zig");
 }
 
 test "account inspection and target privilege wrappers are valid POSIX shell" {

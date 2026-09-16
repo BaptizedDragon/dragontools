@@ -113,8 +113,14 @@ pub fn render(a: std.mem.Allocator, node: spec.Node) ![]const u8 {
             \\Installs zsh and pinned Oh My Zsh only when missing on Ubuntu/Debian.
             \\The default target is the actual SSH login user; --target-user selects an
             \\existing account. Its home comes from host account information.
-            \\Existing Oh My Zsh and .zshrc are preserved. A minimal .zshrc is created
-            \\only if absent. The login shell is reported and never changed automatically.
+            \\Existing Oh My Zsh and .zshrc are preserved by default. An absent .zshrc
+            \\gets a DragonTools marker, user@hostname directory prompt, Oh My Zsh and git.
+            \\The prompt uses the remote machine's actual short hostname.
+            \\--update-managed-zshrc migrates exact prior DragonTools templates only;
+            \\arbitrary or locally edited files remain untouched, even with a marker.
+            \\--set-default-shell changes the login shell only if it differs from the
+            \\discovered zsh path listed in /etc/shells. Otherwise no chsh is invoked.
+            \\Reconnect after a login-shell change to start the new shell.
             \\Reruns inspect actual state; an unchanged installation requires no changes.
             \\--plan is local and performs no SSH. This utility does not modify monitoring.
             \\
@@ -182,7 +188,7 @@ test "host help describes alias resolution and preservation without monitoring o
     try std.testing.expect(std.mem.indexOf(u8, container, "  install-oh-my-zsh\n") != null);
     const command = try render(a, .install_oh_my_zsh);
     defer a.free(command);
-    for ([_][]const u8{ "dragontool host install-oh-my-zsh (--ssh-host ALIAS | --host HOST)", "--target-user", "actual SSH login user", "IdentityAgent", "ProxyJump", "Existing Oh My Zsh and .zshrc are preserved", "--plan is local" }) |expected| {
+    for ([_][]const u8{ "dragontool host install-oh-my-zsh (--ssh-host ALIAS | --host HOST)", "--target-user", "actual SSH login user", "IdentityAgent", "ProxyJump", "Existing Oh My Zsh and .zshrc are preserved by default", "--set-default-shell", "--update-managed-zshrc", "user@hostname directory prompt", "/etc/shells", "even with a marker", "--plan is local" }) |expected| {
         try std.testing.expect(std.mem.indexOf(u8, command, expected) != null);
     }
     for ([_][]const u8{ "  --tls", "  --service", "  --ssh-op-path", "VictoriaMetrics" }) |excluded| {

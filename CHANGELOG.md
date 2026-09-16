@@ -2,12 +2,24 @@
 
 ## 0.1.0-dev — unreleased
 
+- Advance the generated `.zshrc` to v2 with a dynamic remote hostname, username and
+  directory, plus Zsh's root `#` / ordinary-user `%` prompt ending. Keep exact v0
+  and v1 migrations behind `--update-managed-zshrc` to honor default preservation;
+  preserve original user/group/mode or refuse migration. Report old and new login
+  shell paths and the need to reconnect after an explicit shell change.
+- Add host-only `--set-default-shell`: validate discovered zsh against `/etc/shells`,
+  change and verify only a differing login shell, and avoid `chsh` on unchanged reruns.
+- Generate marked `.zshrc` files with an explicit user/hostname/directory prompt,
+  Oh My Zsh and the git plugin. `--update-managed-zshrc` migrates only an exact
+  known DragonTools template, including the previous unmarked v0 template; foreign
+  files and local edits remain byte-for-byte preserved. Both options are explicit;
+  ordinary reruns retain existing configuration and the login shell.
 - Add the separate `host install-oh-my-zsh` convenience command with native OpenSSH
   alias support, explicit direct-SSH fallback, existing target-account lookup,
   contextual help/completion and a local plan. Strict host-key checks remain enabled.
 - Install only missing zsh and pinned Oh My Zsh source; preserve existing Oh My Zsh
-  directories and regular `.zshrc` files. Create a minimal `.zshrc` only if absent,
-  leave the login shell unchanged, and make unchanged reruns mutation-free.
+  directories and regular `.zshrc` files by default. Create a minimal `.zshrc` if
+  absent, leave the login shell unchanged by default, and make unchanged reruns mutation-free.
   Private staging, checked source archives and path-conflict refusal support safe
   retries without broad package or dotfile management. Monitoring is unchanged.
 - Add host parser, fake-remote, failure/recovery and CLI smoke coverage, plus an

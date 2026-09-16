@@ -100,8 +100,8 @@ fn personalizeHost(init: std.process.Init, options: cli.Options) !void {
     var ssh: @import("system/ssh.zig").Ssh = .{ .allocator = a, .io = init.io, .options = options, .elevation = .login_user };
     var report: host.Report = .{};
     print(init.io, "Host personalization\n\n");
-    host.install(a, ssh.asRemote(), options.target_user, &report) catch |err| {
-        print(init.io, try std.fmt.allocPrint(a, "Failed at {s}. Completed changes may remain; correct the cause and rerun the same command. Existing user configuration is preserved.\n", .{@tagName(report.phase)}));
+    host.install(a, ssh.asRemote(), .{ .target_user = options.target_user, .set_default_shell = options.set_default_shell, .update_managed_zshrc = options.update_managed_zshrc }, &report) catch |err| {
+        print(init.io, try std.fmt.allocPrint(a, "Failed at {s}. Completed changes may remain; correct the cause and rerun the same command. Unrecognized user configuration is preserved.\n", .{@tagName(report.phase)}));
         return err;
     };
     print(init.io, try output.result(a, report));

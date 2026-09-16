@@ -40,6 +40,11 @@ jump hosts, while enforcing strict host-key checks. The direct `--host` mode kee
 the existing explicit connection behavior. Host inspection resolves the actual
 login account or requested existing target account before any package or home
 mutation. It does not create users or invoke monitoring installation.
+An absent `.zshrc` receives a marked server prompt with user, hostname and directory.
+Existing files remain unchanged unless `--update-managed-zshrc` selects an exact
+known DragonTools template; a marker alone does not authorize an update. The separate
+`--set-default-shell` option validates the discovered zsh path in `/etc/shells`,
+changes only a differing login shell and verifies the account record afterward.
 
 ## Current architecture
 
@@ -73,8 +78,10 @@ LOCAL MACHINE                           REMOTE HOST
 DragonTools host install-oh-my-zsh
     -- strict OpenSSH alias/direct ---> actual account home
                                           +-- .oh-my-zsh (install if absent)
-                                          +-- .zshrc (create if absent)
+                                          +-- .zshrc (create if absent;
+                                          |   exact managed migration opt-in)
                                        zsh package (install if absent)
+                                       login shell (explicit opt-in only)
 
 MONITORING STACK: unchanged by this command
 ```
@@ -358,7 +365,9 @@ VictoriaTraces-only unit repair, and recovery from a persisted restart marker. I
 ordinary test target.
 
 Host utility tests separately cover account selection, missing/present packages,
-source and `.zshrc` preservation, path conflicts and interrupted runs. The CLI smoke
+source and `.zshrc` preservation, exact managed-template migration, the server
+prompt, explicit shell changes and unchanged-shell no-ops, path conflicts and
+interrupted runs. The CLI smoke
 harness exercises alias/direct dispatch through fake SSH and ensures local plans,
 help and rejected arguments never connect. See the host section of the same
 integration checklist for real SSH/apt, account, byte-preservation and rerun checks;

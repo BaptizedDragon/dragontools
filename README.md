@@ -80,9 +80,14 @@ backslash, or OpenSSH `%` expansions.
 
 This small convenience command ensures zsh and `~/.oh-my-zsh` exist on an
 Ubuntu/Debian host. Existing Oh My Zsh installations are not updated, and an
-existing `.zshrc` is preserved byte-for-byte even when it does not load Oh My Zsh.
-If `.zshrc` is absent, DragonTools creates a minimal configuration using the
-upstream `robbyrussell` theme and `git` plugin. The login shell is never changed.
+existing `.zshrc` is preserved byte-for-byte by default, even when it does not load
+Oh My Zsh. If `.zshrc` is absent, DragonTools creates a marked configuration with
+Oh My Zsh, the `git` plugin and a server prompt showing user, hostname and current
+directory, such as `root@monitoring ~ #` or `vasyl@monitoring ~ %`. The hostname is
+the remote machine's actual short hostname, resolved by Zsh when displaying the
+prompt; it is not copied from the local SSH alias or hardcoded in `.zshrc`.
+DragonTools does not change the hostname. It sets the prompt directly instead of
+depending on an upstream theme. The login shell is unchanged unless explicitly requested.
 
 Configure a replaceable example alias in your own `~/.ssh/config`:
 
@@ -98,14 +103,27 @@ Verify and enroll the host's SSH key through a trusted channel first. Then run:
 
 ```bash
 zig build -Doptimize=ReleaseSafe
-./zig-out/bin/dragontool host install-oh-my-zsh --ssh-host monitoring --plan
 ./zig-out/bin/dragontool host install-oh-my-zsh \
-  --ssh-host monitoring
+  --ssh-host monitoring --set-default-shell --plan
+./zig-out/bin/dragontool host install-oh-my-zsh \
+  --ssh-host monitoring \
+  --set-default-shell
 
 # Deliberate rerun: unchanged state requires no mutation.
 ./zig-out/bin/dragontool host install-oh-my-zsh \
-  --ssh-host monitoring
+  --ssh-host monitoring \
+  --set-default-shell
 ```
+
+Reconnect after changing the login shell to start the new shell:
+
+```bash
+ssh monitoring
+```
+
+With a new or explicitly migrated generated configuration and remote hostname
+`monitoring`, the root prompt should look like `root@monitoring ~ #`.
+An existing arbitrary configuration remains unchanged, so its prompt may differ.
 
 `--ssh-host` delegates `HostName`, `User`, `Port`, `IdentityAgent`, `IdentityFile`,
 `ProxyJump`, and other SSH configuration to OpenSSH. DragonTools does not parse
@@ -132,11 +150,57 @@ connection overrides; put its user, port, and authentication settings in SSH
 configuration instead. `--target-user` selects the installation account and is
 independent of the connection mode.
 
+Two boolean options opt into additional changes for the selected account:
+
+```bash
+# Set the login shell and migrate an unchanged older DragonTools .zshrc, if present.
+./zig-out/bin/dragontool host install-oh-my-zsh \
+  --ssh-host monitoring --set-default-shell --update-managed-zshrc
+
+# Deliberate unchanged rerun with the same requested state:
+./zig-out/bin/dragontool host install-oh-my-zsh \
+  --ssh-host monitoring --set-default-shell --update-managed-zshrc
+```
+
+`--set-default-shell` uses the discovered zsh executable path only after checking
+that it is listed in `/etc/shells`. It changes the account's login shell only when
+different and verifies the new account record. It never calls `chsh` for an already
+matching shell. An unlisted zsh path fails; DragonTools never edits `/etc/shells`.
+Changing the login shell may require root or noninteractive sudo;
+it leaves the running shell intact and affects subsequent SSH commands and logins.
+Keep noninteractive startup files silent: OpenSSH invokes the account shell for
+remote commands, so subsequent zsh connections may read `.zshenv` (normally not
+`.zshrc`). The shell change can succeed even if a later verification connection
+fails; restore a working SSH startup environment and rerun to inspect actual state.
+
+`--update-managed-zshrc` updates only an exact known DragonTools template. It remains
+explicit because the existing host command promises to preserve existing `.zshrc`
+on an ordinary rerun; installing missing tools does not silently replace a startup
+file. The unmarked v0 template (including its `robbyrussell` line) and the marked
+v1 template (including its literal `%%` prompt ending) are recognized by their
+complete bytes and migrate only with this flag. Migration preserves the file's
+user, group and mode, or refuses the update if it cannot preserve them.
+The current template starts with `# DragonTools managed .zshrc v2`, sets
+`ZSH_THEME=""`, and sets `PROMPT='%n@%m %~ %# '` after loading Oh My Zsh. The final
+`%#` expands to `#` for root and `%` for an ordinary user. A marker alone is insufficient:
+local edits, extra lines, and arbitrary configurations are preserved. An already
+current template requires no rewrite. Do not edit `.zshrc` concurrently with an
+explicit managed update.
+
+For an arbitrary existing `.zshrc`, DragonTools reports preservation even with the
+update flag. To adopt a fresh generated file, first back up and manually move your
+existing file to a unique, unused name in that account's home; then rerun the host
+command. Keep the backup until you have reviewed and transferred any desired
+settings. DragonTools provides no option to claim or overwrite a foreign file.
+
 The first run installs only missing pieces. An unchanged rerun reports
 `No changes required.` without reinstalling zsh, downloading Oh My Zsh, rewriting
-`.zshrc`, or repairing ownership of an existing installation. The result also
-reports the current login shell; changing it remains an explicit manual action.
-An existing `.zshrc` may still need manual configuration to load Oh My Zsh.
+`.zshrc`, changing an already correct login shell, or repairing ownership of an
+existing installation. The result reports whether the configuration was created,
+updated or preserved. A shell change reports the old and new paths and asks you to
+reconnect; an unchanged requested shell is reported as already correct. Without the opt-in
+flags, an existing `.zshrc` may still need manual configuration and the login shell
+stays unchanged.
 
 This command adds no service, listener, monitoring agent, package-management
 framework, or dotfile manager. See [the host utility design](design.md#host-utility-install-oh-my-zsh)
@@ -293,7 +357,7 @@ Grafana will become the normal human-facing UI in a later milestone.
 | --- | --- |
 | `wizard` / no arguments in a TTY | Local interactive frontend to the same commands |
 | `completion bash/zsh/fish` | Print local shell completion scripts |
-| `host install-oh-my-zsh` | Install missing shell tooling for an existing Ubuntu/Debian user; preserve existing setup |
+| `host install-oh-my-zsh` | Install missing shell tooling; explicit options for exact managed-config migration and login-shell changes |
 | `monitoring install` | VictoriaMetrics, VictoriaLogs, and VictoriaTraces installation |
 | `monitoring verify` | All three checked; nonzero if any fails; read-only |
 | `monitoring status` | All three service states, not an end-to-end health check |

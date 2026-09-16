@@ -1,8 +1,9 @@
 # Working on DragonTools
 
 Use Zig 0.16.0 and the standard library where practical. Keep monitoring workflows under
-`dragontool monitoring`; the separate `host install-oh-my-zsh` utility only installs
-missing shell tooling for an existing account. `wizard` and `completion` are local UX entry points.
+`dragontool monitoring`; the separate `host install-oh-my-zsh` utility installs
+missing shell tooling for an existing account, with explicit options for its managed
+configuration and login shell. `wizard` and `completion` are local UX entry points.
 No generic resource DSL, shell hooks or provider framework.
 Read README.md, architecture.md and design.md before changing workflow behavior.
 
@@ -37,8 +38,13 @@ and never modify shell startup files when installing completion.
 Keep the host utility separate from monitoring. Let OpenSSH resolve `--ssh-host`
 through native SSH configuration while preserving strict host-key checks. Inspect
 the SSH login account and actual target home; never guess a home or create a user.
-Install only missing zsh/Oh My Zsh, preserve existing Oh My Zsh and `.zshrc`, and
-never change the login shell. Create a minimal `.zshrc` only when absent. Pin new
+Install only missing zsh/Oh My Zsh and preserve existing Oh My Zsh. Preserve existing
+`.zshrc` by default; `--update-managed-zshrc` may migrate only an exact known
+DragonTools template. A marker alone never authorizes replacing local edits or
+arbitrary files. New managed `.zshrc` must show user, hostname and directory with
+Oh My Zsh and the git plugin enabled. Change a login shell only when explicitly
+requested with `--set-default-shell`, after validating the discovered zsh path in
+`/etc/shells`; never call chsh if already correct. Pin new
 Oh My Zsh source, use private staging and safe publication, and refuse conflicting
 paths. Do not add generic package/dotfile management or arbitrary shell hooks.
 

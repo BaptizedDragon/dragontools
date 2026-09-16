@@ -12,6 +12,8 @@ pub const Options = struct {
     host: []const u8 = "",
     ssh_host: ?[]const u8 = null,
     target_user: ?[]const u8 = null,
+    set_default_shell: bool = false,
+    update_managed_zshrc: bool = false,
     user: []const u8 = "root",
     port: u16 = 22,
     ssh_sock: ?[]const u8 = null,
@@ -134,7 +136,7 @@ pub fn parse(a: std.mem.Allocator, args: []const []const u8) !Options {
             try seen.put(key, {});
         }
         if (item.kind == .boolean) {
-            if (eq(key, "--help")) o.help = true else if (eq(key, "--plan")) o.plan = true;
+            if (eq(key, "--help")) o.help = true else if (eq(key, "--plan")) o.plan = true else if (eq(key, "--set-default-shell")) o.set_default_shell = true else if (eq(key, "--update-managed-zshrc")) o.update_managed_zshrc = true;
             continue;
         }
         if (i + 1 >= args.len or std.mem.startsWith(u8, args[i + 1], "--")) return error.MissingValue;
@@ -212,6 +214,8 @@ test "host utility accepts an SSH alias without overriding the target account" {
     try std.testing.expectEqualStrings("monitoring", alias.ssh_host.?);
     try std.testing.expect(alias.host.len == 0);
     try std.testing.expect(alias.target_user == null);
+    try std.testing.expect(!alias.set_default_shell);
+    try std.testing.expect(!alias.update_managed_zshrc);
     try std.testing.expect(alias.ssh_sock == null);
     try std.testing.expect(alias.plan);
     try std.testing.expect(!alias.unsupported());
@@ -222,6 +226,22 @@ test "host utility accepts an SSH alias without overriding the target account" {
     try std.testing.expectEqualStrings("ops", direct.user);
     try std.testing.expectEqualStrings("vasyl", direct.target_user.?);
     try std.testing.expectEqualStrings("/tmp/agent.sock", direct.ssh_sock.?);
+}
+
+test "host personalization changes are explicit host-only boolean options" {
+    const a = std.testing.allocator;
+    var options = try parse(a, &.{ "host", "install-oh-my-zsh", "--set-default-shell", "--ssh-host", "monitoring", "--update-managed-zshrc", "--target-user", "ops", "--plan" });
+    defer options.deinit(a);
+    try std.testing.expect(options.set_default_shell);
+    try std.testing.expect(options.update_managed_zshrc);
+    try std.testing.expect(options.plan);
+    try std.testing.expectEqualStrings("ops", options.target_user.?);
+    for ([_][]const u8{ "--set-default-shell", "--update-managed-zshrc" }) |flag| {
+        try std.testing.expectError(error.DuplicateFlag, parse(a, &.{ "host", "install-oh-my-zsh", "--ssh-host", "monitoring", flag, flag }));
+        try std.testing.expectError(error.UnknownFlag, parse(a, &.{ "host", "install-oh-my-zsh", "--ssh-host", "monitoring", flag, "true" }));
+        try std.testing.expectError(error.FlagNotAllowed, parse(a, &.{ "monitoring", "install", "--host", "monitoring", flag }));
+        try std.testing.expectError(error.UnexpectedValue, validateValue(flag, "true"));
+    }
 }
 
 test "host utility rejects conflicting connection forms and unsafe arguments" {

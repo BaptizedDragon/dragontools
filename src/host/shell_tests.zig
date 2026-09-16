@@ -19,6 +19,7 @@ const substitutes =
     \\  else command stat -c "$format" -- "$1"; fi
     \\}
     \\mktemp() { printf 'temporary\n' >> "$DT_ROOT/writes"; command mktemp "$@"; }
+    \\flock() { test "$1" = -n && test "$2" = 9; }
     \\chown() { exit 90; }
     \\chmod() { printf 'chmod\n' >> "$DT_ROOT/writes"; command chmod "$@"; }
     \\curl() {
@@ -74,7 +75,7 @@ test "home scripts execute no-op preservation exclusive publication and interrup
         \\
     ;
     const source = try std.fmt.allocPrint(a, "printf '%s' {s} > \"$DT_ROOT/source\"\n", .{try remote.quote(a, substitutes ++ host.source_script)});
-    const zshrc = try std.fmt.allocPrint(a, "printf '%s' {s} > \"$DT_ROOT/zshrc\"\n", .{try remote.quote(a, substitutes ++ host.zshrc_script)});
+    const zshrc = try std.fmt.allocPrint(a, "printf '%s' {s} > \"$DT_ROOT/zshrc\"\n", .{try remote.quote(a, try std.mem.concat(a, u8, &.{ substitutes, try host.zshrcScript(a, false) }))});
     const preflight = try std.fmt.allocPrint(a, "printf '%s' {s} > \"$DT_ROOT/preflight\"\n", .{try remote.quote(a, substitutes ++ host.home_preflight)});
     const rc_content = try std.fmt.allocPrint(a, "printf '%s' {s} > \"$DT_ROOT/expected-rc\"\n", .{try remote.quote(a, host.zshrc_content)});
     const cases =
@@ -85,12 +86,12 @@ test "home scripts execute no-op preservation exclusive publication and interrup
         \\assert_no_staging() { for entry in "$home"/.oh-my-zsh.dragontool.* "$home"/.zshrc.dragontool.*; do case "$entry" in */.oh-my-zsh.dragontool.leftover) continue ;; esac; test ! -e "$entry"; done; }
         \\new_home first
         \\test "$(source_step)" = changed
-        \\test "$(rc_step)" = changed
+        \\test "$(rc_step)" = created
         \\cmp "$home/.zshrc" "$DT_ROOT/expected-rc"
         \\assert_no_staging
         \\cp "$DT_ROOT/writes" "$DT_ROOT/before"
         \\test "$(source_step)" = unchanged
-        \\test "$(rc_step)" = unchanged
+        \\test "$(rc_step)" = current
         \\cmp "$DT_ROOT/writes" "$DT_ROOT/before"
         \\# Existing custom contents and restrictive permissions remain intact.
         \\printf '\000custom shell content\377\n' > "$home/.zshrc"
@@ -98,7 +99,7 @@ test "home scripts execute no-op preservation exclusive publication and interrup
         \\cp "$home/.zshrc" "$DT_ROOT/custom-rc"
         \\printf 'local edits\n' > "$home/.oh-my-zsh/oh-my-zsh.sh"
         \\test "$(source_step)" = unchanged
-        \\test "$(rc_step)" = unchanged
+        \\test "$(rc_step)" = preserved
         \\cmp "$home/.zshrc" "$DT_ROOT/custom-rc"
         \\test "$(cat "$home/.oh-my-zsh/oh-my-zsh.sh")" = 'local edits'
         \\cmp "$DT_ROOT/writes" "$DT_ROOT/before"
@@ -139,7 +140,7 @@ test "home scripts execute no-op preservation exclusive publication and interrup
         \\new_home rc-race
         \\test "$(source_step)" = changed
         \\DT_FAIL=rc-race; export DT_FAIL
-        \\test "$(rc_step)" = unchanged
+        \\test "$(rc_step)" = preserved
         \\test "$(cat "$home/.zshrc")" = 'concurrent config'
         \\assert_no_staging
         \\# An interrupted response after .zshrc publication is a no-op on retry.
@@ -149,7 +150,7 @@ test "home scripts execute no-op preservation exclusive publication and interrup
         \\if rc_step >/dev/null 2>&1; then exit 95; fi
         \\unset DT_FAIL
         \\cp "$DT_ROOT/writes" "$DT_ROOT/before"
-        \\test "$(rc_step)" = unchanged
+        \\test "$(rc_step)" = current
         \\cmp "$home/.zshrc" "$DT_ROOT/expected-rc"
         \\cmp "$DT_ROOT/writes" "$DT_ROOT/before"
         \\# Refuse unsafe/conflicting path types without changing their targets.

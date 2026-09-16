@@ -64,7 +64,8 @@ leave the remote component and integration-validation boundary unchanged.
 
 `host install-oh-my-zsh` is an independent convenience command for an existing
 Ubuntu/Debian account. It does not enter `monitoring install`, manage services,
-change a login shell, create users, or introduce a general package/dotfile system.
+create users, or introduce a general package/dotfile system. Login-shell changes
+and migration of an existing generated `.zshrc` require separate explicit options.
 The shared CLI metadata provides parsing, help and completion; the command has a
 small local plan, not a generic host-planning framework.
 
@@ -114,13 +115,71 @@ The installed source has no `.git` checkout and is not updated by this command.
 
 Recognizable existing Oh My Zsh directories are left untouched, including local
 changes and branch state. Existing regular `.zshrc` files are preserved byte-for-byte,
-with their ownership and permissions unchanged, even if they do not load Oh My Zsh.
-An absent `.zshrc` receives only the usual `ZSH="$HOME/.oh-my-zsh"`,
-`ZSH_THEME="robbyrussell"`, `plugins=(git)` and `source "$ZSH/oh-my-zsh.sh"`
-configuration. Publication must not overwrite a file that appears concurrently.
-The new `.zshrc` is owned by the target account with mode 0644.
-The result reports the current shell and a manual `chsh` suggestion when appropriate;
-DragonTools never runs it.
+with their ownership and permissions unchanged, by default. An absent file receives
+this complete v2 template, owned by the target account with mode 0644:
+
+```zsh
+# DragonTools managed .zshrc v2
+export ZSH="$HOME/.oh-my-zsh"
+
+ZSH_THEME=""
+
+plugins=(git)
+
+source "$ZSH/oh-my-zsh.sh"
+
+PROMPT='%n@%m %~ %# '
+```
+
+The prompt is set after loading Oh My Zsh and always includes the username, short
+hostname and directory; for example, `root@monitoring ~ #` or `vasyl@monitoring ~ %`.
+Zsh's `%m` expands the remote machine's actual short hostname at display time,
+independently of the controller's OpenSSH alias. The hostname is not embedded in
+the file and changes to the machine's hostname need no configuration rewrite.
+The command never modifies `/etc/hostname`. Zsh's `%#` selects the appropriate
+privilege-sensitive terminator. The empty theme avoids
+depending on theme-specific hostname behavior, while Oh My Zsh and the git plugin
+remain enabled. Initial publication never overwrites a file that appears concurrently.
+
+`--update-managed-zshrc` remains explicit to preserve the established command
+contract: ordinary installs fill missing pieces and leave an existing startup file
+unchanged. It permits only exact template recognition. The complete prior
+v0 bytes (`export ZSH="$HOME/.oh-my-zsh"`, blank lines, `ZSH_THEME="robbyrussell"`,
+`plugins=(git)`, and `source "$ZSH/oh-my-zsh.sh"`, including its final newline) are
+recognized as migratable, as are the exact marked v1 bytes with
+`PROMPT='%n@%m %~ %% '`. Neither recognition uses fuzzy matching. A byte-identical
+current v2 is a no-op. The file must
+belong to the target account, have one hard link, and deny group/world writes
+for migration. Migration preserves its user ID, group ID and mode, or refuses
+publication if those metadata cannot be preserved. A matching marker with local
+edits, extra lines or any other content is insufficient proof and remains untouched.
+Ordinary reruns do not migrate either historical template.
+
+Updates run as the target account, serialize DragonTools writers with an advisory
+lock on the home-directory file descriptor, prepare replacement content in private
+adjacent staging, then recheck exact content, inode, user/group, mode and link count before
+atomic publication. No persistent lock file or controller state is introduced.
+The advisory lock cannot serialize an unrelated editor, so do not edit `.zshrc`
+concurrently with a managed migration. Foreign files are never adopted automatically:
+the operator must first back up and manually move the existing file to a unique,
+unused location before rerunning to create a fresh managed configuration.
+
+`--set-default-shell` explicitly requests the discovered zsh path as the account's
+login shell. The command requires an exact listed entry in `/etc/shells`, compares
+the fresh account shell, invokes `chsh` only when different, and rereads the account
+record to verify the result. It never changes `/etc/shells` automatically. A matching
+shell never invokes `chsh`; without the flag no shell mutation is attempted.
+Root or noninteractive sudo may be required
+for the shell change. A successful change reports the old and new shell paths and
+asks the operator to reconnect. The current SSH shell
+is not replaced, but subsequent SSH commands and logins use the newly selected shell.
+The rendered helpers do not explicitly source user configuration. OpenSSH still
+invokes the account's shell to execute remote commands, so the next verification
+connection may read zsh's `.zshenv` (normally not `.zshrc`). Noninteractive startup
+must be silent and permit these commands. A successful `chsh` is not rolled back
+if shell initialization prevents that later verification connection; once SSH
+startup works again, rerunning inspects the committed account state and avoids a
+second `chsh` when the shell already matches.
 
 Each run inspects actual state. An unchanged run makes no package, download,
 directory, file-content or ownership changes and reports `No changes required.`.

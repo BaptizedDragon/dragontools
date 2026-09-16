@@ -47,9 +47,15 @@ publisher. Managed root directories must not be shared with untrusted writers.
 The host utility inspects the SSH login account before elevation and writes home
 content as the target account. Missing packages or switching to another target may
 require noninteractive sudo. It refuses conflicting paths and preserves existing
-Oh My Zsh and regular `.zshrc` files. New source is pinned and checksum-verified;
+Oh My Zsh and regular `.zshrc` files by default. `--update-managed-zshrc` may replace
+only an exact known DragonTools template owned by the target account with one hard
+link; a marker alone cannot authorize overwriting user edits. New source is pinned and checksum-verified;
 an existing user installation is deliberately not audited, repaired or updated.
-The command never changes the login shell or executes the upstream installer.
+`--set-default-shell` is required to change the login shell; it validates the
+discovered zsh path against `/etc/shells` and avoids `chsh` if already correct.
+Managed migration uses private staging, fresh content/identity checks and atomic
+publication; do not edit `.zshrc` concurrently with that explicit operation.
+The command never executes the upstream installer.
 
 ## Failure and recovery
 
