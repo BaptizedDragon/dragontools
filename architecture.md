@@ -13,7 +13,7 @@ provider abstraction, arbitrary shell hooks, or plugin system.
 
 `cli/parse.zig` validates all supplied inputs before SSH. `main.zig` rejects
 unimplemented integrations. `monitoring/install.zig` detects the host once, then
-installs and verifies VictoriaMetrics, VictoriaLogs, then VictoriaTraces. Each concrete
+installs and verifies VictoriaMetrics, VictoriaLogs, VictoriaTraces, then Grafana. Each concrete
 component workflow handles its account, directories, binary, unit, activation,
 verification, and finalization; VictoriaMetrics also computes its capacity reserve.
 Host detection checks OS and prerequisites once. Before changing a component,
@@ -29,8 +29,10 @@ NUL is rejected. Small static shell fragments use positional parameters.
 `system/ssh.zig` spawns argv directly with Zig 0.16 `std.process`; no local shell.
 SSH is noninteractive, strict, with connection/keepalive limits and bounded output.
 There is no absolute overall deployment deadline yet. Long downloads have their own
-curl deadline. Monitoring commands use direct connections without local SSH config;
-non-root monitoring users require `sudo -n` and are checked for effective UID 0.
+curl deadline. Monitoring supports native OpenSSH aliases with `--ssh-host`, or
+isolated direct connections with `--host`. Alias mode resolves the actual login
+UID remotely before choosing root or `sudo -n`; direct non-root users also require
+`sudo -n`. Effective UID 0 is checked before monitoring mutation.
 Raw stderr is suppressed and wiped; output summaries never echo arbitrary remote data.
 
 The separate `host install-oh-my-zsh` command uses the same transport boundary
@@ -48,26 +50,30 @@ changes only a differing login shell and verifies the account record afterward.
 
 ## Current architecture
 
-Only these storage components are installed by monitoring today:
+These components and datasource edges are implemented by monitoring today:
 
 ```text
-CONTROLLER                              REMOTE MONITORING HOST
-DragonTools -- strict OpenSSH --------> systemd
+ADMIN LAPTOP                            MONITORING HOST
+DragonTools -- strict OpenSSH :22 ----> systemd
+Browser 127.0.0.1:3000 -- SSH tunnel --> Grafana OSS 13.2.2
+                                          127.0.0.1:3000; local authentication
                                           |
-                                          +-- VictoriaMetrics v1.151.0
-                                          |   127.0.0.1:8428
-                                          |   metrics: 90d; reserve: 20%
-                                          |
-                                          +-- VictoriaLogs v1.52.0
-                                          |   127.0.0.1:9428
-                                          |   logical: 100y; partition budget: 75%
-                                          |
-                                          +-- VictoriaTraces v0.11.0
-                                              127.0.0.1:10428
-                                              logical: 100y; partition budget: 75%
+                                          +-- Metrics --> VictoriaMetrics v1.151.0
+                                          |               127.0.0.1:8428
+                                          |               90d; reserve: 20%
+                                          +-- Traces --> VictoriaTraces v0.11.0
+                                                          127.0.0.1:10428
+                                                          100y; partition budget: 75%
+
+                                        VictoriaLogs v1.52.0
+                                          127.0.0.1:9428
+                                          100y; partition budget: 75%
+                                          Grafana Logs datasource unavailable
+
+PUBLIC INBOUND: SSH :22 from administrator IP only (operator-managed firewall)
 ```
 
-Agents, remote ingestion, dashboards, alert evaluation/delivery, monitoring
+Grafana Logs integration, agents, remote ingestion, dashboards, alert evaluation/delivery, monitoring
 firewall, TLS, and frontend telemetry are unavailable. The controller exits after
 the command; no controller-side state database or resident remote agent is added.
 
@@ -94,7 +100,7 @@ directories, pinned binaries, and identical units without unnecessary mutation.
 Only supported owner/group/mode repairs are made. Incompatible accounts and
 unexpected symlinks fail explicitly. Valid binaries are not redownloaded.
 
-Unit content changes and binary/current-link changes record restart intent before
+Unit/config/provisioning content changes and binary/current-link changes record restart intent before
 activation. Metadata-only repair does not make a healthy service dirty. Activation
 inspects loaded unit state and `NeedDaemonReload`; systemd reloads only when that
 state requires it, and a binary-only change does not force a reload. Active,
@@ -175,9 +181,9 @@ supply host metrics in the agent slice; the systemd service-state solution is
 deferred. Policy and renderer tests involve no SSH or real evaluator. There is no
 CLI export command, rule installation, or alert delivery.
 
-The ordinary install plan describes all three available storage components,
+The ordinary install plan describes all four available components,
 including their private listeners and retention, then explicitly lists unavailable
-integrations. A successful installation means all three components passed their
+integrations. A successful installation means all four components passed their
 checks; it does not imply agents or alerts are installed. Unsupported component paths and flags
 still fail before SSH; generated YAML does not make a component available.
 
@@ -228,6 +234,42 @@ transaction-locked. Operators must serialize installs per host. Root-controlled
 system directories and a trusted target OS are prerequisites. Hardening protects the
 service boundary, not a machine already controlled by a malicious administrator.
 
+## Grafana layout, authentication and verification
+
+Grafana OSS `13.2.2` uses a dedicated `dt-grafana` user/group. Its pinned archive
+contains the server, built-in datasource implementations and static UI assets;
+the integrity boundary covers the full reviewed release tree, not only the Go
+executable. Release assets stay root-owned under
+`/opt/dragontools/components/grafana/13.2.2/`, selected through `current`.
+SQLite, plugins and other persistent state live under `/var/lib/dragontools/grafana`.
+Root-owned deterministic files under `/etc/dragontools/grafana` configure the
+explicit `127.0.0.1:3000` listener, console logging to journald, local authentication,
+and Metrics/Traces provisioning. No third-party plugin or dashboard is installed.
+
+On a fresh database Grafana's standard `admin` / `admin` bootstrap flow applies;
+the administrator must change the password at the first login prompt through the
+SSH tunnel. No password is generated, logged, reset or embedded by DragonTools.
+Anonymous access, auth proxy and signup are disabled. Database reuse preserves
+account/password changes across installs. Target-local users can reach loopback,
+so complete initialization promptly on a trusted host.
+
+Metrics uses Grafana's built-in Prometheus datasource at `127.0.0.1:8428`;
+Traces uses the built-in Jaeger datasource at `127.0.0.1:10428/select/jaeger`.
+The official VictoriaLogs integration requires a separate plugin, which is deferred.
+The stores remain independently usable and loopback-only. No public ingress,
+firewall rule, TLS, agent, or application ingestion edge is added.
+
+Grafana changes set only `/var/lib/dragontools/grafana-restart-required` before
+publication. Config/provisioning changes require Grafana restart but do not
+require a systemd daemon reload unless unit state independently needs one.
+Verification checks service state, unit and running identity, installation integrity,
+private listener ownership, HTTP identity, configuration, and non-secret datasource
+records through read-only SQLite. Queries to the provisioned backend endpoints run
+as `dt-grafana`, proving reachability and response contracts. This avoids retaining
+administrator credentials and remains valid after password changes. It does not
+exercise authenticated requests through Grafana's proxy/query engine; authenticated
+Save & test and Explore remain an explicit disposable-host integration gate.
+
 ## Service hardening
 
 The VictoriaMetrics profile uses an empty capability set, no new privileges,
@@ -256,11 +298,11 @@ instance; supported Ubuntu/architecture VM runs remain required.
 ## Target near-term architecture (not implemented)
 
 The storage backends on the right exist today. All application-host collectors,
-network ingestion edges, alert evaluators/delivery, and Grafana below are targets:
+network ingestion edges and alert evaluators/delivery below are targets:
 
 ```text
 APPLICATION HOST                        MONITORING HOST
-(all collectors unavailable)            (VM / VL / VT installed)
+(all collectors unavailable)            (VM / VL / VT / Grafana installed)
 
 journald
    |
@@ -282,17 +324,15 @@ application OTLP
                                            |
                                         Telegram [unavailable]
 
-                                        Grafana [unavailable]
-                                         /  |  \
-                                        VM  VL  VT
 ```
 
 These edges require later verified ingestion, network authorization, and collector
 configuration. Host metric names will be established by Vector implementation;
 systemd service-state monitoring is deferred. No frontend telemetry is included.
 
-Grafana is the only normal human-facing UI, with automatically provisioned
-VictoriaMetrics, VictoriaLogs and VictoriaTraces datasources. vmalert sends to
+Grafana is the normal human-facing UI, with automatically provisioned
+VictoriaMetrics and VictoriaTraces datasources. VictoriaLogs UI integration remains
+deferred pending a reviewed plugin installation. vmalert sends to
 Alertmanager, which optionally sends grouped Telegram warning/critical/resolved
 notifications. Backend administrative APIs stay private. An ingestion gateway must
 expose only approved write routes; allowlisting a raw VictoriaMetrics port would
@@ -311,7 +351,7 @@ agents may reach only ingestion. Provider firewall is an outer layer. A compromi
 allowlisted host can submit telemetry. Grafana still requires user authentication.
 No per-agent tokens or mTLS are claimed. Current slice avoids that unfinished
 boundary by binding VictoriaMetrics, VictoriaLogs, and VictoriaTraces to 127.0.0.1
-on ports 8428, 9428, and 10428. VictoriaTraces explicitly disables its additional
+on ports 8428, 9428, and 10428, with Grafana on 127.0.0.1:3000. VictoriaTraces explicitly disables its additional
 gRPC listener with `-otlpGRPCListenAddr=`. No public OTLP or application-host
 ingestion path is installed.
 
@@ -356,13 +396,15 @@ cover policy constants, explicit unavailable host/service rendering, determinist
 provisional log rules, thresholds, and stable labels. CLI smoke tests
 check non-TTY behavior and the local help/completion boundary. Fake-remote tests
 cover independent first/second runs, drift, failures, and restart recovery for all
-three installed components;
+four installed components;
 these prove sequencing, not actual systemd behavior. Disposable Ubuntu integration
 is documented separately and must verify the real runtime profile and no-op rerun.
-The opt-in `tests/integration/victoriatraces.sh` runner checks all three services,
+The opt-in `tests/integration/victoriatraces.sh` runner checks the three storage services,
 listeners, retention, writable backend storage, stable processes on reruns,
 VictoriaTraces-only unit repair, and recovery from a persisted restart marker. It is not run by the
-ordinary test target.
+ordinary test target. The integration README adds Grafana UI, authenticated datasource,
+four-process stability and Grafana-only recovery checks; those remain unrun until
+a real supported disposable host is supplied.
 
 Host utility tests separately cover account selection, missing/present packages,
 source and `.zshrc` preservation, exact managed-template migration, the server

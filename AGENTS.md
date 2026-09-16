@@ -48,6 +48,12 @@ requested with `--set-default-shell`, after validating the discovered zsh path i
 Oh My Zsh source, use private staging and safe publication, and refuse conflicting
 paths. Do not add generic package/dotfile management or arbitrary shell hooks.
 
+Grafana uses loopback:3000 with local authentication enabled and provisioned Metrics/Traces.
+Preserve its independent restart intent for binary, unit and configuration changes.
+Do not retain administrator credentials for verification; distinguish read-only
+provisioning/backend checks from authenticated Grafana datasource runtime validation.
+The Logs datasource plugin and dashboards remain deferred.
+
 Keep unsupported components explicitly unavailable. Never return installation
 success for scaffolds. New components require reviewed pinned checksums, a dedicated
 privilege profile, atomic installation, idempotency, and real health/signal checks.
@@ -87,4 +93,5 @@ End this and every future Codex iteration with these five sections:
 
 When adding a component, report its exact pinned version, checksum provenance,
 and remaining verification limits. Keep deployment useful now without implying
-that Grafana, alerting, agents, or remote ingestion are already available.
+that the Grafana Logs datasource, dashboards, alerting, agents, or remote ingestion
+are already available.

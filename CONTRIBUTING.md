@@ -26,7 +26,9 @@ plan makes no connection. On a sandboxed controller set
    arithmetic/overflow and update model parsing. Firewall generation tests belong
    with the future safe firewall implementation; no pretend rules ship today.
 2. Fake remote: inject a stateful executor through `Remote`, exercise a first install,
-   second no-op, and component-isolated binary/unit changes for VM, VL, and VT.
+   second no-op, and component-isolated binary/unit changes for VM, VL, VT and Grafana.
+   Grafana additionally covers deterministic config/provisioning, full-tree artifact
+   inspection, SQLite datasource metadata and service-account backend query checks.
    Check starts, enables, restarts, reloads, failed-health marker retention, and
    interrupted-change recovery separately. Standalone verification must make no
    mutations. Existing resources, conflicts, and failure paths remain covered. The CLI smoke test uses Python 3 and a fake SSH executable to ensure help/plans,
@@ -41,7 +43,9 @@ plan makes no connection. On a sandboxed controller set
    interrupted staging, and a mutation-free second run. Fake SSH covers alias/direct
    dispatch and sanitized errors without contacting a host.
 3. Disposable Ubuntu integration: [procedure](tests/integration/README.md) and opt-in
-   [three-component runner](tests/integration/victoriatraces.sh). Real host lifecycle, file ownership,
+   [storage-backend runner](tests/integration/victoriatraces.sh), plus the
+   [Grafana checklist](tests/integration/README.md#grafana-fourth-component-checklist).
+   Real authenticated Grafana datasource queries, lifecycle, file ownership,
    listener behavior, health, unit hardening and no-op process stability are required
    before treating a platform combination as operationally validated.
 

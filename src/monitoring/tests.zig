@@ -3,12 +3,12 @@ const remote = @import("../system/remote.zig");
 const install = @import("install.zig");
 const verify = @import("verify.zig");
 const operation_count = @typeInfo(remote.Operation).@"enum".fields.len;
-const components = [_]install.Component{ .victoriametrics, .victorialogs, .victoriatraces };
+const components = [_]install.Component{ .victoriametrics, .victorialogs, .victoriatraces, .grafana };
 const vm_metrics = "{\"status\":\"success\",\"data\":{\"result\":[{\"metric\":{\"__name__\":\"vm_app_version\"},\"value\":[1,\"1\"]}]}}";
 const vl_metrics = "vl_storage_is_read_only{path=\"/var/lib/dragontools/victorialogs\"} 0\n";
 const vt_metrics = "vt_storage_is_read_only{path=\"/var/lib/dragontools/victoriatraces\"} 0\n";
 
-// Three concrete states exercise the control flow, not Linux shell execution.
+// Four concrete states exercise the control flow, not Linux shell execution.
 // Mutations can complete before a simulated failure so retries cannot rely on
 // the previous controller result. Real systemd/filesystem behavior needs a VM.
 const ComponentState = struct {
@@ -42,6 +42,7 @@ const Fake = struct {
     vm: ComponentState = .{},
     vl: ComponentState = .{},
     vt: ComponentState = .{},
+    gf: ComponentState = .{},
     calls: usize = 0,
     detections: usize = 0,
     check_syntax: bool = false,
@@ -53,6 +54,7 @@ const Fake = struct {
             .victoriametrics => &self.vm,
             .victorialogs => &self.vl,
             .victoriatraces => &self.vt,
+            .grafana => &self.gf,
         };
     }
     fn asRemote(self: *Fake) remote.Remote {
@@ -77,7 +79,9 @@ const Fake = struct {
             self.detections += 1;
             return .{ .code = 0, .output = "ubuntu\n24.04\nx86_64\n" };
         }
-        const component: install.Component = if (std.mem.indexOf(u8, command, "victoriatraces") != null)
+        const component: install.Component = if (std.mem.indexOf(u8, command, "grafana") != null)
+            .grafana
+        else if (std.mem.indexOf(u8, command, "victoriatraces") != null)
             .victoriatraces
         else if (std.mem.indexOf(u8, command, "victorialogs") != null)
             .victorialogs
@@ -101,6 +105,7 @@ const Fake = struct {
                     .victoriametrics => vm_metrics,
                     .victorialogs => vl_metrics,
                     .victoriatraces => vt_metrics,
+                    .grafana => @import("grafana_verify.zig").healthy_fixture,
                 } };
             },
             .finalize => {
@@ -148,6 +153,7 @@ const Fake = struct {
                         current.dirty = true;
                         current.downloads += 1;
                     }
+                    if (op == .config or op == .provisioning) current.dirty = true;
                     if (op == .unit) {
                         current.dirty = true;
                         current.stale_unit = true;
@@ -178,7 +184,7 @@ fn expectRestarts(fake: *Fake, affected: ?install.Component, affected_count: usi
     }
 }
 
-test "all three components converge once and inspect without mutation on a second run" {
+test "all four components converge once and inspect without mutation on a second run" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var fake: Fake = .{};
@@ -203,6 +209,81 @@ test "all three components converge once and inspect without mutation on a secon
     try std.testing.expectEqual(@as(usize, 2), fake.vm.called(.capacity));
     try std.testing.expectEqual(@as(usize, 0), fake.vl.called(.capacity));
     try std.testing.expectEqual(@as(usize, 0), fake.vt.called(.capacity));
+    try std.testing.expectEqual(@as(usize, 0), fake.gf.called(.capacity));
+    for ([_]remote.Operation{ .config, .provisioning }) |op| {
+        try std.testing.expectEqual(@as(usize, 1), fake.gf.writes[@intFromEnum(op)]);
+        try std.testing.expectEqual(@as(usize, 2), fake.gf.called(op));
+        try std.testing.expectEqual(@as(usize, 0), fake.vm.called(op) + fake.vl.called(op) + fake.vt.called(op));
+    }
+}
+
+test "Grafana configuration and provisioning changes restart only Grafana without daemon reload" {
+    for ([_]remote.Operation{ .config, .provisioning }) |op| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var fake: Fake = .{};
+        try initialInstall(arena.allocator(), &fake);
+        fake.gf.present[@intFromEnum(op)] = false;
+        var repaired: install.Report = .{};
+        try install.install(arena.allocator(), fake.asRemote(), &repaired);
+        try std.testing.expectEqual(@as(usize, 2), repaired.changes);
+        try expectRestarts(&fake, .grafana, 2);
+        try std.testing.expectEqual(@as(usize, 1), fake.gf.reloads);
+        try std.testing.expectEqual(@as(usize, 1), fake.gf.downloads);
+        var unchanged: install.Report = .{};
+        try install.install(arena.allocator(), fake.asRemote(), &unchanged);
+        try std.testing.expectEqual(@as(usize, 0), unchanged.changes);
+        try expectRestarts(&fake, .grafana, 2);
+    }
+}
+
+test "interrupted Grafana config writes preserve restart intent through failed verification and retry" {
+    for ([_]remote.Operation{ .config, .provisioning }) |op| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var fake: Fake = .{};
+        try initialInstall(arena.allocator(), &fake);
+        fake.gf.present[@intFromEnum(op)] = false;
+        fake.gf.fail_after = op;
+        var failed: install.Report = .{};
+        try std.testing.expectError(error.RemoteOperationFailed, install.install(arena.allocator(), fake.asRemote(), &failed));
+        try std.testing.expectEqual(install.Component.grafana, failed.component.?);
+        try std.testing.expectEqual(op, failed.phase);
+        try std.testing.expect(fake.gf.dirty);
+        try expectRestarts(&fake, null, 1);
+        fake.gf.fail_after = null;
+        fake.gf.fail = .health;
+        var failed_health: install.Report = .{};
+        try std.testing.expectError(error.RemoteOperationFailed, install.install(arena.allocator(), fake.asRemote(), &failed_health));
+        try std.testing.expect(fake.gf.dirty);
+        try std.testing.expectEqual(@as(usize, 1), fake.gf.called(.finalize));
+        fake.gf.fail = null;
+        var recovered: install.Report = .{};
+        try install.install(arena.allocator(), fake.asRemote(), &recovered);
+        try expectRestarts(&fake, .grafana, 3);
+        try std.testing.expect(!fake.gf.dirty);
+        try std.testing.expectEqual(@as(usize, 2), fake.gf.writes[@intFromEnum(op)]);
+        var unchanged: install.Report = .{};
+        try install.install(arena.allocator(), fake.asRemote(), &unchanged);
+        try std.testing.expectEqual(@as(usize, 0), unchanged.changes);
+        try expectRestarts(&fake, .grafana, 3);
+    }
+}
+
+test "Grafana config metadata repairs do not restart services or download artifacts" {
+    for ([_]remote.Operation{ .config, .provisioning }) |op| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var fake: Fake = .{};
+        try initialInstall(arena.allocator(), &fake);
+        fake.gf.metadata_drift = op;
+        var repaired: install.Report = .{};
+        try install.install(arena.allocator(), fake.asRemote(), &repaired);
+        try std.testing.expectEqual(@as(usize, 1), repaired.changes);
+        try expectRestarts(&fake, null, 1);
+        try std.testing.expectEqual(@as(usize, 1), fake.gf.downloads);
+        try std.testing.expectEqual(@as(usize, 1), fake.gf.reloads);
+    }
 }
 
 test "binary and unit changes restart only their component and reload only changed units" {
@@ -371,7 +452,7 @@ test "interrupted enable recovers global reload state without restarting any com
         try install.install(arena.allocator(), fake.asRemote(), &recovered);
         try std.testing.expectEqual(@as(usize, 1), recovered.changes);
         try std.testing.expectEqual(@as(usize, 2), current.enables);
-        try std.testing.expectEqual(@as(usize, 4), fake.vm.reloads + fake.vl.reloads + fake.vt.reloads);
+        try std.testing.expectEqual(@as(usize, 5), fake.vm.reloads + fake.vl.reloads + fake.vt.reloads + fake.gf.reloads);
         try std.testing.expect(!fake.enable_state_outdated);
         try expectRestarts(&fake, null, 1);
         var stable: install.Report = .{};
@@ -459,6 +540,7 @@ test "controller rejection of invalid application metrics prevents finalization"
             .victoriametrics => error.InvalidHealthResponse,
             .victorialogs => error.VictoriaLogsMetricMissing,
             .victoriatraces => error.VictoriaTracesMetricMissing,
+            .grafana => error.InvalidGrafanaHealthResponse,
         }, result);
         try std.testing.expectEqual(component, report.component.?);
         try std.testing.expectEqual(remote.Operation.health, report.phase);
@@ -467,7 +549,7 @@ test "controller rejection of invalid application metrics prevents finalization"
     }
 }
 
-test "verify checks all three without mutation and fails on any unhealthy component" {
+test "verify checks all four without mutation and fails on any unhealthy component" {
     for (components) |component| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
@@ -503,7 +585,7 @@ test "rendered activation shell orders enable reload and isolated restart using 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    for ([_][]const u8{ install.activate, install.activate_victorialogs, install.activate_victoriatraces }) |activation| {
+    for ([_][]const u8{ install.activate, install.activate_victorialogs, install.activate_victoriatraces, install.activate_grafana }) |activation| {
         // Execute only activation, with a private temporary marker path and
         // shell functions replacing systemctl/stat. This checks shell ordering,
         // not actual systemd behavior or privileged filesystem installation.

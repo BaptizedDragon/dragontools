@@ -65,7 +65,7 @@ fn execute(init: std.process.Init, options: cli.Options) !void {
     var report: @import("monitoring/install.zig").Report = .{};
     switch (options.command) {
         .install, .verify => {
-            print(init.io, if (options.command == .install) "Installing VictoriaMetrics, VictoriaLogs and VictoriaTraces over SSH...\n" else "Verifying VictoriaMetrics, VictoriaLogs and VictoriaTraces over SSH...\n");
+            print(init.io, if (options.command == .install) "Installing VictoriaMetrics, VictoriaLogs, VictoriaTraces and Grafana over SSH...\n" else "Verifying VictoriaMetrics, VictoriaLogs, VictoriaTraces and Grafana over SSH...\n");
             const result = if (options.command == .install) @import("monitoring/install.zig").install(a, r, &report) else @import("monitoring/verify.zig").verify(a, r, &report);
             result catch |err| {
                 const advice = if (options.command == .install)
@@ -76,7 +76,7 @@ fn execute(init: std.process.Init, options: cli.Options) !void {
                 return err;
             };
             if (options.command == .install and report.changes == 0) print(init.io, "No changes required.\n");
-            print(init.io, try std.fmt.allocPrint(a, "VictoriaMetrics: loopback:8428\n  healthy; self-scraped metrics queryable\n  retention: {s}; free-space reserve: {d} bytes ({d}% of filesystem capacity)\nVictoriaLogs: loopback:9428\n  healthy; writable storage\n  retention: disk-bound; logical limit: {s}; native partition budget: {d}% of filesystem capacity\nVictoriaTraces: loopback:{d}\n  healthy; writable storage\n  retention: disk-bound; logical limit: {s}; native partition budget: {d}% of filesystem capacity\n  Logs/traces cleanup is periodic and preserves the newest two partitions; other writers can fill the filesystem earlier.\n", .{ policy.metrics.retention, report.reserve_bytes, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent, vt.port, policy.traces.retention, policy.traces.cleanup_usage_percent }));
+            print(init.io, try std.fmt.allocPrint(a, "VictoriaMetrics: loopback:8428\n  healthy; self-scraped metrics queryable\n  retention: {s}; free-space reserve: {d} bytes ({d}% of filesystem capacity)\nVictoriaLogs: loopback:9428\n  healthy; writable storage\n  retention: disk-bound; logical limit: {s}; native partition budget: {d}% of filesystem capacity\nVictoriaTraces: loopback:{d}\n  healthy; writable storage\n  retention: disk-bound; logical limit: {s}; native partition budget: {d}% of filesystem capacity\n  Logs/traces cleanup is periodic and preserves the newest two partitions; other writers can fill the filesystem earlier.\nGrafana: loopback:3000\n  healthy; local authentication enabled\n  Metrics and Traces datasource records and backend queries checked\n  authenticated Grafana query/UI validation remains a manual integration check\nAccess through an explicit SSH tunnel; change the initial administrator password at first login.\n", .{ policy.metrics.retention, report.reserve_bytes, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent, vt.port, policy.traces.retention, policy.traces.cleanup_usage_percent }));
         },
         .status => {
             const output = @import("monitoring/status.zig").status(a, r, &report) catch |err| {
@@ -125,6 +125,11 @@ test {
     _ = @import("components/victorialogs_unit.zig");
     _ = @import("components/victoriatraces.zig");
     _ = @import("components/victoriatraces_unit.zig");
+    _ = @import("components/grafana.zig");
+    _ = @import("components/grafana_unit.zig");
+    _ = @import("components/grafana_config.zig");
+    _ = @import("monitoring/grafana_verify.zig");
+    _ = @import("monitoring/grafana_install.zig");
     _ = @import("monitoring/tests.zig");
     _ = @import("monitoring/policy.zig");
     _ = @import("monitoring/rules.zig");

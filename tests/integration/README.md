@@ -131,12 +131,14 @@ Install prerequisites if your minimal image omits them:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y openssh-server curl ca-certificates tar coreutils util-linux iproute2 passwd grep
+sudo apt-get install -y openssh-server curl ca-certificates tar coreutils util-linux iproute2 passwd grep python3
 ```
 
 Verify the VM SSH fingerprint through its console and enroll it in known_hosts.
-Allow outbound HTTPS to official GitHub release assets. Never use a production
-host: this runner installs three persistent services and writes actual metrics/data.
+Allow outbound HTTPS to official GitHub release assets and `dl.grafana.com`. Never
+use a production host: the monitoring installer now installs four persistent
+services and writes actual metrics/data. The older Victoria runners below retain
+their backend-specific checks; use the Grafana checklist too for the fourth component.
 
 ```bash
 zig build -Doptimize=ReleaseSafe
@@ -185,8 +187,8 @@ may remain until installation recovers. Destroy the VM through your provider aft
 testing; DragonTools has no uninstall or provisioning command.
 
 The earlier `victoriametrics.sh` and `victorialogs.sh` runners remain available as
-narrower checks. Their current `monitoring install` commands also install all three
-components. Use `victoriatraces.sh` for three-component process stability and
+narrower checks. Their current `monitoring install` commands install all four
+components, but these earlier runners do not inspect Grafana process stability. Use `victoriatraces.sh` for three-component process stability and
 VictoriaTraces-isolated repair; the logs runner still covers logs-isolated repair.
 
 Before accepting a release, also exercise:
@@ -207,7 +209,7 @@ Before accepting a release, also exercise:
 - Binary-only repair does not itself require `daemon-reload` when loaded unit state
   is already current; changed or stale loaded unit
   state triggers reload only as needed.
-- Target ports 8428, 9428, and 10428 cannot be reached externally. The additional
+- Target ports 8428, 9428, 10428, and 3000 cannot be reached externally. The additional
   traces gRPC listener is disabled; no public OTLP path exists.
 - Inspect root/service ownership, `systemd-analyze security`, journal errors, and
   query persistence across restart; review unexpected drop-ins/overrides.
@@ -222,3 +224,114 @@ credentials. Integration is opt-in and is never silently counted as a passing
 unit test. **Disposable-host integration not run.** The new traces runner has only
 local syntax checks until a real supported target is supplied; fake-remote and
 renderer tests do not establish runtime/production compatibility.
+
+
+## Grafana fourth-component checklist
+
+Run on each supported Ubuntu/architecture disposable-host combination above. The
+replaceable alias `monitoring-test` must use the same SSH authentication throughout;
+verify its host key first. Ensure no other process occupies target loopback port
+3000. Public inbound stays TCP 22 from the administrator IP only. Do not add a
+Hetzner/provider port-3000 rule, public HTTP/HTTPS rule, or Cloudflare change.
+
+```bash
+zig build -Doptimize=ReleaseSafe
+TEST_ALIAS="monitoring-test"
+./zig-out/bin/dragontool monitoring install --ssh-host "$TEST_ALIAS" --plan
+./zig-out/bin/dragontool monitoring install --ssh-host "$TEST_ALIAS"
+./zig-out/bin/dragontool monitoring verify --ssh-host "$TEST_ALIAS"
+./zig-out/bin/dragontool monitoring status --ssh-host "$TEST_ALIAS"
+
+# Read-only listener inspection. All four must bind only to their loopback addresses.
+ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$TEST_ALIAS" \
+  'sudo -n ss -lntp'
+
+# Record all four service identities around a deliberate unchanged install.
+GRAFANA_CHECK_DIR=$(mktemp -d)
+ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$TEST_ALIAS" \
+  'for name in victoriametrics victorialogs victoriatraces grafana; do
+     systemctl show "dragontools-$name.service" --no-pager \
+       --property=Id,ActiveState,UnitFileState,MainPID,ExecMainStartTimestampMonotonic
+   done' > "$GRAFANA_CHECK_DIR/before"
+./zig-out/bin/dragontool monitoring install --ssh-host "$TEST_ALIAS"
+ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$TEST_ALIAS" \
+  'for name in victoriametrics victorialogs victoriatraces grafana; do
+     systemctl show "dragontools-$name.service" --no-pager \
+       --property=Id,ActiveState,UnitFileState,MainPID,ExecMainStartTimestampMonotonic
+   done' > "$GRAFANA_CHECK_DIR/after"
+cmp "$GRAFANA_CHECK_DIR/before" "$GRAFANA_CHECK_DIR/after"
+
+# Keep the tunnel session open while testing in a browser.
+ssh -o StrictHostKeyChecking=yes -L 127.0.0.1:3000:127.0.0.1:3000 "$TEST_ALIAS"
+```
+
+If the alias logs in as root on an image without sudo, use `ss -lntp` directly in
+that inspection command. Expected: all four active/persistently enabled, listener
+addresses `127.0.0.1:8428`, `127.0.0.1:9428`, `127.0.0.1:10428`, and
+`127.0.0.1:3000`, `No changes required.` on unchanged install, and no diff in the
+four process identities. Also compare managed Grafana files' bytes, modes, owners
+and modification times around the rerun, and inspect download evidence: no archive
+request or provisioning rewrite should occur. `verify` must preserve the same
+process identities and files.
+
+Open `http://127.0.0.1:3000` locally. On a fresh database, sign in with the standard
+initial `admin` / `admin` credentials and immediately change the password at the
+prompt. Do not include it in test logs, CLI arguments or repository files. Confirm
+that anonymous requests cannot browse datasources and authentication remains
+required. Reinstall/verify after changing the password: both must work without the
+CLI knowing it, and the new password must remain intact.
+
+In the authenticated UI:
+
+1. Confirm the **Metrics** datasource is provisioned, default and not editable;
+   run **Save & test**, then Explore `vm_app_version` and see stored data.
+2. Confirm the **Traces** datasource uses Jaeger and the exact local
+   `/select/jaeger` base path; run **Save & test** and Explore its services.
+   An empty list is expected before application trace ingestion. Do not claim
+   trace arrival solely from this response.
+3. Confirm **Logs** datasource and default dashboards are absent: the official
+   VictoriaLogs plugin is deferred. If implemented in a later iteration, add its
+   pinned-plugin and authenticated health/query checks before claiming integration.
+
+The automated verifier checks read-only provisioned datasource records and backend
+queries under the Grafana UID. The UI steps above exercise Grafana's authenticated
+proxy/query engine, which local fake-remote or renderer tests do not validate.
+
+On this disposable target only, test recovery and component isolation:
+
+- Change one managed Grafana config/provisioning file, then reinstall. Only Grafana
+  may restart; retain all VM/VL/VT PIDs/start times. Follow with an unchanged no-op.
+- Exercise Grafana unit drift and recognized binary/tree corruption independently.
+  Each repair restarts only Grafana; unknown extra paths and symlinks must refuse
+  safely instead of destroying administrator data. Confirm upstream package paths
+  such as `/etc/grafana` remain untouched.
+- Stop Grafana, then reinstall; it starts. Disable it, then reinstall; persistent
+  enablement is restored without disturbing the three healthy backends.
+- Interrupt during private archive staging and around atomic publication/activation.
+  Rerun from the actual state, retaining the Grafana restart marker until its
+  verification succeeds. Never delete arbitrary staging paths to make a test pass.
+- Cause a Grafana health/provisioning verification failure without modifying backend
+  state; confirm VM/VL/VT remain healthy and the Grafana marker survives. Correct the
+  cause, reinstall, verify the marker clears, then require a no-op rerun.
+- Inspect `systemd-analyze security dragontools-grafana.service`, unit effective
+  properties, and journal output. Exercise SQLite persistence across restart.
+  Recheck loopback-only binding and no added public listener/firewall rule.
+
+Record exact OS, architecture, Grafana build and checksum provenance, commands,
+service identities, authenticated UI checks and outcomes without credentials.
+Destroy the disposable host after testing. **Disposable-host integration not run.**
+
+
+To reproduce the reviewed Grafana archive audit without installing or executing it,
+download the exact official versioned artifact documented in `design.md`, then run:
+
+```bash
+python3 -I -B tests/integration/grafana_archive.py /tmp/dragontools-grafana-13.2.2-amd64.tar.gz amd64
+python3 -I -B tests/integration/grafana_archive.py /tmp/dragontools-grafana-13.2.2-arm64.tar.gz arm64
+```
+
+Replace each path with the corresponding already-downloaded archive. The audit
+checks committed archive, server-binary and full catalog pins, regular-file/directory
+counts and safe archive paths. It does not extract or execute the release and is
+separate from the systemd/UI integration gate. Each no-op installation also hashes
+the full live release tree; expect read I/O even though no resources are rewritten.

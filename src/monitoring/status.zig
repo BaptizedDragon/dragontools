@@ -37,7 +37,9 @@ pub fn status(a: std.mem.Allocator, r: remote.Remote, report: *install.Report) !
     const vl = try report.call(r, .status, "systemctl show dragontools-victorialogs.service --property=LoadState,ActiveState,SubState,UnitFileState --no-pager");
     report.component = .victoriatraces;
     const vt = try report.call(r, .status, "systemctl show dragontools-victoriatraces.service --property=LoadState,ActiveState,SubState,UnitFileState --no-pager");
-    return std.fmt.allocPrint(a, "VictoriaMetrics: loopback:8428\n  state: {s}\n  enabled: {s}\nVictoriaLogs: loopback:9428\n  state: {s}\n  enabled: {s}\nVictoriaTraces: loopback:{d}\n  state: {s}\n  enabled: {s}\nListeners above are the managed policy. Run monitoring verify to check effective policy, health, identity and storage.\n", .{ state(vm), enabled(vm), state(vl), enabled(vl), traces.port, state(vt), enabled(vt) });
+    report.component = .grafana;
+    const grafana = try report.call(r, .status, "systemctl show dragontools-grafana.service --property=LoadState,ActiveState,SubState,UnitFileState --no-pager");
+    return std.fmt.allocPrint(a, "VictoriaMetrics: loopback:8428\n  state: {s}\n  enabled: {s}\nVictoriaLogs: loopback:9428\n  state: {s}\n  enabled: {s}\nVictoriaTraces: loopback:{d}\n  state: {s}\n  enabled: {s}\nGrafana: loopback:3000\n  state: {s}\n  enabled: {s}\nListeners above are the managed policy. Run monitoring verify to check effective policy, health, identity and storage.\n", .{ state(vm), enabled(vm), state(vl), enabled(vl), traces.port, state(vt), enabled(vt), state(grafana), enabled(grafana) });
 }
 
 test "status recognizes exact properties without exposing remote text" {
@@ -47,7 +49,7 @@ test "status recognizes exact properties without exposing remote text" {
     try std.testing.expectEqualStrings("unknown", state("arbitrary ActiveState=active\n\x1b[31m"));
 }
 
-test "status reports all three components and enablement independently" {
+test "status reports all four components and enablement independently" {
     const Fake = struct {
         fn execute(_: *anyopaque, op: remote.Operation, command: []const u8) !remote.Result {
             try std.testing.expectEqual(remote.Operation.status, op);
@@ -61,5 +63,6 @@ test "status reports all three components and enablement independently" {
     try std.testing.expect(std.mem.indexOf(u8, output, "VictoriaMetrics: loopback:8428\n  state: active\n  enabled: yes") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "VictoriaLogs: loopback:9428\n  state: inactive or unhealthy\n  enabled: no") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "VictoriaTraces: loopback:10428\n  state: not installed\n  enabled: not installed") != null);
-    try std.testing.expectEqual(@as(usize, 3), report.completed);
+    try std.testing.expect(std.mem.indexOf(u8, output, "Grafana: loopback:3000\n  state: active\n  enabled: yes") != null);
+    try std.testing.expectEqual(@as(usize, 4), report.completed);
 }

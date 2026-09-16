@@ -78,7 +78,7 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
          1, "FlagNotAllowed"),
         (["host", "install-oh-my-zsh", "--ssh-host", "monitoring", "--ssh-op-path", "op://vault/item/key"],
          1, "FlagNotAllowed"),
-        (["monitoring", "install", "--ssh-host", "monitoring"], 1, "FlagNotAllowed"),
+        (["monitoring", "install", "--ssh-host", "REDACTION-SENTINEL", "--plan"], 0, "Grafana: loopback:3000"),
         (["monitoring", "agents", "install", "--host", "example.com",
           "--service", "one.service", "--service", "two.service"], 1, "NotImplemented"),
         (["monitoring", "agents", "verify", "--host", "example.com"], 1, "NotImplemented"),
@@ -101,6 +101,15 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
         (["monitoring", "install", "--host", "example.com", "--admin-ip", "192.0.2.11", "--plan"], 1, "NotImplemented"),
         (["monitoring", "install", "--host", "example.com", "--domain", "monitor.example.com", "--plan"], 1, "NotImplemented"),
     ]
+    for command in ("install", "verify", "status"):
+        base = ["monitoring", command, "--ssh-host", "monitoring"]
+        cases.append(([*base, "--host", "example.com"], 1, "ConflictingHosts"))
+        for flag, value in (("--user", "root"), ("--port", "22"),
+                            ("--identity", "/tmp/key"), ("--ssh-sock", "/tmp/sock"),
+                            ("--ssh-op-path", "op://vault/item/key")):
+            cases.append(([*base, flag, value], 1, "ConflictingSshMode"))
+        cases.append((["monitoring", command, "--ssh-host", "REDACTION-SENTINEL;id"], 1, "InvalidSshHost"))
+    cases.append((["monitoring", "install", "--ssh-host", "monitoring", "--tls", "manual", "--plan"], 1, "NotImplemented"))
     for flag in host_change_flags:
         cases.extend([
             ([*host_plan_args, flag], 0, "Host personalization plan (local; SSH not attempted)."),
@@ -127,17 +136,19 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
     assert set(host_plans) == {(False, False), (True, False), (False, True), (True, True)}
     checked += 1
 
-    # All three real components have install sections; native retention remains
+    # All four real components have install sections; native retention remains
     # distinct from provisional alert rendering and unavailable agent/runtime paths.
     vm_heading = "VictoriaMetrics: loopback:8428"
     vl_heading = "VictoriaLogs: loopback:9428"
     vt_heading = "VictoriaTraces: loopback:10428"
+    grafana_heading = "Grafana: loopback:3000"
     unavailable_heading = "Not yet available:"
-    for heading in (vm_heading, vl_heading, vt_heading, unavailable_heading):
+    for heading in (vm_heading, vl_heading, vt_heading, grafana_heading, unavailable_heading):
         assert heading in plan_output, (heading, plan_output)
     metrics, remainder = plan_output.split(vm_heading, 1)[1].split(vl_heading, 1)
     logs, traces = remainder.split(vt_heading, 1)
-    traces, unavailable = traces.split(unavailable_heading, 1)
+    traces, grafana = traces.split(grafana_heading, 1)
+    grafana, unavailable = grafana.split(unavailable_heading, 1)
     for required in ("pinned", "v1.151.0", "90d", "20%", "reserve"):
         assert required in metrics, (required, metrics)
     for required in ("pinned", "v1.52.0", "100y", "logical", "75%", "partition"):
@@ -149,7 +160,10 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
     assert re.search(r"(?:newest|last) (?:two|2) (?:daily )?partitions", traces), traces
     for component in ("VictoriaMetrics", "VictoriaLogs", "VictoriaTraces"):
         assert component not in unavailable, (component, unavailable)
-    for component in ("Grafana", "vmalert", "Alertmanager", "Vector", "vmagent",
+    for required in ("pinned OSS release", "local authentication enabled", "Metrics datasource", "http://127.0.0.1:8428", "Traces datasource", "http://127.0.0.1:10428/select/jaeger", "SSH port forwarding only", "manual verification"):
+        assert required in grafana, (required, grafana)
+    assert "Grafana Logs datasource" in unavailable and "dashboards" in unavailable
+    for component in ("vmalert", "Alertmanager", "Vector", "vmagent",
                       "OTel", "agents", "firewall", "TLS", "Telegram"):
         assert component in unavailable, (component, unavailable)
     # The old host metric expressions must not be described as deployed alerts.
@@ -171,7 +185,7 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
         result = local_run([*path, "--help"], expected="Usage:")
         help_output[tuple(path)] = result.stdout
     install_help = help_output[("monitoring", "install")]
-    assert "--tls" in install_help and "--host" in install_help
+    assert "--tls" in install_help and "--host" in install_help and "--ssh-host" in install_help
     assert "--service" not in install_help, install_help
     host_help = help_output[("host",)]
     assert "install-oh-my-zsh" in host_help, host_help
@@ -185,7 +199,7 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
     for flag in host_change_flags:
         assert flag not in install_help, (flag, install_help)
     verify_help = help_output[("monitoring", "verify")]
-    assert "--host" in verify_help
+    assert "--host" in verify_help and "--ssh-host" in verify_help
     assert "  --tls" not in verify_help and "  --plan" not in verify_help, verify_help
     agents_help = help_output[("monitoring", "agents", "install")]
     assert "--service" in agents_help and "--station-ip" in agents_help
@@ -244,11 +258,11 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
             ["dragontool", "monitoring", ""])
         assert {"install", "verify", "status"} <= bash_complete(["dragontool", "monitoring", "agents", ""])
         install_flags = bash_complete(["dragontool", "monitoring", "install", "--"])
-        assert {"--host", "--tls", "--plan", "--identity"} <= install_flags
+        assert {"--host", "--ssh-host", "--tls", "--plan", "--identity"} <= install_flags
         assert "--service" not in install_flags and "--station-ip" not in install_flags
         assert not set(host_change_flags) & install_flags
         verify_flags = bash_complete(["dragontool", "monitoring", "verify", "--"])
-        assert "--host" in verify_flags and "--tls" not in verify_flags and "--plan" not in verify_flags
+        assert {"--host", "--ssh-host"} <= verify_flags and "--tls" not in verify_flags and "--plan" not in verify_flags
         assert bash_complete(["dragontool", "monitoring", "install", "--tls", ""]) == {"manual", "cloudflare"}
         assert bash_complete(["dragontool", "monitoring", "install", "--tls", "c"]) == {"cloudflare"}
         # A value that looks like a command must not switch the completion context.
@@ -288,7 +302,7 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
         assert {"install", "verify", "status"} <= zsh_candidates(["dragontool", "monitoring", "agents", ""])
         assert zsh_candidates(["dragontool", "monitoring", "install", "--tls", ""]) == {"manual", "cloudflare"}
         verify_flags = zsh_candidates(["dragontool", "monitoring", "verify", "--"])
-        assert "--host" in verify_flags and "--tls" not in verify_flags and "--plan" not in verify_flags
+        assert {"--host", "--ssh-host"} <= verify_flags and "--tls" not in verify_flags and "--plan" not in verify_flags
         assert zsh_candidates(["dragontool", "monitoring", "install", "--identity", ""]) == {"NATIVE_PATH_COMPLETION"}
         checked += 10
     else:
@@ -318,7 +332,7 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
         assert {"install", "verify", "status"} <= fish_complete("dragontool monitoring agents ")
         assert fish_complete("dragontool monitoring install --tls ") == {"manual", "cloudflare"}
         verify_flags = fish_complete("dragontool monitoring verify --")
-        assert "--host" in verify_flags and "--tls" not in verify_flags and "--plan" not in verify_flags
+        assert {"--host", "--ssh-host"} <= verify_flags and "--tls" not in verify_flags and "--plan" not in verify_flags
         assert fish_complete("dragontool monitoring install --tls c") == {"cloudflare"}
         assert not fish_complete("dragontool monitoring install --host ")
         assert not fish_complete("dragontool monitoring install --ssh-op-path ")
@@ -333,19 +347,20 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
     # Every supported remote workflow reaches the transport and fails safely
     # under fake SSH; this is dispatch coverage, not a successful VM deployment.
     for command in ("install", "verify", "status"):
-        marker.unlink(missing_ok=True)
-        result = subprocess.run([str(binary), "monitoring", command, "--host", "example.com"],
-                                env=env, input="", capture_output=True, text=True, timeout=15)
-        assert marker.exists(), (command, "The supported workflow did not invoke SSH")
-        assert result.returncode == 1, (command, result.stdout, result.stderr)
-        phase = "status" if command == "status" else "detect"
-        assert f"Failed at {phase};" in result.stdout, result.stdout
-        if command != "status":
-            assert "0 steps completed" in result.stdout, result.stdout
-        assert "Component:" in result.stdout, result.stdout
-        assert "REDACTION-SENTINEL" not in result.stdout + result.stderr
-        assert not provider_marker.exists(), "Failed SSH invoked a secret/network provider"
-        checked += 1
+        for connection in (["--host", "example.com"], ["--ssh-host", "monitoring"]):
+            marker.unlink(missing_ok=True)
+            result = subprocess.run([str(binary), "monitoring", command, *connection],
+                                    env=env, input="", capture_output=True, text=True, timeout=15)
+            assert marker.exists(), (command, connection, "The supported workflow did not invoke SSH")
+            assert result.returncode == 1, (command, result.stdout, result.stderr)
+            phase = "status" if command == "status" else "detect"
+            assert f"Failed at {phase};" in result.stdout, result.stdout
+            if command != "status":
+                assert "0 steps completed" in result.stdout, result.stdout
+            assert "Component:" in result.stdout, result.stdout
+            assert "REDACTION-SENTINEL" not in result.stdout + result.stderr
+            assert not provider_marker.exists(), "Failed SSH invoked a secret/network provider"
+            checked += 1
 
     for connection in (["--ssh-host", "monitoring"],
                        ["--host", "example.com", "--user", "root"]):

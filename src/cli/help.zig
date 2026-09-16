@@ -24,7 +24,7 @@ fn writeFlag(w: *std.Io.Writer, flag: spec.FlagSpec) !void {
 
 fn isRequiredConnection(flag: spec.FlagSpec, command: spec.Command) bool {
     return std.mem.eql(u8, flag.name, "--host") or
-        (command == .install_oh_my_zsh and std.mem.eql(u8, flag.name, "--ssh-host"));
+        (spec.flagAllowed(spec.flag("--ssh-host").?, command) and std.mem.eql(u8, flag.name, "--ssh-host"));
 }
 
 /// Help and completions consume the same metadata as the strict parser.
@@ -37,7 +37,7 @@ pub fn render(a: std.mem.Allocator, node: spec.Node) ![]const u8 {
     try w.print("{s}\n\nUsage:\n  ", .{item.description});
     try writePath(w, node);
     if (item.command) |command| {
-        try w.writeAll(if (command == .install_oh_my_zsh) " (--ssh-host ALIAS | --host HOST) [options]\n" else " --host HOST [options]\n");
+        try w.writeAll(if (spec.flagAllowed(spec.flag("--ssh-host").?, command)) " (--ssh-host ALIAS | --host HOST) [options]\n" else " --host HOST [options]\n");
     } else {
         var has_children = false;
         for (spec.commands) |child| {
@@ -55,8 +55,8 @@ pub fn render(a: std.mem.Allocator, node: spec.Node) ![]const u8 {
     }
 
     if (item.command) |command| {
-        try w.writeAll(if (command == .install_oh_my_zsh) "\nConnection (choose one):\n" else "\nRequired:\n");
-        if (command == .install_oh_my_zsh) try writeFlag(w, spec.flag("--ssh-host").?);
+        try w.writeAll(if (spec.flagAllowed(spec.flag("--ssh-host").?, command)) "\nConnection (choose one):\n" else "\nRequired:\n");
+        if (spec.flagAllowed(spec.flag("--ssh-host").?, command)) try writeFlag(w, spec.flag("--ssh-host").?);
         try writeFlag(w, spec.flag("--host").?);
         // Group names and option availability are defined once in spec.zig.
         for (spec.flags, 0..) |flag, i| {
@@ -71,7 +71,7 @@ pub fn render(a: std.mem.Allocator, node: spec.Node) ![]const u8 {
                 if (spec.flagAllowed(grouped, command) and !isRequiredConnection(grouped, command) and !std.mem.eql(u8, grouped.name, "--help") and std.mem.eql(u8, grouped.group, flag.group)) try writeFlag(w, grouped);
             }
         }
-        if (command == .install_oh_my_zsh) {
+        if (spec.flagAllowed(spec.flag("--ssh-host").?, command)) {
             try w.writeAll("\nAlias mode: OpenSSH resolves HostName, User, Port, IdentityAgent, IdentityFile\nand ProxyJump through normal SSH configuration. Do not combine --ssh-host\nwith direct connection options. Direct mode defaults: user root, port 22,\nenvironment agent/default identities. Strict host-key checking is always enabled.\n");
         } else try w.writeAll("\nSSH defaults: user root, port 22, environment agent/default identities.\nStrict host-key checking is always enabled. Explicit authentication modes are exclusive.\n");
     }
@@ -128,7 +128,7 @@ pub fn render(a: std.mem.Allocator, node: spec.Node) ![]const u8 {
         return out.toOwnedSlice();
     }
     if (node == .root) try w.writeAll("\nHost utility: host install-oh-my-zsh installs only missing shell setup.\n");
-    try w.print("\nImplemented: VictoriaMetrics, VictoriaLogs and VictoriaTraces.\nVictoriaMetrics: loopback:8428; retention {s}; reserve {d}%.\nVictoriaLogs: loopback:9428; disk-bound retention; logical limit {s}; native partition budget {d}% of filesystem capacity.\nVictoriaTraces: loopback:{d}; disk-bound retention; logical limit {s}; native partition budget {d}% of filesystem capacity.\nLogs/traces preserve the newest two partitions. Cleanup is periodic.\nEach native partition budget excludes other writers; adequate headroom is required.\nReruns inspect actual state and recover pending activation. Healthy unchanged services are not restarted.\n", .{ policy.metrics.retention, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent, vt.port, policy.traces.retention, policy.traces.cleanup_usage_percent });
+    try w.print("\nImplemented: VictoriaMetrics, VictoriaLogs, VictoriaTraces and Grafana.\nVictoriaMetrics: loopback:8428; retention {s}; reserve {d}%.\nVictoriaLogs: loopback:9428; disk-bound retention; logical limit {s}; native partition budget {d}% of filesystem capacity.\nVictoriaTraces: loopback:{d}; disk-bound retention; logical limit {s}; native partition budget {d}% of filesystem capacity.\nGrafana: loopback:3000; local authentication enabled; Metrics and Traces provisioned.\nAccess through SSH forwarding only; Logs UI and dashboards remain unavailable.\nLogs/traces preserve the newest two partitions. Cleanup is periodic.\nEach native partition budget excludes other writers; adequate headroom is required.\nReruns inspect actual state and recover pending activation. Healthy unchanged services are not restarted.\n", .{ policy.metrics.retention, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent, vt.port, policy.traces.retention, policy.traces.cleanup_usage_percent });
     try w.writeAll(
         \\Agents, firewall, TLS, Telegram and the other station components are unavailable.
         \\Unavailable options are validated, then rejected before SSH, including with --plan.
@@ -143,7 +143,7 @@ test "hierarchical help lists only the current command children" {
     defer a.free(root);
     try std.testing.expect(std.mem.indexOf(u8, root, "  monitoring\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, root, "  completion\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, root, "VictoriaMetrics, VictoriaLogs and VictoriaTraces") != null);
+    try std.testing.expect(std.mem.indexOf(u8, root, "VictoriaMetrics, VictoriaLogs, VictoriaTraces and Grafana") != null);
     const agents = try render(a, .agents);
     defer a.free(agents);
     try std.testing.expect(std.mem.indexOf(u8, agents, "dragontool monitoring agents <command>") != null);
@@ -155,7 +155,7 @@ test "workflow help has contextual options and explicit availability" {
     const a = std.testing.allocator;
     const install = try render(a, .install);
     defer a.free(install);
-    try std.testing.expect(std.mem.indexOf(u8, install, "dragontool monitoring install --host HOST") != null);
+    try std.testing.expect(std.mem.indexOf(u8, install, "dragontool monitoring install (--ssh-host ALIAS | --host HOST)") != null);
     try std.testing.expect(std.mem.indexOf(u8, install, "--tls") != null);
     try std.testing.expect(std.mem.indexOf(u8, install, "[unavailable: rejected before SSH]") != null);
     const verify = try render(a, .verify);

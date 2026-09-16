@@ -2,79 +2,144 @@ DragonTools is an opinionated Zig tool for minimalistic architecture enthusiasts
 
 # DragonTools · v0.1 foundation
 
-The current milestone installs **VictoriaMetrics, VictoriaLogs, and VictoriaTraces**.
-Each has a dedicated Unix user, a checksum-verified versioned executable, a hardened systemd
-service, and a loopback-only listener. VictoriaMetrics keeps 90-day metrics with a
-disk reserve; VictoriaLogs and VictoriaTraces keep disk-bound history with native
-cleanup. Installation verifies all three components and preserves healthy,
-unchanged processes on reruns. This is not a complete monitoring station: agents, alert evaluation,
-dashboards, remote application ingestion, and frontend telemetry remain unavailable.
+The current milestone installs **VictoriaMetrics, VictoriaLogs, VictoriaTraces, and
+Grafana OSS**. Each has a dedicated Unix account, pinned versioned artifacts,
+a hardened systemd service, and a loopback-only listener. Grafana provisions Metrics
+and Traces datasources and provides a visual UI through SSH forwarding.
+VictoriaMetrics keeps 90-day metrics with a disk reserve; VictoriaLogs and
+VictoriaTraces keep disk-bound history with native cleanup. Healthy unchanged
+processes remain running on reruns. Agents, alerts, dashboards, the Grafana Logs
+datasource, and remote application ingestion remain unavailable.
 
 A separate `host install-oh-my-zsh` convenience command installs missing shell
 tooling for an existing user. It does not change the monitoring stack.
 
-## Quick Start: deploy metrics, logs, and traces now
+## Quick Start: deploy the monitoring station
 
 Controller: Zig **0.16.0**, OpenSSH, macOS or Linux, amd64 or arm64.
 Target: **Ubuntu 24.04 LTS or 26.04 LTS**, systemd, amd64 or arm64.
-The target needs `curl`, CA certificates, `tar`, GNU coreutils, `util-linux`,
-`iproute2`, `passwd`, and `grep` (normally present on Ubuntu server images).
-The monitoring installer checks prerequisites; it does not install OS packages.
+The target needs `curl`, CA certificates, `tar`, GNU coreutils, `util-linux`
+(including `runuser`), `iproute2`, `passwd`, `grep`, and Python 3 with its standard
+`sqlite3` module. The installer checks prerequisites; it does not install OS packages.
 Use root or an account with noninteractive `sudo -n` access.
+
+Configure the replaceable example alias `monitoring` in your own `~/.ssh/config`:
+
+```sshconfig
+Host monitoring
+    HostName monitoring.example.com
+    User root
+```
+
+Enroll the server's verified SSH host key first; compare its fingerprint through a
+trusted provider console, not unverified `ssh-keyscan`. Use the same alias and
+configured authentication for install, verification, rerun, and the tunnel:
 
 ```bash
 zig build -Doptimize=ReleaseSafe
 zig build test
 
-MONITOR_HOST="monitor.example.com"
-# Enroll the server's verified host key in ~/.ssh/known_hosts first.
-# Compare its fingerprint through a trusted provider console, not unverified ssh-keyscan.
-./zig-out/bin/dragontool monitoring install --host "$MONITOR_HOST" --plan
-./zig-out/bin/dragontool monitoring install \
-  --host "$MONITOR_HOST" --user root --ssh-sock "$SSH_AUTH_SOCK"
-./zig-out/bin/dragontool monitoring verify \
-  --host "$MONITOR_HOST" --user root --ssh-sock "$SSH_AUTH_SOCK"
-./zig-out/bin/dragontool monitoring status \
-  --host "$MONITOR_HOST" --user root --ssh-sock "$SSH_AUTH_SOCK"
+./zig-out/bin/dragontool monitoring install --ssh-host monitoring --plan
+./zig-out/bin/dragontool monitoring install --ssh-host monitoring
+./zig-out/bin/dragontool monitoring verify --ssh-host monitoring
+./zig-out/bin/dragontool monitoring status --ssh-host monitoring
 
 # Deliberate safe rerun: healthy unchanged services keep running.
-./zig-out/bin/dragontool monitoring install \
-  --host "$MONITOR_HOST" --user root --ssh-sock "$SSH_AUTH_SOCK"
+./zig-out/bin/dragontool monitoring install --ssh-host monitoring
+
+# Keep this SSH session open while using Grafana.
+ssh -L 127.0.0.1:3000:127.0.0.1:3000 monitoring
 ```
 
-Expected: VictoriaMetrics `v1.151.0` runs at `127.0.0.1:8428` and VictoriaLogs
-`v1.52.0` runs at `127.0.0.1:9428`; VictoriaTraces `v0.11.0` runs at
-`127.0.0.1:10428` **on the server**.
-Output reports the effective metrics reserve, logs/traces retention policy, and
-unavailable integrations. An unchanged rerun reports:
+Open **http://127.0.0.1:3000** on your laptop. The tunnel explicitly binds the
+laptop listener to loopback too. Grafana is not public. Do not add
+port 3000 to the Hetzner firewall; no Cloudflare change is needed. This is temporary
+pre-TLS access. A later slice will place `monitoring.baptizeddragon.com` in front
+of Grafana over HTTPS; it is not configured now. Intended public inbound remains
+**TCP 22 from the administrator IP only**; DragonTools changes no firewall rule
+and adds no 80/443/3000 rule.
+
+On a fresh Grafana SQLite database, sign in using Grafana's standard initial
+`admin` / `admin` credentials and **change the password immediately at the first
+login prompt**. DragonTools does not place an administrator password in generated
+configuration, print credentials in operation output, or reset existing accounts
+on reruns. Authentication stays enabled, anonymous access and auth proxy are
+disabled, and user signup is disabled. The bootstrap password is publicly known:
+complete the first login promptly on a trusted host; target-local users can also
+reach loopback. Keep the new password in your password manager. The CLI's checks
+do not need this password after it changes. [Upstream first-login flow](https://grafana.com/docs/grafana/latest/setup-grafana/sign-in-to-grafana/).
+
+In Grafana, **Metrics** is the default Prometheus datasource at
+`http://127.0.0.1:8428`. **Traces** uses the built-in Jaeger datasource at
+`http://127.0.0.1:10428/select/jaeger`. Both are provisioned automatically and are
+not editable in the UI. Use each datasource's **Save & test** and Explore through
+the tunnel. Logs UI integration requires the separate official VictoriaLogs
+plugin and is deliberately deferred; the installed VictoriaLogs backend remains
+usable through its private API. No third-party plugin or default dashboard is
+installed. With no application ingestion, Traces can legitimately contain no
+services or traces yet. [VictoriaTraces integration](https://docs.victoriametrics.com/victoriatraces/querying/grafana/),
+[VictoriaLogs plugin requirement](https://docs.victoriametrics.com/victorialogs/integrations/grafana/).
+
+Expected listeners **on the server**:
+
+| Component | Pinned release | Listener |
+| --- | --- | --- |
+| VictoriaMetrics | `v1.151.0` | `127.0.0.1:8428` |
+| VictoriaLogs | `v1.52.0` | `127.0.0.1:9428` |
+| VictoriaTraces | `v0.11.0` | `127.0.0.1:10428` |
+| Grafana OSS | `13.2.2` | `127.0.0.1:3000` |
+
+Grafana archive SHA-256 pins match the official OSS `13.2.2` download page;
+executable and full-tree catalog digests come from those verified archives.
+See [the Grafana design and exact pins](design.md#grafana-installation-provisioning-and-verification).
+Allow space for the roughly 0.45 GB archive plus the roughly 1.3 GB extracted tree
+(and the prior tree during repair). Full-tree integrity is read on every run, so an
+unchanged install can still take time while leaving files and services unchanged.
+
+An unchanged rerun reports:
 
 ```text
 No changes required.
 ```
 
-`verify` is read-only and fails if any component fails its checks. It checks
-managed units, active executable hashes, hardening, local listeners, HTTP health,
-stored VictoriaMetrics self-scraped metrics, and backend-specific writable storage
-metrics: `vl_storage_is_read_only == 0` and `vt_storage_is_read_only == 0` for their
-managed data paths. No synthetic application logs or traces are injected. It does
-not claim that application telemetry has arrived. `status` reports all three
-service states; use `verify` for health.
+`verify` is read-only and fails if any component fails its checks. Storage backend
+checks include managed units, running/disk executable identity, hardening, private
+listeners, HTTP health, VictoriaMetrics self-scraped metrics, and logs/traces writable
+storage metrics. Grafana checks service state, loopback listener ownership,
+application identity, pinned installation, deterministic configuration, and
+non-secret provisioned datasource records through a read-only SQLite connection.
+It also queries Metrics and Jaeger endpoints as the Grafana service account.
+These checks establish provisioning and backend reachability, **not an authenticated
+request through Grafana's datasource proxy or query engine**. Save & test/Explore
+in the authenticated UI remains a disposable-host integration gate. No synthetic
+logs/traces are injected and application telemetry arrival is not claimed.
+`status` reports all four service states; use `verify` for health.
 
-Security: no public service port is opened. Raw VictoriaMetrics, VictoriaLogs,
-and VictoriaTraces APIs have no configured authentication and must remain
-loopback-only. This slice has no remote agent
-ingestion, Grafana, TLS, firewall management, alerts, or maintenance timer.
-Local users on the target can reach loopback. Install does not claim those missing
-protections or features are present. Use a provider firewall as an outer layer.
+Raw storage APIs have no configured authentication and must remain loopback-only.
+Local users on the target can reach them. There is no remote ingestion, TLS,
+firewall management, alert runtime, or maintenance timer. Use a provider firewall
+as an outer layer.
 
-Advanced SSH options: `--port 2222`, `--user ops`, `--identity "$HOME/.ssh/id_ed25519"`.
-Use one explicit authentication mode. `--ssh-sock` works with a normal or 1Password
-SSH agent. With no mode, OpenSSH uses the environment agent and default identities.
-Interactive identity-file passphrases are not prompted; use an agent.
-For these direct monitoring commands, SSH config aliases, ProxyCommand and jump hosts are unsupported:
-DragonTools passes `-F /dev/null`, strict host-key verification, and no forwarding.
-Socket and identity paths must be absolute and contain no whitespace, quotes,
-backslash, or OpenSSH `%` expansions.
+`--ssh-host` delegates aliases, user, port, identities, agent paths, and jump hosts
+to native OpenSSH configuration while enforcing strict host-key verification and
+noninteractive authentication. It rejects direct connection overrides. Put those
+settings in SSH configuration instead. This trusts your local configuration,
+including proxy commands. The wizard currently assembles the direct form below.
+
+Direct SSH remains supported:
+
+```bash
+./zig-out/bin/dragontool monitoring install \
+  --host monitoring.example.com --user root --ssh-sock "$SSH_AUTH_SOCK"
+```
+
+Direct options include `--port 2222`, `--user ops`, and
+`--identity "$HOME/.ssh/id_ed25519"`. Choose one explicit authentication mode.
+`--ssh-sock` accepts a normal or 1Password agent; without a mode OpenSSH uses the
+environment agent and default identities. Interactive passphrases are not prompted.
+Direct mode passes `-F /dev/null`, so inherited aliases/proxy settings are disabled.
+Direct socket/identity paths must be absolute and contain no whitespace, quotes,
+backslash, or OpenSSH `%` expansions. Neither connection mode changes firewall rules.
 
 ## Install Oh My Zsh for a host user
 
@@ -218,6 +283,7 @@ restarting healthy services. There is no controller-side state database.
 | Account | Correct account is a no-op; an incompatible account fails explicitly |
 | Directory | Matching type, owner, group, and mode are a no-op; only supported metadata repairs are made |
 | Binary | Valid pinned binary is reused; a missing/changed binary is verified and installed atomically |
+| Grafana config/provisioning | Deterministic managed files are reused unchanged; content changes record only Grafana restart intent |
 | Unit | Identical content is reused; changed content is replaced atomically; metadata-only repair does not restart |
 | Service | Active/persistently enabled and unchanged is a no-op; inactive starts; disabled or runtime-only enablement is repaired; only the affected dirty component restarts |
 | Verification | Always read-only and safe to repeat |
@@ -253,12 +319,12 @@ dragontool
 Choose installation, agent setup, verification, status, firewall guidance, the
 information-only architecture overview, or command-line help. The overview and
 command preview are local: they do not connect to a host or resolve credentials.
-The current installer provides **VictoriaMetrics, VictoriaLogs, and VictoriaTraces**. Roadmap inputs
+The current installer provides **VictoriaMetrics, VictoriaLogs, VictoriaTraces, and Grafana**. Roadmap inputs
 such as domain/TLS, IP allowlists, Telegram, agents, and firewall configuration
 remain explicitly unavailable and fail before SSH, including in plan mode.
 Station setup asks for host, SSH user/port, and authentication, then offers optional
 roadmap settings with a default of no. Accepting that default produces a usable
-three-component install command. Metrics retention stays fixed at 90 days with a 20%
+four-component install command. Metrics retention stays fixed at 90 days with a 20%
 capacity reserve. Logs and traces use a logical 100-year limit and native 75%
 partition budgets, as detailed below. Agent guidance accepts a numeric station IP (the current
 `--station-ip` contract) and repeats validated `.service` names.
@@ -329,13 +395,12 @@ their implementation. `dragontool completion --help` shows installation guidance
 
 ## Inspect backend health from your workstation
 
-An explicit temporary SSH tunnel allows inspecting the three installed components:
+An explicit temporary SSH tunnel allows inspecting the three storage backends:
 
 ```bash
-MONITOR_HOST="monitor.example.com"
 ssh -o StrictHostKeyChecking=yes -N \
-  -L 8428:127.0.0.1:8428 -L 9428:127.0.0.1:9428 \
-  -L 10428:127.0.0.1:10428 "root@$MONITOR_HOST"
+  -L 127.0.0.1:8428:127.0.0.1:8428 -L 127.0.0.1:9428:127.0.0.1:9428 \
+  -L 127.0.0.1:10428:127.0.0.1:10428 monitoring
 # In another terminal:
 curl --fail http://127.0.0.1:8428/health
 curl --fail 'http://127.0.0.1:8428/api/v1/query?query=vm_app_version'
@@ -349,7 +414,8 @@ Expected: all three HTTP health checks succeed, the metrics query returns stored
 and both storage read-only metrics are `0`. The tunnel exposes raw APIs on your
 workstation's loopback; close it when finished. No application logs or traces are
 ingested by this installation, and verification never injects synthetic telemetry.
-Grafana will become the normal human-facing UI in a later milestone.
+Grafana is the normal human-facing UI for Metrics and Traces; use its separate
+port-3000 tunnel from Quick Start. Logs UI integration remains deferred.
 
 ## Command availability
 
@@ -358,9 +424,9 @@ Grafana will become the normal human-facing UI in a later milestone.
 | `wizard` / no arguments in a TTY | Local interactive frontend to the same commands |
 | `completion bash/zsh/fish` | Print local shell completion scripts |
 | `host install-oh-my-zsh` | Install missing shell tooling; explicit options for exact managed-config migration and login-shell changes |
-| `monitoring install` | VictoriaMetrics, VictoriaLogs, and VictoriaTraces installation |
-| `monitoring verify` | All three checked; nonzero if any fails; read-only |
-| `monitoring status` | All three service states, not an end-to-end health check |
+| `monitoring install` | VictoriaMetrics, VictoriaLogs, VictoriaTraces, and Grafana installation |
+| `monitoring verify` | All four checked; nonzero if any fails; read-only |
+| `monitoring status` | All four service states, not an end-to-end health check |
 | `monitoring agents install/verify/status` | Parsed; fails explicitly before SSH |
 | `monitoring firewall` | Parsed; fails explicitly before SSH |
 
@@ -370,7 +436,9 @@ Grafana will become the normal human-facing UI in a later milestone.
 | VictoriaLogs | Implemented; loopback only, without application-host ingestion |
 | VictoriaTraces | Implemented; loopback only, without remote application OTLP ingestion |
 | vmalert / Alertmanager | Unavailable; rules are only rendered locally |
-| Grafana / Telegram | Unavailable |
+| Grafana OSS | Implemented; loopback:3000, local authentication, Metrics/Traces datasources |
+| Grafana Logs datasource / dashboards | Unavailable |
+| Telegram | Unavailable |
 | Vector / vmagent / OTel Collector / monitoring agents | Unavailable |
 | Monitoring firewall / TLS | Unavailable |
 
@@ -415,7 +483,7 @@ and service rules are unavailable until the agent metric contract is established
 No disk alerts are deployed.
 
 For example, `dragontool monitoring install --host monitor.example.com --plan`
-prints all three implemented component installations and their retention/listener
+prints all four implemented component installations and their retention/listener
 settings, then lists unavailable components. It performs no SSH. DragonTools owns
 versions, paths, retention, binding, and hardening; no component-specific
 configuration or new CLI options are needed for normal installation.
@@ -438,12 +506,16 @@ Paths:
 - `/opt/dragontools/components/victoriatraces/v0.11.0/` and `current` symlink
 - `/var/lib/dragontools/victoriatraces/` (owned by `dt-victoriatraces`, mode 0750)
 - `/etc/systemd/system/dragontools-victoriatraces.service`
+- `/opt/dragontools/components/grafana/13.2.2/` and `current` symlink
+- `/var/lib/dragontools/grafana/` (SQLite and plugins; owned by `dt-grafana`, mode 0750)
+- `/etc/dragontools/grafana/grafana.ini` and `provisioning/datasources/dragontools.yaml`
+- `/etc/systemd/system/dragontools-grafana.service`
 
 Errors name the failed component, phase, and completed changes, stop later steps, and avoid
 printing remote stderr or argument values. A failed step may have partially changed
 the target. Fix the cause, inspect `journalctl -u dragontools-victoriametrics`
 `journalctl -u dragontools-victorialogs`, or
-`journalctl -u dragontools-victoriatraces`, then rerun. Each component retains its
+`journalctl -u dragontools-victoriatraces`, or `journalctl -u dragontools-grafana`, then rerun. Each component retains its
 own restart marker until verification succeeds. A later component failure
 does not roll back components already verified in that run. No automatic rollback
 or component upgrades are implemented. Run one install
@@ -488,7 +560,7 @@ not establish runtime or production compatibility.
 
 ## Next milestones
 
-Grafana provisioned datasources/dashboards, vmalert,
+Grafana Logs datasource and dashboards, authenticated datasource integration checks, vmalert,
 Alertmanager/Telegram; Vector for journald logs and host metrics, vmagent for
 application `/metrics`, and OTel Collector for application OTLP;
 bounded journald; restricted ingestion; safe monitoring firewall; DNS-01 TLS;

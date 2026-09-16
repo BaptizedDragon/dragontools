@@ -12,12 +12,14 @@ pub const Component = enum {
     victoriametrics,
     victorialogs,
     victoriatraces,
+    grafana,
 
     pub fn name(self: Component) []const u8 {
         return switch (self) {
             .victoriametrics => "VictoriaMetrics",
             .victorialogs => "VictoriaLogs",
             .victoriatraces => "VictoriaTraces",
+            .grafana => "Grafana",
         };
     }
 };
@@ -48,7 +50,7 @@ pub const Report = struct {
     }
 };
 pub const capacity_command = "stat -f -c '%b %S' /var/lib/dragontools/victoriametrics";
-// These helpers instantiate only the three concrete managed component paths.
+// These helpers instantiate only the concrete managed component paths.
 // Existing directories receive only the metadata change they actually need.
 const parent_directories =
     \\set -eu
@@ -123,6 +125,7 @@ fn activation(comptime component: []const u8) []const u8 {
 pub const activate = activation("victoriametrics");
 pub const activate_victorialogs = activation("victorialogs");
 pub const activate_victoriatraces = activation("victoriatraces");
+pub const activate_grafana = activation("grafana");
 pub fn install(a: std.mem.Allocator, r: remote.Remote, report: *Report) !void {
     report.component = null;
     const machine = try host.parse(try report.call(r, .detect, host.detect_command));
@@ -154,4 +157,7 @@ pub fn install(a: std.mem.Allocator, r: remote.Remote, report: *Report) !void {
     _ = try report.call(r, .activate, activate_victoriatraces);
     try @import("victoriatraces_verify.zig").health(a, r, report, machine.arch);
     _ = try report.call(r, .finalize, "rm -f /var/lib/dragontools/victoriatraces-restart-required");
+
+    report.component = .grafana;
+    try @import("grafana_install.zig").install(a, r, report, machine.arch);
 }

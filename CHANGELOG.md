@@ -2,6 +2,23 @@
 
 ## 0.1.0-dev — unreleased
 
+- Add Grafana OSS 13.2.2 as the fourth independently converged station component,
+  with reviewed Linux amd64/arm64 release integrity, dedicated `dt-grafana`, persistent
+  SQLite state, versioned release files, hardened systemd and loopback:3000 only.
+- Provision immutable Metrics (Prometheus) and Traces (Jaeger `/select/jaeger`)
+  datasources. Keep local authentication enabled and document the upstream first-login
+  password change. No administrator credential is embedded or retained by DragonTools.
+  Defer the official VictoriaLogs plugin and dashboards explicitly.
+- Verify Grafana identity, configuration, non-secret provisioned datasource database
+  records and backend queries as the service UID without administrator credentials.
+  Authenticated Grafana proxy/query-engine checks remain a documented real-host gate.
+- Preserve per-component restart intent for Grafana binary/unit/config/provisioning
+  changes and failures; unchanged installs reuse resources without downloads, rewrites
+  or service restarts. VM/VL/VT keep their existing independent behavior.
+- Enable native `--ssh-host` for monitoring install/verify/status while retaining direct
+  SSH and strict host-key checks. Update plans/help/wizard/status, alias tests, deployment
+  and SSH-tunnel documentation; no firewall, TLS or public service port is added.
+
 - Advance the generated `.zshrc` to v2 with a dynamic remote hostname, username and
   directory, plus Zsh's root `#` / ordinary-user `%` prompt ending. Keep exact v0
   and v1 migrations behind `--update-managed-zshrc` to honor default preservation;

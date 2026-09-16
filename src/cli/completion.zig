@@ -257,7 +257,7 @@ test "shell completion encodes the nested tree and contextual flags" {
         try std.testing.expect(std.mem.indexOf(u8, output, "'install:--set-default-shell'") == null);
         try std.testing.expect(std.mem.indexOf(u8, output, "'install:--update-managed-zshrc'") == null);
         try std.testing.expect(std.mem.indexOf(u8, output, "'install_oh_my_zsh:--tls'") == null);
-        try std.testing.expect(std.mem.indexOf(u8, output, "'install:--ssh-host'") == null);
+        try std.testing.expect(std.mem.indexOf(u8, output, "'install:--ssh-host'") != null);
         try std.testing.expect(std.mem.indexOf(u8, output, "'monitoring:agents'") != null);
         try std.testing.expect(std.mem.indexOf(u8, output, "'agents:install'") != null);
         try std.testing.expect(std.mem.indexOf(u8, output, "'install:--tls'") != null);

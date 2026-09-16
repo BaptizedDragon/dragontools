@@ -256,6 +256,24 @@ test "host utility rejects conflicting connection forms and unsafe arguments" {
     }
     try std.testing.expectError(error.InvalidUser, parse(a, &.{ "host", "install-oh-my-zsh", "--ssh-host", "monitoring", "--target-user", "root;id" }));
     try std.testing.expectError(error.FlagNotAllowed, parse(a, &.{ "host", "install-oh-my-zsh", "--ssh-host", "monitoring", "--tls", "manual" }));
-    try std.testing.expectError(error.FlagNotAllowed, parse(a, &.{ "monitoring", "install", "--ssh-host", "monitoring" }));
     try std.testing.expectError(error.FlagNotAllowed, parse(a, &.{ "monitoring", "install", "--host", "monitoring", "--target-user", "vasyl" }));
+}
+
+test "implemented monitoring accepts native SSH aliases without direct overrides" {
+    const a = std.testing.allocator;
+    for ([_][]const u8{ "install", "verify", "status" }) |command| {
+        var options = try parse(a, &.{ "monitoring", command, "--ssh-host", "monitoring" });
+        defer options.deinit(a);
+        try std.testing.expectEqualStrings("monitoring", options.ssh_host.?);
+        try std.testing.expect(options.host.len == 0);
+        try std.testing.expect(!options.unsupported());
+        try std.testing.expectError(error.ConflictingHosts, parse(a, &.{ "monitoring", command, "--ssh-host", "monitoring", "--host", "example.com" }));
+        for ([_][]const u8{ "--user", "--port", "--ssh-sock", "--identity", "--ssh-op-path" }, [_][]const u8{ "root", "22", "/tmp/sock", "/tmp/key", "op://vault/key/private" }) |flag, value| {
+            try std.testing.expectError(error.ConflictingSshMode, parse(a, &.{ "monitoring", command, "--ssh-host", "monitoring", flag, value }));
+        }
+        try std.testing.expectError(error.InvalidSshHost, parse(a, &.{ "monitoring", command, "--ssh-host", "host;id" }));
+    }
+    var plan = try parse(a, &.{ "monitoring", "install", "--ssh-host", "monitoring", "--plan" });
+    defer plan.deinit(a);
+    try std.testing.expect(plan.plan);
 }

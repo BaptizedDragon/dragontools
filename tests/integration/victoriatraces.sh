@@ -116,7 +116,7 @@ trap 'printf "%s\n" "FAIL: disposable-VM integration stopped; inspect the manage
 install
 verify
 assert_noop
-printf '%s\n' 'PASS: all three components are healthy; second install kept all running processes.'
+printf '%s\n' 'PASS: three storage backends are healthy; second install kept their running processes.'
 
 # A harmless managed-unit comment simulates drift without altering service flags.
 # Install must repair the unit and restart only VictoriaTraces, then become a no-op.

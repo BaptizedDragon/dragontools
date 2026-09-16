@@ -66,6 +66,8 @@ pub fn verify(a: std.mem.Allocator, r: remote.Remote, report: *install.Report) !
     try @import("victorialogs_verify.zig").health(a, r, report, machine.arch);
     report.component = .victoriatraces;
     try @import("victoriatraces_verify.zig").health(a, r, report, machine.arch);
+    report.component = .grafana;
+    try @import("grafana_verify.zig").health(a, r, report, machine.arch);
 }
 
 test "health fails on malformed, error and empty query responses" {

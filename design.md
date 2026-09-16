@@ -1,10 +1,10 @@
 # Design decisions and staged delivery
 
-## Current milestone: metrics, logs, and traces implemented
+## Current milestone: metrics, logs, traces, and Grafana implemented
 
-The monitoring foundation delivers three concrete slices: VictoriaMetrics, VictoriaLogs, and
-VictoriaTraces. Unfinished integrations fail before connecting. Exit 0 from install
-means all three passed verification; it never means the full requested station exists.
+The monitoring foundation delivers four concrete components: VictoriaMetrics,
+VictoriaLogs, VictoriaTraces, and Grafana OSS. Unfinished integrations fail before connecting. Exit 0 from install
+means all four passed their documented verification; it never means the full requested station exists.
 `status` is a read-only service-state summary; use `verify` to test health.
 Help and `--plan` require no SSH. No generic primitives are public commands.
 
@@ -30,7 +30,7 @@ does not introduce a generic public CLI framework or a resource DSL.
 
 The wizard offers monitoring install, agents, verify, status, firewall guidance,
 architecture information, and command-line help. Station setup defaults to the
-implemented VictoriaMetrics, VictoriaLogs, and VictoriaTraces slices; roadmap settings require explicit opt-in and
+implemented VictoriaMetrics, VictoriaLogs, VictoriaTraces, and Grafana slices; roadmap settings require explicit opt-in and
 still fail before SSH. Agent station entry remains a numeric IP, matching
 `--station-ip`. Unsupported components and protected-file credential inputs do not
 become implemented merely because an interactive interface exists.
@@ -224,7 +224,7 @@ VictoriaMetrics continues to use its free-space reserve and 90-day retention.
 
 All disk alert states remain policy only: host rendering is unavailable until the
 Vector metric contract is verified. No alert evaluation runs on the target.
-`monitoring install --plan` describes all three installed components and lists
+`monitoring install --plan` describes all four installed components and lists
 unavailable integrations separately.
 There are no new CLI policy overrides or rule-deployment options.
 
@@ -294,7 +294,7 @@ directories, binary, and unit must retain their expected types, owners, and mode
 `vl_storage_is_read_only` must be zero; missing identity or read-only storage fails
 verification and cannot finalize the component. No synthetic log or remote
 application ingestion is required, so success does not demonstrate an application
-log pipeline. `monitoring verify` checks all three installed components; `status`
+log pipeline. `monitoring verify` checks all four installed components; `status`
 reports their service states without claiming full health or active alerts.
 
 ## VictoriaTraces installation and verification
@@ -325,6 +325,125 @@ exist once and equal zero. This proves the pinned application's reported writabl
 storage state, not application trace arrival or OTLP end-to-end behavior. No
 synthetic traces are injected. [Pinned application metric source](https://github.com/VictoriaMetrics/VictoriaTraces/blob/v0.11.0/app/vtstorage/main.go#L639-L651).
 
+## Grafana installation, provisioning and verification
+
+Grafana OSS `13.2.2` is the fourth concrete station component. Linux amd64 and
+arm64 artifacts are pinned in `src/components/grafana.zig`; runtime never resolves
+`latest` or trusts freshly downloaded checksum metadata. The reviewed OSS release
+build is `34846740809`. Both downloaded archives were locally hashed and matched
+the SHA-256 values published on the official versioned OSS download page:
+
+| Linux architecture | Committed archive SHA-256 |
+| --- | --- |
+| amd64 | `9662c838a09824fdb072e5f6fbdd45b62cf541b20f3d609ea5011e6e5f544c8f` |
+| arm64 | `7268f9a576f919f14e6263b344a85b6ac8d768fbda247910c43ce4e12c747a72` |
+
+[Official Grafana OSS 13.2.2 downloads](https://grafana.com/grafana/download/13.2.2?edition=oss).
+The immutable HTTPS artifacts use
+`https://dl.grafana.com/grafana/release/13.2.2/grafana_13.2.2_34846740809_linux_<arch>.tar.gz`.
+Each reviewed archive contains 13,358 regular files and 1,689 directories, with no
+symlinks, hardlinks, special entries, traversal or duplicate paths. Extracted binary
+hashes and a canonical path/type/mode/content-hash catalog digest are computed from
+these verified archives and committed alongside the archive pins. These trust the
+upstream publishing account; they are not independent publisher signatures.
+
+Installation includes the server, built-in plugins and static UI assets because a
+server-only binary pin cannot establish full application integrity. Every run
+verifies the catalog against its source pin, then verifies every live file and
+expected path. Correct content needs no download. Unknown extra paths, links and
+foreign trees cause refusal; only a recognized release tree is repairable. Metadata
+is normalized to root:root, 0755 for directories/executables and 0644 for other files.
+Private staging precedes Linux `renameat2` atomic directory publication/exchange and
+atomic `current` replacement. No downloaded code executes during archive review.
+See `src/components/grafana.zig` and its embedded Python standard-library helper for
+the exact integrity and publication boundary; these local archive audits are not
+Linux service-runtime validation. The archives are about 457.5 MB (amd64) and
+427.2 MB (arm64); the amd64 extracted tree is about 1.36 GB. Stage space must fit
+the archive and new tree, plus the old tree during repair. An unsupported atomic
+exchange fails safely instead of falling back to a non-atomic replacement.
+Read-only integrity verification hashes the full tree on every pass, so unchanged
+runs can take time even without downloads, writes or restarts.
+
+Root owns the versioned `/opt/dragontools/components/grafana/13.2.2/` release tree
+and its `current` selection. `dt-grafana` owns only its persistent data directory,
+`/var/lib/dragontools/grafana` (0750), holding SQLite and plugin state across releases.
+No PostgreSQL or data under the versioned release is introduced.
+`/etc/dragontools/grafana/grafana.ini` and datasource provisioning are deterministic,
+root-owned and read-only to the service. Publication uses private adjacent staging,
+atomic replacement, safe path checks and the managed-file ownership boundary;
+unmanaged files and unexpected symlinks are refused.
+
+The concrete configuration pins `http_addr = 127.0.0.1`, `http_port = 3000`, the data
+and provisioning paths, SQLite, and console logging for journald. Local authentication
+remains enabled; anonymous access, auth proxy and signup are explicitly disabled.
+No third-party plugin is installed automatically and no dashboard is provisioned.
+The concrete unit uses `dt-grafana`, empty capabilities, no new privileges, private
+tmp/devices, protected home/system/kernel/control groups, restricted SUID/SGID and
+personality, and a sole persistent write path under the Grafana data directory.
+Real systemd/runtime compatibility remains a disposable-host integration gate.
+
+Authentication uses upstream's normal first-login administrator flow. A fresh SQLite
+database has the standard `admin` / `admin` credentials; the operator must change the
+password immediately at the first login prompt through SSH forwarding. DragonTools
+neither embeds nor logs a password and never resets an existing account. The loopback
+boundary still permits local users to reach bootstrap authentication; the target must
+be trusted and initialized promptly. [Grafana first login](https://grafana.com/docs/grafana/latest/setup-grafana/sign-in-to-grafana/),
+[pinned defaults](https://github.com/grafana/grafana/blob/v13.2.2/conf/defaults.ini).
+
+Provisioned datasource definitions are fixed, deterministic and not UI-editable:
+
+| Name | Built-in type | Local URL | Default |
+| --- | --- | --- | --- |
+| Metrics | Prometheus | `http://127.0.0.1:8428` | Yes |
+| Traces | Jaeger | `http://127.0.0.1:10428/select/jaeger` | No |
+
+The Jaeger prefix follows both the documented Grafana integration and the pinned
+VictoriaTraces handler. [VictoriaTraces Grafana integration](https://docs.victoriametrics.com/victoriatraces/querying/grafana/),
+[pinned handler](https://github.com/VictoriaMetrics/VictoriaTraces/blob/v0.11.0/app/vtselect/main.go).
+The recommended VictoriaLogs integration requires its dedicated official plugin;
+a reviewed deterministic plugin installation is deferred. No Logs datasource or
+Grafana-to-VictoriaLogs edge is claimed. [VictoriaLogs Grafana integration](https://docs.victoriametrics.com/victorialogs/integrations/grafana/).
+
+Grafana's verifier remains read-only and needs no administrator credential. It
+checks active/persistently-enabled systemd state, loaded and managed unit identity,
+running/disk executable identity, full installation integrity, effective hardening,
+managed path metadata, the process-owned loopback listener, and Grafana HTTP identity.
+It refuses `GF_*` overrides in the actual process environment, including inherited
+systemd manager settings, without printing or retaining their values.
+It compares exact generated config/provisioning, then reads only the non-secret
+Metrics and Traces datasource fields from SQLite through read-only mode as
+`dt-grafana`. It issues a Metrics query and Jaeger service query as that same UID
+against the provisioned backend URLs and validates their response contracts.
+Read-only SQLite access depends on the pinned schema and explicitly disabled WAL;
+Python 3's standard SQLite module is a checked prerequisite. [Pinned datasource schema](https://github.com/grafana/grafana/blob/v13.2.2/pkg/services/sqlstore/migrations/datasource_mig.go).
+
+This establishes the provisioned records and backend reachability after password
+changes, without weakening authentication or storing credentials. It does not test an
+authenticated Grafana datasource-proxy/query-engine request. The authenticated UI's
+Save & test and Explore must still be exercised on a disposable supported host;
+local renderer/fake-remote tests do not establish that runtime boundary. Empty
+Jaeger services are valid before trace ingestion. No synthetic telemetry is injected.
+
+Grafana's binary/current link, unit, configuration, and datasource content changes
+record `/var/lib/dragontools/grafana-restart-required` before publication. Only
+Grafana restarts; a config-only change does not require daemon-reload unless unit
+state needs it independently. Verification failure retains that marker, while a
+successful install clears it. An unchanged rerun does not download, rewrite config,
+restart Grafana, or disturb VM/VL/VT. No controller database or generalized service
+framework is added.
+
+`monitoring install`, `verify` and `status` accept the existing native `--ssh-host`
+mode. It uses the alias's OpenSSH configuration and resolves the actual remote UID
+before choosing root or noninteractive sudo. Direct `--host` mode remains isolated
+from local SSH config. Aliases cannot be combined with direct user/port/authentication
+overrides. Help, completion and local plans share the metadata and never connect.
+The wizard continues to emit the supported direct command form.
+
+Immediate access is `ssh -L 127.0.0.1:3000:127.0.0.1:3000 monitoring`, then
+`http://127.0.0.1:3000` on the administrator's laptop. No firewall, Cloudflare, DNS,
+or TLS configuration changes. Public inbound remains administrator-restricted SSH
+only. A later HTTPS frontend for `monitoring.baptizeddragon.com` is not installed.
+
 ## Safe reruns across all mutating workflows
 
 The remote host is the source of observable state; there is no controller-side
@@ -340,8 +459,8 @@ content changes preserve restart intent before activation. Activation reads
 systemd's loaded unit state; `daemon-reload` happens only when needed, not merely
 because a binary changed. Inactive services start; disabled services enable;
 unchanged active/persistently enabled services keep their processes. Runtime-only
-enablement is repaired persistently. A VM, VL, or VT change
-cannot restart either unrelated healthy component.
+enablement is repaired persistently. A VM, VL, VT, or Grafana change
+cannot restart another unrelated healthy component.
 Enabling a disabled unit changes global systemd state and requires a subsequent
 reload, but must not restart the active service. A global `NeedDaemonReload` flag
 alone never marks a component for restart. Manual drift in running configuration
@@ -473,14 +592,14 @@ expression syntax against pinned releases, datasource routing, event-time mappin
 ingestion latency/window boundaries, and end-to-end alert evaluation before
 installing or claiming any pack is active.
 
-## Grafana, alert deployment and Telegram: roadmap
+## Dashboards, alert deployment and Telegram: roadmap
 
-Provision datasources for all three signal backends; dashboards: Host Overview,
-Monitoring Station, Service Health, Storage, Updates / Security. A complete station
-must verify datasource queries rather than only Grafana HTTP readiness.
+Add the reviewed VictoriaLogs plugin/datasource and dashboards: Host Overview,
+Monitoring Station, Service Health, Storage, Updates / Security. Metrics and Traces
+are provisioned now; authenticated Grafana queries remain a runtime integration gate.
 
 No generated rules are deployed or evaluated by the current installation.
-vmalert, Alertmanager, Grafana, Vector, vmagent, and OTel Collector installation
+vmalert, Alertmanager, Vector, vmagent, and OTel Collector installation
 remain explicitly unavailable, as do Telegram, agents, firewall, and TLS.
 Rendering rules does not install a complete monitoring station or enable alerts.
 

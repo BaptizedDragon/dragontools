@@ -13,8 +13,8 @@ pub const CommandSpec = struct {
 pub const commands = [_]CommandSpec{
     .{ .node = .root, .parent = null, .name = "dragontool", .description = "Opinionated monitoring and small host utilities over SSH" },
     .{ .node = .monitoring, .parent = .root, .name = "monitoring", .description = "Install, verify and inspect monitoring" },
-    .{ .node = .install, .parent = .monitoring, .name = "install", .description = "Install VictoriaMetrics, VictoriaLogs and VictoriaTraces", .command = .install },
-    .{ .node = .verify, .parent = .monitoring, .name = "verify", .description = "Verify installed VictoriaMetrics, VictoriaLogs and VictoriaTraces", .command = .verify },
+    .{ .node = .install, .parent = .monitoring, .name = "install", .description = "Install VictoriaMetrics, VictoriaLogs, VictoriaTraces and Grafana", .command = .install },
+    .{ .node = .verify, .parent = .monitoring, .name = "verify", .description = "Verify installed VictoriaMetrics, VictoriaLogs, VictoriaTraces and Grafana", .command = .verify },
     .{ .node = .status, .parent = .monitoring, .name = "status", .description = "Show monitoring service state", .command = .status },
     .{ .node = .agents, .parent = .monitoring, .name = "agents", .description = "Manage monitored hosts (not yet available)" },
     .{ .node = .agents_install, .parent = .agents, .name = "install", .description = "Connect a monitored host (not yet available)", .command = .agents_install },
@@ -45,12 +45,13 @@ const all = &[_]Command{ .install, .verify, .status, .agents_install, .agents_ve
 const monitoring = &[_]Command{ .install, .verify, .status, .agents_install, .agents_verify, .agents_status, .firewall };
 const mutations = &[_]Command{ .install, .agents_install, .firewall, .install_oh_my_zsh };
 const host = &[_]Command{.install_oh_my_zsh};
+const native_ssh = &[_]Command{ .install, .verify, .status, .install_oh_my_zsh };
 const station = &[_]Command{.install};
 const agents = &[_]Command{ .agents_install, .agents_verify };
 const network = &[_]Command{ .install, .firewall };
 pub const flags = [_]FlagSpec{
     .{ .name = "--host", .description = "Direct target host", .metavar = "HOST", .group = "Required", .commands = all },
-    .{ .name = "--ssh-host", .description = "OpenSSH host/alias; use normal SSH configuration", .metavar = "ALIAS", .group = "Connection", .commands = host },
+    .{ .name = "--ssh-host", .description = "OpenSSH host/alias; use normal SSH configuration", .metavar = "ALIAS", .group = "Connection", .commands = native_ssh },
     .{ .name = "--user", .description = "SSH user (default: root)", .metavar = "USER", .group = "Connection", .commands = all },
     .{ .name = "--port", .description = "SSH port (default: 22)", .metavar = "PORT", .group = "Connection", .commands = all },
     .{ .name = "--ssh-sock", .description = "SSH agent socket, including 1Password agent", .metavar = "PATH", .kind = .path, .group = "Connection", .commands = all },

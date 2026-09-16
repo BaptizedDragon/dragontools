@@ -16,8 +16,8 @@ DragonTools connects over SSH. Monitoring install requires administrator-level t
 Strict known-host verification is mandatory; verify fingerprints out-of-band before
 first use. The controller, its PATH/OpenSSH installation, known-hosts file, SSH agent,
 target OS, trusted distro CA store and reviewed artifact pins are trusted.
-Direct connections disable inherited local SSH config and forwarding. The separate
-host utility's `--ssh-host` mode delegates alias, authentication and proxy resolution
+Direct connections disable inherited local SSH config and forwarding. The monitoring and
+host `--ssh-host` mode delegates alias, authentication and proxy resolution
 to OpenSSH, so local SSH configuration and its configured proxy commands are also
 trusted. Strict host-key checks remain enabled in both modes. SSH private keys
 remain with the agent or OpenSSH identity file; 1Password itself is optional.
@@ -27,8 +27,20 @@ trusted infrastructure; a compromised allowlisted host can submit telemetry.
 Grafana still needs user authentication. A provider firewall is recommended outside
 the monitoring-only host rules. Raw administrative APIs must not be exposed to agent
 networks. Current VictoriaMetrics, VictoriaLogs, and VictoriaTraces bind loopback only on
-8428, 9428, and 10428, reachable by target-local users and explicitly established SSH tunnels. No firewall or TLS protection is
+8428, 9428, and 10428; authenticated Grafana binds 127.0.0.1:3000. All are reachable by target-local users and explicitly established SSH tunnels. No firewall or TLS protection is
 claimed beyond this boundary.
+
+
+Grafana's fresh local database uses its upstream initial administrator flow. Change
+the standard initial password immediately at first login through the SSH tunnel.
+DragonTools embeds no administrator password in generated files, never logs it,
+and does not reset an existing database. Anonymous access, auth proxy and user
+signup are disabled. This does not protect bootstrap credentials from a hostile
+local user; the target OS and local administrators remain trusted. No firewall
+ports, TLS endpoint, third-party plugin or remote ingestion are installed.
+Grafana verification reads only non-secret datasource fields from SQLite and
+queries local backends as its service account; it does not resolve administrator
+credentials or claim authenticated datasource-proxy validation.
 
 ## Secrets and privileges
 

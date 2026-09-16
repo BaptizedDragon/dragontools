@@ -97,3 +97,53 @@ test "host direct SSH mode preserves the actual login user without automatic sud
     try std.testing.expect(std.mem.indexOf(u8, joined, "sudo") == null);
     try std.testing.expectEqualStrings("id -un", args[args.len - 1]);
 }
+
+test "monitoring SSH alias elevates by actual remote UID and preserves strict authentication" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // The default local user field must not imply that a native alias logs in as root.
+    var ssh: Ssh = .{ .allocator = a, .io = std.testing.io, .options = .{ .ssh_host = "monitoring", .user = "root" } };
+    const payload = "literal apostrophe ' and $(not-a-command)";
+    const args = try ssh.argv(try remote.shell(a, &.{ "printf", "%s", payload }));
+    try std.testing.expectEqualStrings("monitoring", args[args.len - 2]);
+    for ([_][]const u8{ "StrictHostKeyChecking=yes", "BatchMode=yes", "ForwardAgent=no", "ClearAllForwardings=yes" }) |required| {
+        var present = false;
+        for (args) |arg| if (std.mem.eql(u8, required, arg)) {
+            present = true;
+        };
+        try std.testing.expect(present);
+    }
+    for (args) |arg| {
+        for ([_][]const u8{ "-F", "-l", "-p", "-i", "IdentityAgent=none", "IdentitiesOnly=yes" }) |excluded| {
+            try std.testing.expect(!std.mem.eql(u8, arg, excluded));
+        }
+    }
+    // Execute only the rendered remote wrapper locally. UID/sudo are fixtures;
+    // no SSH connection, privilege change, filesystem write or real sudo occurs.
+    const sudo_fixture =
+        \\sudo() {
+        \\  test "$1" = -n && test "$2" = -- || return 91
+        \\  shift 2
+        \\  printf 'sudo\n'
+        \\  "$@"
+        \\}
+        \\
+    ;
+    for ([_]u32{ 0, 1001 }) |uid| {
+        const script = try std.fmt.allocPrint(
+            a,
+            "id() {{ test \"$#\" = 1 && test \"$1\" = -u || return 91; printf '%s' '{d}'; }}\n{s}\n{s}",
+            .{ uid, sudo_fixture, args[args.len - 1] },
+        );
+        const result = try std.process.run(a, std.testing.io, .{ .argv = &.{ "/bin/sh", "-c", script } });
+        try std.testing.expectEqual(@as(u8, 0), result.term.exited);
+        try std.testing.expectEqualStrings("", result.stderr);
+        try std.testing.expectEqualStrings(if (uid == 0) payload else "sudo\n" ++ payload, result.stdout);
+    }
+    const denied = try std.fmt.allocPrint(a, "id() {{ printf 1001; }}\nsudo() {{ return 77; }}\n{s}", .{args[args.len - 1]});
+    const result = try std.process.run(a, std.testing.io, .{ .argv = &.{ "/bin/sh", "-c", denied } });
+    try std.testing.expectEqual(@as(u8, 77), result.term.exited);
+    try std.testing.expectEqualStrings("", result.stdout);
+    try std.testing.expectEqualStrings("", result.stderr);
+}
