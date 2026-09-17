@@ -1,6 +1,8 @@
 //! A deliberately narrow TOML v1 document: connection alias and secret references.
 //! No resolution, interpolation, include files, implicit discovery or remote I/O.
 const std = @import("std");
+const probes = @import("../monitoring/probes.zig");
+const references = @import("../secrets/reference.zig");
 pub const max_bytes = 64 * 1024;
 
 pub const Config = struct {
@@ -8,16 +10,21 @@ pub const Config = struct {
     ssh_host: ?[]const u8 = null,
     grafana_user_op: ?[]const u8 = null,
     grafana_password_op: ?[]const u8 = null,
+    probes: []const probes.Probe = &.{},
+    telegram_bot_token_op: ?[]const u8 = null,
+    telegram_chat_id_op: ?[]const u8 = null,
 
     pub fn deinit(self: *Config) void {
         self.arena.deinit();
     }
 };
 
-const Section = enum { root, connection, grafana };
+const Section = enum { root, connection, grafana, telegram, probe };
+
+const ProbeTable = struct { name: ?[]const u8 = null, url: ?[]const u8 = null };
 
 /// Single-line basic/literal TOML strings, with basic escapes. Other TOML forms
-/// (arrays, dotted/quoted keys, multiline strings, nested tables) are rejected.
+/// (other arrays/tables, dotted/quoted keys and multiline strings) are rejected.
 const Line = struct {
     rest: []const u8,
 
@@ -109,6 +116,8 @@ pub fn parse(a: std.mem.Allocator, contents: []const u8) !Config {
     var version_seen = false;
     var connection_seen = false;
     var grafana_seen = false;
+    var telegram_seen = false;
+    var probe_tables: std.ArrayList(ProbeTable) = .empty;
     var lines = std.mem.splitScalar(u8, contents, '\n');
     while (lines.next()) |raw| {
         const value = std.mem.trimEnd(u8, raw, "\r");
@@ -119,6 +128,17 @@ pub fn parse(a: std.mem.Allocator, contents: []const u8) !Config {
         if (line.rest.len == 0 or line.rest[0] == '#') continue;
         if (line.rest[0] == '[') {
             try line.take('[');
+            if (line.rest.len > 0 and line.rest[0] == '[') {
+                try line.take('[');
+                if (!std.mem.eql(u8, try line.key(), "probe")) return error.InvalidMonitoringConfig;
+                try line.take(']');
+                try line.take(']');
+                try line.end();
+                if (probe_tables.items.len >= probes.max_probes) return error.TooManyProbes;
+                try probe_tables.append(storage, .{});
+                section = .probe;
+                continue;
+            }
             const table = try line.key();
             try line.take(']');
             try line.end();
@@ -130,6 +150,10 @@ pub fn parse(a: std.mem.Allocator, contents: []const u8) !Config {
                 if (grafana_seen) return error.DuplicateMonitoringConfigKey;
                 grafana_seen = true;
                 section = .grafana;
+            } else if (std.mem.eql(u8, table, "telegram")) {
+                if (telegram_seen) return error.DuplicateMonitoringConfigKey;
+                telegram_seen = true;
+                section = .telegram;
             } else return error.UnknownMonitoringConfigKey;
             continue;
         }
@@ -154,10 +178,30 @@ pub fn parse(a: std.mem.Allocator, contents: []const u8) !Config {
                 if (target.* != null) return error.DuplicateMonitoringConfigKey;
                 target.* = try line.reference(storage);
             },
+            .telegram => {
+                const target = if (std.mem.eql(u8, key, "bot_token")) &config.telegram_bot_token_op else if (std.mem.eql(u8, key, "chat_id")) &config.telegram_chat_id_op else return error.UnknownMonitoringConfigKey;
+                if (target.* != null) return error.DuplicateMonitoringConfigKey;
+                target.* = try line.reference(storage);
+                _ = try references.parseOnePassword(target.*.?);
+            },
+            .probe => {
+                const current = &probe_tables.items[probe_tables.items.len - 1];
+                const target = if (std.mem.eql(u8, key, "name")) &current.name else if (std.mem.eql(u8, key, "url")) &current.url else return error.UnknownMonitoringConfigKey;
+                if (target.* != null) return error.DuplicateMonitoringConfigKey;
+                target.* = try line.string(storage);
+            },
         }
         try line.end();
     }
     if (!version_seen) return error.MissingMonitoringConfigVersion;
+    if (telegram_seen and (config.telegram_bot_token_op == null or config.telegram_chat_id_op == null)) return error.TelegramCredentialReferencesRequired;
+    const configured = try storage.alloc(probes.Probe, probe_tables.items.len);
+    for (probe_tables.items, configured) |table, *probe| {
+        probe.name = table.name orelse return error.MissingProbeName;
+        probe.url = try probes.normalizeUrl(storage, table.url orelse return error.MissingProbeUrl);
+    }
+    try probes.validate(configured);
+    config.probes = configured;
     return config;
 }
 
@@ -240,4 +284,58 @@ test "explicit config loading accepts relative paths and bounds file contents" {
     try std.testing.expectError(error.InvalidMonitoringConfigFile, load(a, io, directory_path));
     try tmp.dir.deleteFile(io, "monitoring config.toml");
     try std.testing.expectError(error.UnableToReadMonitoringConfig, load(a, io, file_path));
+}
+
+test "monitoring config parses HTTP probe tables and paired Telegram secret references locally" {
+    var config = try parse(std.testing.allocator,
+        \\version = 1
+        \\[[probe]]
+        \\name = 'software-landing'
+        \\url = 'HTTPS://SOFTWARE.EXAMPLE:443/healthz'
+        \\[telegram]
+        \\bot_token = { op = 'op://Example/DragonTools/telegram-bot-token' }
+        \\chat_id = { op = 'op://Example/DragonTools/telegram-chat-id' }
+        \\[[probe]] # Another table after a normal section.
+        \\url = 'http://orderflow.example:8080/healthz'
+        \\name = 'orderflow'
+    );
+    defer config.deinit();
+    try std.testing.expectEqual(@as(usize, 2), config.probes.len);
+    try std.testing.expectEqualStrings("software-landing", config.probes[0].name);
+    try std.testing.expectEqualStrings("https://software.example/healthz", config.probes[0].url);
+    try std.testing.expectEqualStrings("orderflow", config.probes[1].name);
+    try std.testing.expectEqualStrings("op://Example/DragonTools/telegram-bot-token", config.telegram_bot_token_op.?);
+    try std.testing.expectEqualStrings("op://Example/DragonTools/telegram-chat-id", config.telegram_chat_id_op.?);
+}
+
+test "probe config rejects incomplete duplicate unsafe and unsupported definitions" {
+    const a = std.testing.allocator;
+    try std.testing.expectError(error.MissingProbeName, parse(a, "version=1\n[[probe]]\nurl='https://example.com'"));
+    try std.testing.expectError(error.MissingProbeUrl, parse(a, "version=1\n[[probe]]\nname='example'"));
+    try std.testing.expectError(error.DuplicateMonitoringConfigKey, parse(a, "version=1\n[[probe]]\nname='a'\nname='b'"));
+    try std.testing.expectError(error.DuplicateProbeName, parse(a, "version=1\n[[probe]]\nname='a'\nurl='https://a.example'\n[[probe]]\nname='a'\nurl='https://b.example'"));
+    try std.testing.expectError(error.InvalidProbeName, parse(a, "version=1\n[[probe]]\nname=''\nurl='https://example.com'"));
+    try std.testing.expectError(error.InvalidProbeUrl, parse(a, "version=1\n[[probe]]\nname='a'\nurl='ftp://example.com'"));
+    for ([_][]const u8{ "labels={service='other'}", "module='tcp_connect'", "headers='Authorization'", "method='POST'" }) |setting| {
+        const input = try std.fmt.allocPrint(a, "version=1\n[[probe]]\nname='a'\nurl='https://a.example/'\n{s}", .{setting});
+        defer a.free(input);
+        try std.testing.expectError(error.UnknownMonitoringConfigKey, parse(a, input));
+    }
+    var out: std.Io.Writer.Allocating = .init(a);
+    defer out.deinit();
+    try out.writer.writeAll("version=1\n");
+    for (0..probes.max_probes + 1) |index| try out.writer.print("[[probe]]\nname='probe-{d}'\nurl='https://example.com/'\n", .{index});
+    try std.testing.expectError(error.TooManyProbes, parse(a, out.written()));
+}
+
+test "Telegram config rejects missing malformed plaintext and unsupported secret sources" {
+    const a = std.testing.allocator;
+    try std.testing.expectError(error.TelegramCredentialReferencesRequired, parse(a, "version=1\n[telegram]"));
+    try std.testing.expectError(error.TelegramCredentialReferencesRequired, parse(a, "version=1\n[telegram]\nbot_token={op='op://v/i/token'}"));
+    try std.testing.expectError(error.InvalidMonitoringConfig, parse(a, "version=1\n[telegram]\nbot_token='plaintext'"));
+    try std.testing.expectError(error.InvalidMonitoringConfig, parse(a, "version=1\n[telegram]\nchat_id=12345"));
+    try std.testing.expectError(error.InvalidSecretReference, parse(a, "version=1\n[telegram]\nbot_token={op='not-a-reference'}"));
+    try std.testing.expectError(error.UnsupportedConfigSecretSource, parse(a, "version=1\n[telegram]\nbot_token={env='TOKEN'}"));
+    try std.testing.expectError(error.DuplicateMonitoringConfigKey, parse(a, "version=1\n[telegram]\n[telegram]"));
+    try std.testing.expectError(error.UnknownMonitoringConfigKey, parse(a, "version=1\n[telegram]\ntoken={op='op://v/i/token'}"));
 }

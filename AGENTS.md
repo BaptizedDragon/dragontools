@@ -67,6 +67,35 @@ Grafana restart intent; plugin/provisioning changes never restart VM/VL/VT. With
 configured credentials, report that the authenticated Logs plugin query was not checked.
 Dashboards remain deferred.
 
+The station also runs blackbox_exporter, Alertmanager, vmalert-logs and
+vmalert-metrics with dedicated accounts and loopback-only listeners on 9115,
+9093, 8880 and 8881. Alertmanager clustering is disabled. The two evaluators share
+one pinned binary but have independent restart intent; replacing that binary must
+mark both before publication. Their alert state uses VictoriaMetrics remote
+read/write and requires no local writable service path. Deploy only the fixed
+LogsQL pack and ServiceProbeFailed rule; host/service metric rules remain deferred.
+
+External probes use the pinned VictoriaMetrics native scraper and a static,
+unprivileged blackbox HTTP module. Keep GET, TLS verification, redirects, the
+five-second timeout and IPv4 preference with DNS-family fallback. HTTP/2 is
+explicitly disabled for the reviewed release's known dependency constraint.
+Accept only bounded named credential-free HTTP/HTTPS URLs through the explicit
+TOML schema. Keep metric names and labels allowlisted. Probe edits reload only the
+native scraper after its initial unit integration; preserve its independent reload
+intent through failures. Verify stored fresh probe samples and mechanism state,
+not target availability: probe_success=0 is valid telemetry and must not fail
+station installation. Status reads stored metrics and never contacts targets.
+
+Optional Telegram SecretRefs resolve locally during install only. Its dedicated
+protected stdin consumer manages service-owned mode-0400 token/chat files;
+ordinary file primitives must never receive their contents. Equal credentials are
+a no-op. Because the pinned native Telegram error path can include the bot-token
+URL, Alertmanager StandardOutput and StandardError must remain null and their
+effective values must be verified. Use its health/API/metrics and fixed semantic
+errors for diagnosis. Verify and status never resolve Telegram refs or send
+notifications. notify-test is an explicit short-lived Alertmanager alert and must
+not claim human delivery; normal live rule evaluation remains active independently.
+
 Keep unsupported components explicitly unavailable. Never return installation
 success for scaffolds. New components require reviewed pinned checksums, a dedicated
 privilege profile, atomic installation, idempotency, and real health/signal checks.
@@ -76,7 +105,7 @@ The future agent topology is Vector for journald logs and host metrics, vmagent
 for application Prometheus endpoints, and OTel Collector for application OTLP.
 Host metric names and systemd service-state monitoring remain deferred until the
 agent slice verifies their contracts. Do not invent replacement alert expressions
-or treat provisional rule rendering as deployed alerting.
+or treat provisional host/service rule rendering as deployed alerting.
 
 Run `zig fmt build.zig src`, `zig build`, and `zig build test`. Test failure paths
 and second-run no-op behavior. Document major features with what/example/result/
@@ -106,5 +135,5 @@ End this and every future Codex iteration with these five sections:
 
 When adding a component, report its exact pinned version, checksum provenance,
 and remaining verification limits. Keep deployment useful now without implying
-that dashboards, alerting, agents, or remote ingestion
-are already available.
+that dashboards, host/service metric alerts, agents, or remote ingestion are
+already available.

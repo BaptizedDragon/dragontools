@@ -137,9 +137,10 @@ sudo apt-get install -y openssh-server curl ca-certificates tar coreutils util-l
 Verify the VM SSH fingerprint through its console and enroll it in known_hosts.
 Allow outbound HTTPS to official GitHub release assets, `dl.grafana.com`, and
 `grafana.com` for the pinned plugin catalog artifact. Never
-use a production host: the monitoring installer now installs four persistent
-services and writes actual metrics/data. The older Victoria runners below retain
-their backend-specific checks; use the Grafana checklist too for the fourth component.
+use a production host: the monitoring installer now installs eight persistent
+services and writes actual metrics/data. Configured live alert rules may deliver
+real notifications. The older Victoria runners below retain only their
+backend-specific checks; use the full station checklist and Grafana checks too.
 
 ```bash
 zig build -Doptimize=ReleaseSafe
@@ -188,8 +189,9 @@ may remain until installation recovers. Destroy the VM through your provider aft
 testing; DragonTools has no uninstall or provisioning command.
 
 The earlier `victoriametrics.sh` and `victorialogs.sh` runners remain available as
-narrower checks. Their current `monitoring install` commands install all four
-components, but these earlier runners do not inspect Grafana process stability. Use `victoriatraces.sh` for three-component process stability and
+narrower checks. Their current `monitoring install` commands install all eight
+services, but these earlier runners do not inspect the other five process
+identities. Use `victoriatraces.sh` for three-component process stability and
 VictoriaTraces-isolated repair; the logs runner still covers logs-isolated repair.
 
 Before accepting a release, also exercise:
@@ -199,7 +201,9 @@ Before accepting a release, also exercise:
 - Conflicting accounts/unmanaged units and unexpected symlinks fail safely.
 - Wrong checksums, interrupted downloads, and unavailable HTTPS do not activate
   an unverified binary.
-- Each component's unit or binary repair restarts only that component. Metadata-only
+- Each component's unit repair restarts only that component. Binary repair has the
+  same isolation, except that both vmalert instances share one pinned binary and
+  therefore both preserve restart intent when that binary changes. Metadata-only
   repairs and an unchanged rerun do not restart any healthy service.
 - Stop or disable each service independently; reinstall starts/enables it without
   rewriting matching resources or restarting other healthy services.
@@ -210,8 +214,9 @@ Before accepting a release, also exercise:
 - Binary-only repair does not itself require `daemon-reload` when loaded unit state
   is already current; changed or stale loaded unit
   state triggers reload only as needed.
-- Target ports 8428, 9428, 10428, and 3000 cannot be reached externally. The additional
-  traces gRPC listener is disabled; no public OTLP path exists.
+- Target ports 8428, 9428, 10428, 3000, 9115, 9093, 8880 and 8881 cannot be reached
+  externally. The additional traces gRPC and Alertmanager cluster listeners are
+  disabled; no public OTLP path exists.
 - Inspect root/service ownership, `systemd-analyze security`, journal errors, and
   query persistence across restart; review unexpected drop-ins/overrides.
 - On dedicated disposable volumes, verify the metrics low-space ingestion stop,
@@ -227,7 +232,164 @@ local syntax checks until a real supported target is supplied; fake-remote and
 renderer tests do not establish runtime/production compatibility.
 
 
-## Grafana fourth-component checklist
+## Eight-service probe and alert checklist
+
+Use each supported disposable Ubuntu/architecture combination above. Replace
+`monitoring-test` with a verified native SSH alias and use that alias consistently.
+Provide an HTTP/HTTPS endpoint you control; the example below is not a live test
+target. No Telegram references are needed for the basic station test.
+
+```bash
+zig build -Doptimize=ReleaseSafe
+cat > /tmp/dragontools-monitoring-integration.toml <<'TOML'
+version = 1
+[connection]
+ssh_host = "monitoring-test"
+[[probe]]
+name = "controlled-health"
+url = "https://service.example.com/healthz"
+TOML
+# Replace the alias and URL in the file before continuing.
+./zig-out/bin/dragontool monitoring install --config /tmp/dragontools-monitoring-integration.toml --plan
+./zig-out/bin/dragontool monitoring install --config /tmp/dragontools-monitoring-integration.toml
+./zig-out/bin/dragontool monitoring verify --config /tmp/dragontools-monitoring-integration.toml
+./zig-out/bin/dragontool monitoring status --config /tmp/dragontools-monitoring-integration.toml
+
+ssh -o BatchMode=yes -o StrictHostKeyChecking=yes monitoring-test 'set -eu
+for component in victoriametrics victorialogs victoriatraces grafana blackbox-exporter alertmanager vmalert-logs vmalert-metrics; do
+  systemctl show "dragontools-$component.service" -p MainPID -p ExecMainStartTimestampMonotonic -p User -p Group -p ActiveState -p UnitFileState
+done'
+
+# Deliberate unchanged rerun, then repeat the same process-identity inspection:
+./zig-out/bin/dragontool monitoring install --config /tmp/dragontools-monitoring-integration.toml
+```
+
+Expected: all eight services verify, failed target availability is still valid
+telemetry, and the unchanged install prints `No changes required.`. Compare all
+eight PIDs/start times, managed file bytes/metadata and download/reload activity.
+The controller's status check queries stored samples; it must not request a fresh
+probe. Grafana reports its authenticated Logs query unchecked when its references
+are absent. None of these expected outcomes has been observed on a supported host
+for this slice yet.
+
+- Require loopback-only listeners at VM 8428, VL 9428, VT 10428, Grafana 3000,
+  blackbox 9115, Alertmanager 9093, logs evaluator 8880 and metrics evaluator 8881.
+  Inspect both TCP and UDP; Alertmanager clustering must add neither. Check all
+  effective account, root-owned binary/config, capability, address-family and
+  filesystem hardening properties. Blackbox and both vmalert services must have
+  no persistent writable namespace path; Alertmanager writes only its data path.
+- Check blackbox's exact loaded `/config`, `/-/healthy`, build and successful
+  reload metrics. The rendered normalized-config fixture follows pinned source
+  but has not been compared with a running upstream exporter. Exercise HTTPS with
+  a valid chain, invalid chain, redirects, IPv4 preference and an IPv6-only DNS
+  answer on controlled endpoints. Confirm HTTP/2 remains disabled and probes time
+  out within the configured module/scrape limits, without executing a curl process
+  per target on the controller.
+- Require VictoriaMetrics' loaded native scraper config/targets to match the
+  named probe list and each configured target to produce recent stored
+  `probe_success` and duration samples. Check the allowlisted metric names/labels,
+  including `probe`, `target` and `instance`. Do not interpret a down target as
+  failed station verification. The separate VictoriaMetrics self-scrape still
+  needs time to expose `vm_app_version`.
+  Compare the real `/api/v1/status/config` YAML with the source-derived pinned
+  serialization fixture too; renderer tests alone do not establish that runtime
+  representation. Exercise a stale loaded metric-relabel policy with identical
+  targets and desired restored disk bytes: reinstall must reload the desired
+  policy, then verify it before clearing intent. At the 64-probe limit, replace
+  one identity and ensure historical samples inside the 90-second window do not
+  invalidate current readiness or status.
+- Add, remove and edit a controlled probe. Require only scraper config publication
+  and native reload, retaining all eight service identities. The first upgrade
+  from the prior station slice adds VM's scrape flag and legitimately restarts
+  VM once. After any successful verification, require cleared scrape reload intent
+  and another no-op; verify alone must never reload or clear that marker.
+- Validate both fixed rule files with the pinned vmalert dry-run path and check
+  loaded group/rule names, types, queries, labels, annotations, timing and health.
+  Confirm metrics reads VM, logs reads VL, both notify local Alertmanager and both
+  use local VM remote read/write for state. With a controlled failed endpoint,
+  observe the critical `ServiceProbeFailed` alert only after its two-minute hold.
+  Restore that endpoint and observe resolution. This explicit test can cause live
+  notifications when Telegram is configured; it is not run automatically.
+  After configuring a controlled unavailable endpoint yourself and successfully
+  running `monitoring verify`, the optional observer reads stored samples and
+  the existing evaluator alert with a bounded 210-second deadline:
+
+  ```bash
+  python3 -I -B tests/integration/run_blackbox.py --ssh-host monitoring-test --probe controlled-down
+  ```
+
+  Replace the alias and probe name. The script sends only read-only requests to
+  local VM and vmalert APIs over strict SSH; it never contacts a target, edits
+  configuration or sends a notification. Existing evaluator activity can still
+  notify independently. Expected output begins `PASS: fresh failed probe telemetry
+  and an existing firing alert with a two-minute hold`. Its local fixture tests
+  are separate from running it on a real host; the host invocation remains unrun.
+- Cause temporary startup absence and delayed self-observation. Require bounded
+  readiness retries and successful finalization; fixed binary/unit/account/argv
+  or public-listener mismatches must fail immediately without retrying. Timeout
+  must retain the relevant intent marker. Correct the cause and require recovery,
+  marker clearing only after success, then a no-op. Include interrupted rule/config
+  staging and shared vmalert binary replacement, which must retain both evaluators'
+  independent restart intent. Do not delete arbitrary staging files.
+- For optional Telegram, add only the two SecretRefs documented in README to the
+  local test config. Install through protected stdin; inspect metadata only, never
+  print secret files. Require token/chat files owned by `dt-alertmanager` at 0400
+  and restricted directory access. Equal credentials must not rewrite files or
+  restart services. Test interrupted protected publication and recovery, secret
+  replacement and removal of configured references without disclosing values.
+  With local `op` deliberately unavailable, verify/status must still inspect the
+  installed Telegram policy; omit Grafana references for this particular resolver
+  test because authenticated Grafana verification resolves its own references.
+- Require Alertmanager's effective `StandardOutput=null` and
+  `StandardError=null`; the pinned notifier can expose a token-bearing request URL
+  in native errors. Expect no native Alertmanager journal diagnostics. Use systemd
+  state, readiness/API/metrics and fixed DragonTools errors. Confirm verification
+  sends no synthetic alert. Only explicitly run the following command when the
+  configured test chat is intended to receive a notification:
+
+  ```bash
+  ./zig-out/bin/dragontool monitoring notify-test --config /tmp/dragontools-monitoring-integration.toml
+  ```
+
+  Record Alertmanager acceptance separately from actual human receipt, grouping,
+  deduplication, resolved notification and unauthorized bot/chat failures. Neither
+  renderer tests nor successful API acceptance proves Telegram delivery.
+
+Record exact pins and checksum provenance from
+[the design](../../design.md#external-probing-and-alert-runtime), supported OS and
+architecture, all eight identities and outcomes. Never include resolved secrets
+or secret-bearing native errors in the evidence. **Disposable-host integration
+not run.**
+
+The local archive auditor checks already-downloaded official artifacts without
+extracting or executing them:
+
+```bash
+python3 -I -B tests/integration/blackbox_archive.py /tmp/dragontools-blackbox-0.28.0-linux-amd64.tar.gz amd64
+python3 -I -B tests/integration/blackbox_archive.py /tmp/dragontools-blackbox-0.28.0-linux-arm64.tar.gz arm64
+python3 -I -B tests/integration/alertmanager_archive.py /tmp/dragontools-alerting-am-amd64-v0.34.1.tar.gz amd64
+python3 -I -B tests/integration/alertmanager_archive.py /tmp/dragontools-alerting-am-arm64-v0.34.1.tar.gz arm64
+python3 -I -B tests/integration/vmalert_archive.py /tmp/dragontools-alerting-vmutils-amd64-v1.152.0.tar.gz amd64
+python3 -I -B tests/integration/vmalert_archive.py /tmp/dragontools-alerting-vmutils-arm64-v1.152.0.tar.gz arm64
+```
+
+Replace paths with the corresponding local archives. The blackbox auditor checks
+committed archive and executable SHA-256 values, the exact five-member catalog,
+types and modes. The Alertmanager auditor checks its six-entry archive and both
+server/amtool binaries; the vmutils auditor checks its seven regular files and
+the selected vmalert binary. All six architecture/artifact audits passed without
+executing downloaded code; they do not validate systemd, HTTP requests, rule timing
+or notifications.
+
+Run the observer's local input/state fixtures without SSH:
+
+```bash
+python3 -I -B tests/blackbox_observe_test.py
+```
+
+The normal Zig test suite also runs these fixtures on both Linux and macOS.
+
+## Grafana component checklist
 
 Run on each supported Ubuntu/architecture disposable-host combination above. The
 replaceable alias `monitoring-test` must use the same SSH authentication throughout;
@@ -243,20 +405,20 @@ TEST_ALIAS="monitoring-test"
 ./zig-out/bin/dragontool monitoring verify --ssh-host "$TEST_ALIAS"
 ./zig-out/bin/dragontool monitoring status --ssh-host "$TEST_ALIAS"
 
-# Read-only listener inspection. All four must bind only to their loopback addresses.
+# Read-only listener inspection. All eight bind only to loopback.
 ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$TEST_ALIAS" \
   'sudo -n ss -lntp'
 
-# Record all four service identities around a deliberate unchanged install.
+# Record all eight service identities around a deliberate unchanged install.
 GRAFANA_CHECK_DIR=$(mktemp -d)
 ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$TEST_ALIAS" \
-  'for name in victoriametrics victorialogs victoriatraces grafana; do
+  'for name in victoriametrics victorialogs victoriatraces grafana blackbox-exporter alertmanager vmalert-logs vmalert-metrics; do
      systemctl show "dragontools-$name.service" --no-pager \
        --property=Id,ActiveState,UnitFileState,MainPID,ExecMainStartTimestampMonotonic
    done' > "$GRAFANA_CHECK_DIR/before"
 ./zig-out/bin/dragontool monitoring install --ssh-host "$TEST_ALIAS"
 ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$TEST_ALIAS" \
-  'for name in victoriametrics victorialogs victoriatraces grafana; do
+  'for name in victoriametrics victorialogs victoriatraces grafana blackbox-exporter alertmanager vmalert-logs vmalert-metrics; do
      systemctl show "dragontools-$name.service" --no-pager \
        --property=Id,ActiveState,UnitFileState,MainPID,ExecMainStartTimestampMonotonic
    done' > "$GRAFANA_CHECK_DIR/after"
@@ -267,10 +429,10 @@ ssh -o StrictHostKeyChecking=yes -L 127.0.0.1:3000:127.0.0.1:3000 "$TEST_ALIAS"
 ```
 
 If the alias logs in as root on an image without sudo, use `ss -lntp` directly in
-that inspection command. Expected: all four active/persistently enabled, listener
-addresses `127.0.0.1:8428`, `127.0.0.1:9428`, `127.0.0.1:10428`, and
-`127.0.0.1:3000`, `No changes required.` on unchanged install, and no diff in the
-four process identities. Also compare managed Grafana files' bytes, modes, owners
+that inspection command. Expected: all eight active/persistently enabled, loopback
+ports 8428, 9428, 10428, 3000, 9115, 9093, 8880 and 8881,
+`No changes required.` on unchanged install, and no diff in the eight
+process identities. Also compare managed Grafana files' bytes, modes, owners
 and modification times around the rerun, and inspect download evidence: no archive
 request or provisioning rewrite should occur. `verify` must preserve the same
 process identities and files.
@@ -299,10 +461,10 @@ resolved values, provider output or secret-bearing commands.
 Check fresh initialization with the desired login, then an existing manually
 changed password reconciled from the configured references. Repeat with the
 already-correct credentials and require `No changes required.`, no password reset,
-no restart, and stable identities for all four services. Configured standalone
+no restart, and stable identities for all eight services. Configured standalone
 verify must authenticate read-only; mismatched credentials must fail without
-reconciliation. Exercise failure/retry and confirm no secret files or retained plaintext
-are created, without printing resolved contents. Ensure no plaintext value appears in unit,
+reconciliation. Exercise failure/retry and confirm no Grafana secret files or retained
+administrator plaintext are created, without printing resolved contents. Ensure no plaintext value appears in unit,
 ordinary config, process arguments or DragonTools output. Live 1Password access and
 these remote behaviors are separate integration gates, not fixture-test claims.
 
@@ -335,7 +497,7 @@ On this disposable target only, test recovery and component isolation:
 
 - On a pre-plugin DragonTools installation, rerun with the same configured
   references. Expect one pinned plugin download, Logs provisioning and one Grafana
-  restart. Record all four PIDs/start times; VM/VL/VT must remain unchanged. Require
+  restart. Record all eight PIDs/start times; the other services must remain unchanged. Require
   configured verification and UI queries to succeed, then an unchanged no-op.
 - Inspect the active plugin symlink, versioned content and per-file catalog. Require
   root ownership, executable/readable modes, intact `MANIFEST.txt`, and both plugin

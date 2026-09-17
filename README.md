@@ -2,14 +2,16 @@ DragonTools is an opinionated Zig tool for minimalistic architecture enthusiasts
 
 # DragonTools · v0.1 foundation
 
-The current milestone installs **VictoriaMetrics, VictoriaLogs, VictoriaTraces, and
-Grafana OSS**. Each has a dedicated Unix account, pinned versioned artifacts,
+The current milestone installs **VictoriaMetrics, VictoriaLogs, VictoriaTraces,
+Grafana OSS, blackbox_exporter, Alertmanager, vmalert-logs and vmalert-metrics**. Each has a dedicated Unix account, pinned versioned artifacts,
 a hardened systemd service, and a loopback-only listener. Grafana provisions Metrics,
 Logs and Traces datasources and provides a visual UI through SSH forwarding.
 VictoriaMetrics keeps 90-day metrics with a disk reserve; VictoriaLogs and
 VictoriaTraces keep disk-bound history with native cleanup. Healthy unchanged
-processes remain running on reruns. Agents, alerts, dashboards and remote application
-ingestion remain unavailable.
+processes remain running on reruns. External HTTP probes are scraped locally and
+evaluated by vmalert-metrics; a separate vmalert-logs evaluates the fixed log pack.
+Alertmanager optionally delivers grouped Telegram notifications. Agents, host/service
+metric alerts, dashboards and remote application ingestion remain unavailable.
 
 A separate `host install-oh-my-zsh` convenience command installs missing shell
 tooling for an existing user. It does not change the monitoring stack.
@@ -71,9 +73,10 @@ while anonymous access, auth proxy and signup stay disabled.
 ## Monitoring configuration and Grafana credentials
 
 `--config` reads one explicit, small TOML file for monitoring `install`, `verify`,
-and `status`. There is no implicit file discovery. The version-1 schema accepts an
-OpenSSH alias and Grafana username/password secret references; component tuning,
-literal passwords, unknown keys and duplicate keys are rejected.
+`status`, and `notify-test`. There is no implicit file discovery. The version-1
+schema accepts an OpenSSH alias, Grafana/Telegram secret references and bounded
+named HTTP/HTTPS probes; component tuning, literal passwords, unknown keys and
+duplicate keys are rejected.
 
 The checked-in [examples/monitoring.toml](examples/monitoring.toml) contains these
 **example** references. Replace the alias and vault/item/field paths with your own:
@@ -190,6 +193,10 @@ Expected listeners **on the server**:
 | VictoriaLogs | `v1.52.0` | `127.0.0.1:9428` |
 | VictoriaTraces | `v0.11.0` | `127.0.0.1:10428` |
 | Grafana OSS | `13.2.2` | `127.0.0.1:3000` |
+| blackbox_exporter | `0.28.0` | `127.0.0.1:9115` |
+| Alertmanager | `v0.34.1` | `127.0.0.1:9093`; clustering disabled |
+| vmalert-logs | `v1.152.0` | `127.0.0.1:8880` |
+| vmalert-metrics | `v1.152.0` | `127.0.0.1:8881` |
 
 Grafana archive SHA-256 pins match the official OSS `13.2.2` download page;
 executable and full-tree catalog digests come from those verified archives.
@@ -202,19 +209,19 @@ Install and verification show each component before noticeable work, then calm
 inspection, change and verification progress. A configured unchanged rerun includes:
 
 ```text
-[1/4] VictoriaMetrics
+[1/8] VictoriaMetrics
       inspecting...
       verifying...
       healthy; no changes
-[2/4] VictoriaLogs
+[2/8] VictoriaLogs
       inspecting...
       verifying...
       healthy; no changes
-[3/4] VictoriaTraces
+[3/8] VictoriaTraces
       inspecting...
       verifying...
       healthy; no changes
-[4/4] Grafana
+[4/8] Grafana
       inspecting...
       checking VictoriaLogs datasource plugin...
       plugin current
@@ -222,6 +229,22 @@ inspection, change and verification progress. A configured unchanged rerun inclu
       verifying...
       administrator credentials verified
       Logs datasource health and query verified
+      healthy; no changes
+[5/8] Blackbox exporter
+      inspecting...
+      verifying...
+      healthy; no changes
+[6/8] Alertmanager
+      inspecting...
+      verifying...
+      healthy; no changes
+[7/8] vmalert logs
+      inspecting...
+      verifying...
+      healthy; no changes
+[8/8] vmalert metrics
+      inspecting...
+      verifying...
       healthy; no changes
 No changes required.
 ```
@@ -251,9 +274,10 @@ DragonTools never assumes a default password or enables anonymous access. Metric
 and Traces checks establish backend reachability, not queries through Grafana's
 query engine. Save & test/Explore in the browser remains a disposable-host gate.
 
-`status` reports all four service states and the expected three datasource mappings.
-It does not resolve credentials, inspect datasource records or perform query checks;
-use `verify` for health.
+`status` reports all eight service states, expected datasource mappings, and stored
+external-probe state from VictoriaMetrics. It does not trigger fresh target requests
+or resolve credentials. Use `verify` for full station verification; a recorded failed
+probe means the target is down, while missing/stale data is reported as unknown.
 
 Verification separates fixed configuration checks from startup readiness. Unit,
 checksum, symlink, service-user, hardening and process-argument mismatches, and
@@ -270,7 +294,7 @@ or executable commands.
 
 Raw storage APIs have no configured authentication and must remain loopback-only.
 Local users on the target can reach them. There is no remote ingestion, TLS,
-firewall management, alert runtime, or maintenance timer. Use a provider firewall
+firewall management or maintenance timer. Use a provider firewall
 as an outer layer.
 
 `--ssh-host` delegates aliases, user, port, identities, agent paths, and jump hosts
@@ -455,6 +479,101 @@ Unmanaged changes to a running process/configuration can fail verification and
 require operator correction; rerun safety does not mean every manual runtime
 change is automatically adopted or repaired.
 
+## External HTTP probes and Telegram
+
+The station performs outside-in HTTP/HTTPS availability checks even when a service
+has stopped emitting logs or exposing metrics. Add bounded service definitions to
+an explicit monitoring config; replace the example URLs with your own endpoints:
+
+```toml
+version = 1
+
+[connection]
+ssh_host = "monitoring"
+
+[[probe]]
+name = "software-landing"
+url = "https://service-a.example.com/healthz"
+
+[[probe]]
+name = "orderflow"
+url = "https://service-b.example.com/healthz"
+
+# Optional deployment values, never built-in defaults:
+[telegram]
+bot_token = { op = "op://BaptizedDragon/DragonTools/alarms-telegram-bot-token" }
+chat_id = { op = "op://BaptizedDragon/DragonTools/alarms-telegram-chat-id" }
+```
+
+Run with the same enrolled SSH alias throughout:
+
+```bash
+zig build -Doptimize=ReleaseSafe
+./zig-out/bin/dragontool monitoring install --config monitoring.toml --plan
+./zig-out/bin/dragontool monitoring install --config monitoring.toml
+./zig-out/bin/dragontool monitoring verify --config monitoring.toml
+./zig-out/bin/dragontool monitoring status --config monitoring.toml
+# Deliberate unchanged rerun:
+./zig-out/bin/dragontool monitoring install --config monitoring.toml
+# Explicitly sends a test alert through Alertmanager to its configured receiver:
+./zig-out/bin/dragontool monitoring notify-test --config monitoring.toml
+```
+
+Only GET with expected HTTP 2xx is supported. Probe names are unique, at most 63
+ASCII bytes, start alphanumeric and contain only alphanumerics, `-` or `_`. There
+are at most 64 probes; URLs are at most 2048 bytes and must use HTTP or HTTPS.
+Credentials, query strings, fragments, control characters, custom headers and
+user-defined labels/modules are rejected before SSH. Use dedicated health paths
+without embedded secret material. The URL becomes a stored `target` label;
+scheme/hostname case, default ports and an empty path are normalized.
+
+The pinned blackbox exporter uses a five-second module timeout, IPv4 preference
+with address-family fallback, normal redirects and verified TLS certificates.
+This first slice deliberately uses HTTP/1.1: HTTP/2 is disabled because upstream
+0.28.0 contains the transport affected by [GO-2026-4918](https://pkg.go.dev/vuln/GO-2026-4918).
+VictoriaMetrics' native scraper runs every 30 seconds with a five-second scrape
+timeout; blackbox's default 500 ms response margin leaves up to 4.5 seconds for a
+probe. Address-family fallback selects an available family during DNS resolution;
+it is not a retry across every resolved address. No vmagent or polling daemon is
+needed for this station-local path.
+
+`ServiceProbeFailed` selects the owned `probe_success == 0` series and holds for
+**two minutes**, with `severity=critical` and `source=blackbox`. Notifications name
+the configured probe and target. Duration metrics are collected, but no latency
+alert is installed. Stored exporter metrics keep only the fixed metric allowlist
+and owned `job`, `instance`, `probe`, `target` and fixed timing `phase` labels;
+dynamic certificate fingerprints and arbitrary response values are excluded.
+
+A target failure is valid telemetry: install and verify require a recent result
+of either `probe_success=0` or `1`, not healthy applications. They check exporter,
+scraper configuration/recorded metrics, both evaluators and Alertmanager. Status
+reads recorded samples from VictoriaMetrics instead of probing targets again.
+With no configured probes, the scrape list is empty and there are no probe targets.
+
+Adding or removing a probe atomically updates only the scraper file and reloads
+VictoriaMetrics' native scraper. It does not restart VictoriaMetrics, blackbox,
+vmalert or the other services. Upgrading from the prior station slice requires
+one VictoriaMetrics unit restart to enable native scraping; later probe changes
+use an independent persisted reload intent. An unchanged install reports
+`No changes required.` and does not rewrite configuration/secrets, download
+artifacts, restart services or send a test notification.
+
+Telegram references resolve locally during install. Only its dedicated protected
+stdin consumer persists the token and chat ID under
+`/etc/dragontools/alertmanager/secrets/`, owned by `dt-alertmanager`, mode `0400`.
+Neither value enters YAML, units, argv or DragonTools output; the host needs no
+1Password installation. Correct existing values are not rewritten. Omit the
+entire `[telegram]` table to use the discard receiver. Verification checks installed
+configuration and protected-file policy without resolving Telegram references or
+sending notifications. `notify-test` uses installed Alertmanager configuration;
+API acceptance is not proof that Telegram delivered a message to a human.
+
+Alertmanager's native stdout/stderr are disabled because its pinned Telegram
+client can include a bot-token URL in an error. Diagnose through systemd state,
+read-only health/API/metrics and DragonTools' fixed semantic errors; native
+Alertmanager journal messages are deliberately unavailable.
+See the [exact pins and operational limits](design.md#external-probing-and-alert-runtime).
+
 ## Interactive setup
 
 The wizard helps assemble a regular DragonTools command, explains defaults, and
@@ -474,12 +593,13 @@ dragontool
 Choose installation, agent setup, verification, status, firewall guidance, the
 information-only architecture overview, or command-line help. The overview and
 command preview are local: they do not connect to a host or resolve credentials.
-The current installer provides **VictoriaMetrics, VictoriaLogs, VictoriaTraces, and Grafana**. Roadmap inputs
-such as domain/TLS, IP allowlists, Telegram, agents, and firewall configuration
+The current installer provides the eight station components listed above. Use
+monitoring TOML for probes and optional Telegram references. Roadmap inputs
+such as domain/TLS, IP allowlists, agents, and firewall configuration
 remain explicitly unavailable and fail before SSH, including in plan mode.
 Station setup asks for host, SSH user/port, and authentication, then offers optional
 roadmap settings with a default of no. Accepting that default produces a usable
-four-component install command. Metrics retention stays fixed at 90 days with a 20%
+eight-component install command. Metrics retention stays fixed at 90 days with a 20%
 capacity reserve. Logs and traces use a logical 100-year limit and native 75%
 partition budgets, as detailed below. Agent guidance accepts a numeric station IP (the current
 `--station-ip` contract) and repeats validated `.service` names.
@@ -579,9 +699,10 @@ port-3000 tunnel from Quick Start.
 | `wizard` / no arguments in a TTY | Local interactive frontend to the same commands |
 | `completion bash/zsh/fish` | Print local shell completion scripts |
 | `host install-oh-my-zsh` | Install missing shell tooling; explicit options for exact managed-config migration and login-shell changes |
-| `monitoring install` | VictoriaMetrics, VictoriaLogs, VictoriaTraces, and Grafana installation |
-| `monitoring verify` | All four checked; nonzero if any fails; read-only |
-| `monitoring status` | All four service states, not an end-to-end health check |
+| `monitoring install` | Eight concrete station services, local HTTP probes and fixed alert rules |
+| `monitoring verify` | All eight checked; failed targets are valid telemetry; read-only |
+| `monitoring status` | Service states and stored external-probe results |
+| `monitoring notify-test` | Explicit test alert through Alertmanager; requires installed Telegram configuration |
 | `monitoring agents install/verify/status` | Parsed; fails explicitly before SSH |
 | `monitoring firewall` | Parsed; fails explicitly before SSH |
 
@@ -590,16 +711,19 @@ port-3000 tunnel from Quick Start.
 | VictoriaMetrics | Implemented |
 | VictoriaLogs | Implemented; loopback only, without application-host ingestion |
 | VictoriaTraces | Implemented; loopback only, without remote application OTLP ingestion |
-| vmalert / Alertmanager | Unavailable; rules are only rendered locally |
+| blackbox_exporter | Implemented HTTP/HTTPS GET probes through local VictoriaMetrics scraping |
+| vmalert / Alertmanager | Implemented separate metrics/logs evaluation and grouped alert routing |
 | Grafana OSS | Implemented; loopback:3000, local authentication, Metrics/Logs/Traces datasources |
 | Grafana Logs datasource | Official plugin 0.32.0; authenticated health/query checks with configured references |
 | Dashboards | Unavailable |
-| Telegram | Unavailable |
+| Telegram | Optional configured SecretRefs; explicit `notify-test`, never automatic tests |
 | Vector / vmagent / OTel Collector / monitoring agents | Unavailable |
 | Monitoring firewall / TLS | Unavailable |
 
-`--service` is repeatable. Agent, admin-IP, TLS, Telegram and 1Password private-key
+`--service` is repeatable. Agent, admin-IP, TLS and 1Password private-key
 reference flags are validated, then rejected as unavailable before any connection.
+Telegram is configured through `[telegram]` in monitoring TOML; legacy roadmap
+Telegram flags remain unavailable.
 They are not silently ignored, including with `--plan`.
 See `dragontool --help` and [examples](examples/).
 Each level has contextual help, including `dragontool host --help`,
@@ -639,7 +763,7 @@ and service rules are unavailable until the agent metric contract is established
 No disk alerts are deployed.
 
 For example, `dragontool monitoring install --host monitor.example.com --plan`
-prints all four implemented component installations and their retention/listener
+prints all eight implemented component installations and their retention/listener
 settings, then lists unavailable components. It performs no SSH. DragonTools owns
 versions, paths, retention, binding, and hardening; no component-specific
 configuration or new CLI options are needed for normal installation.
@@ -686,10 +810,11 @@ with ordinary SSH. For `MissingRemotePrerequisite`, install the listed Ubuntu pa
 and rerun. For account/unit conflicts, inspect existing configuration before making
 any manual change; DragonTools does not adopt it silently.
 
-## Alert policy and provisional rendering
+## Deployed alerts and deferred host/service policy
 
-Alert policy is defined in `src/monitoring/policy.zig`; rendering is partial and
-provisional; alert runtime is unavailable. No rules are installed or evaluated.
+Alert policy is defined in `src/monitoring/policy.zig`. The fixed log pack and
+ServiceProbeFailed are installed and evaluated by separate vmalert instances.
+Host and systemd-service metric rules remain deferred.
 The future Vector agent slice must establish the actual host metric contract, and
 the systemd service-state monitoring solution is intentionally deferred.
 
@@ -705,13 +830,14 @@ intent, with their signal sources still to be established.
 It emits no guessed Vector expressions. These are internal Zig APIs; there is no
 rule-export or rule-deployment CLI command.
 
-`renderLogs` still emits deterministic provisional VictoriaLogs `type: vlogs`
-YAML. ErrorBurst groups normalized `level=error` events by service and requires at
+`renderLogs` supplies the deterministic VictoriaLogs `type: vlogs` pack;
+installation marks and validates the managed rule document before activation. ErrorBurst groups normalized `level=error` events by service and requires at
 least 5 within 5 minutes. CriticalLogEvent requires one normalized `critical` or
 `fatal` event within 1 minute, without a hold period. The intended evaluation
-interval is one minute; no notifications are currently delivered. Structured log
-fields, datasource routing, and event-time behavior need verification with the
-future agents and evaluator. See [design](design.md).
+interval is one minute. Both evaluators notify Alertmanager; Telegram delivery is
+optional. No application-host log collector is installed, so log alerts require
+existing local structured data. End-to-end ingestion and event-time behavior remain
+real-host integration gates. See [design](design.md).
 
 Generated log alerts have stable `severity` and `source` labels and summaries
 without log messages, request IDs, or secrets. Rendering performs no SSH,
@@ -720,8 +846,7 @@ not establish runtime or production compatibility.
 
 ## Next milestones
 
-Dashboards, authenticated Metrics/Traces datasource query checks, vmalert,
-Alertmanager/Telegram; Vector for journald logs and host metrics, vmagent for
+Dashboards, authenticated Metrics/Traces datasource query checks; Vector for journald logs and host metrics, vmagent for
 application `/metrics`, and OTel Collector for application OTLP;
 bounded journald; restricted ingestion; safe monitoring firewall; DNS-01 TLS;
 oneshot maintenance; update/security checks and alerts.

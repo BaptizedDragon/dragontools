@@ -157,15 +157,18 @@ const overview = std.fmt.comptimePrint(
     \\  Logs/traces cleanup is periodic and preserves the newest two partitions.
     \\  Each budget excludes other writers, so adequate headroom is required.
     \\  Grafana: local authentication and Metrics/Logs/Traces datasources, bound to 127.0.0.1:3000.
+    \\  Blackbox exporter: HTTP/HTTPS GET with verified TLS, bound to 127.0.0.1:9115.
+    \\  Native VictoriaMetrics scraper: 30s interval / 5s timeout; probe changes reload without restart.
+    \\  vmalert-logs: 127.0.0.1:8880; vmalert-metrics: 127.0.0.1:8881; Alertmanager: 127.0.0.1:9093.
+    \\  Probes and optional Telegram use the CLI --config TOML path; this wizard creates a station without them.
+    \\  ServiceProbeFailed evaluates probe_success == 0 for 2m; down targets do not fail installation.
     \\  Access with an explicit SSH tunnel. The official VictoriaLogs plugin is pinned; dashboards remain unavailable.
     \\  No application-host ingestion is configured.
     \\  SSH installation with strict host-key checks, dedicated service users,
     \\  pinned and checksum-verified binaries, and systemd hardening.
     \\
     \\Roadmap only - not installed or configured in this release
-    \\  Monitoring station:
-    \\    vmalert               alert evaluation
-    \\    Alertmanager          alert routing; optional Telegram
+    \\  Monitoring station: dashboards and host/service-state alert contracts.
     \\  Monitored server:
     \\    vmagent               application /metrics scraping
     \\    Vector                journal logs and host metrics
@@ -287,7 +290,7 @@ fn workflow(input: Input, command: spec.Command) !?[]const []const u8 {
     var step: Step = .host;
     var history: std.ArrayList(Step) = .empty;
     defer history.deinit(input.a);
-    if (command == .install) try input.write(std.fmt.comptimePrint("\nThis release installs VictoriaMetrics, VictoriaLogs, VictoriaTraces and Grafana on loopback only.\nMetrics retention is {d} days, with a {d}% data filesystem reserve.\nLogs retain as much history as fits, with a {s} logical limit and a {d}%\nfilesystem-capacity partition budget.\nTraces use a {s} logical limit and a {d}% filesystem-capacity partition budget.\nBoth budgets exclude other writers and preserve the newest two partitions.\nCleanup is periodic; adequate capacity/headroom is required. These defaults are fixed.\nApplication-host ingestion remains unavailable. Reruns inspect actual state,\nresume pending activation, and leave healthy unchanged services running.\n", .{ policy.metrics.retention_days, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent, policy.traces.retention, policy.traces.cleanup_usage_percent }));
+    if (command == .install) try input.write(std.fmt.comptimePrint("\nThis release installs eight loopback services: VictoriaMetrics, VictoriaLogs, VictoriaTraces, Grafana, blackbox exporter, Alertmanager and two vmalert instances.\nMetrics retention is {d} days, with a {d}% data filesystem reserve.\nLogs retain as much history as fits, with a {s} logical limit and a {d}%\nfilesystem-capacity partition budget.\nTraces use a {s} logical limit and a {d}% filesystem-capacity partition budget.\nBoth budgets exclude other writers and preserve the newest two partitions.\nCleanup is periodic; adequate capacity/headroom is required. These defaults are fixed.\nApplication-host ingestion remains unavailable. Reruns inspect actual state,\nresume pending activation, and leave healthy unchanged services running.\n", .{ policy.metrics.retention_days, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent, policy.traces.retention, policy.traces.cleanup_usage_percent }));
     if (command == .agents_install) try input.write("\nAgent installation is unavailable in this release; even --plan is rejected\nbefore SSH. This helper can collect and preview future CLI configuration.\nThe intended install includes Vector, vmagent, OpenTelemetry Collector,\nhost metrics and a maintenance/update checker. It must inspect and bound\njournald and verify signal arrival before reporting installation success.\n");
     if (command == .firewall) try input.write("\nFirewall management is unavailable; even --plan is rejected before SSH.\nIntended policy: admin IPs may access SSH and Grafana; agent IPs may submit\ntelemetry only. DragonTools will manage monitoring-related rules only and\nmust preserve unrelated administrator configuration. This helper previews\nfuture configuration; it cannot claim that access restrictions are applied.\n");
     while (true) {
@@ -374,7 +377,7 @@ fn answerStep(input: Input, answers: *Answers, step: Step) !Step {
             return answers.afterConnection();
         },
         .extras => {
-            answers.extras = try input.yesNo("Collect roadmap-only domain/TLS/IP/Telegram settings?", "Choose no for the working VictoriaMetrics, VictoriaLogs, VictoriaTraces and Grafana installation. Supplying roadmap flags makes the CLI reject the operation before SSH, even in plan mode.");
+            answers.extras = try input.yesNo("Collect roadmap-only domain/TLS/IP/Telegram settings?", "Choose no for the working eight-service station. Configure probes and Telegram separately with CLI --config. Supplying roadmap flags makes the CLI reject the operation before SSH, even in plan mode.");
             if (answers.extras) try input.write("These optional integrations are unavailable. Any supplied roadmap flags\nwill be validated, then rejected before SSH, including in --plan mode.\n");
             return if (answers.extras) .domain else .review;
         },
@@ -407,11 +410,11 @@ fn answerStep(input: Input, answers: *Answers, step: Step) !Step {
             return if (step == .firewall_agents) .review else .telegram;
         },
         .telegram => {
-            answers.telegram = try input.yesNo("Telegram notifications?", "Optional roadmap integration using a bot token reference and numeric channel ID. No token is requested or resolved.");
+            answers.telegram = try input.yesNo("Telegram notifications?", "This legacy wizard flow produces unavailable flags. Working Telegram uses paired op references in [telegram] through CLI --config. No token is requested or resolved here.");
             return if (answers.telegram) .telegram_token else .review;
         },
         .telegram_token => {
-            answers.telegram_token = try input.prompt("Telegram bot token 1Password reference", null, false, "--telegram-bot-token-op", "Use an op:// reference, never paste a token. Protected credential-file sources are not supported yet.");
+            answers.telegram_token = try input.prompt("Telegram bot token 1Password reference", null, false, "--telegram-bot-token-op", "Use an op:// reference, never paste a token. This legacy flag is unavailable; use [telegram] in a CLI --config file for the working integration.");
             return .telegram_channel;
         },
         .telegram_channel => {
@@ -464,7 +467,7 @@ fn preview(input: Input, args: []const []const u8, options: parse.Options) !void
     }, options.host, options.user, options.port });
     try input.write(summary);
     if (options.command == .install) {
-        try input.write(try std.fmt.allocPrint(input.a, "Domain: {s}\nAdmin IPs: {d}\nAgent IPs: {d}\nTLS: {s}\nTelegram: {s}\nStorage: metrics {d} days; {d}% data filesystem reserve.\nLogs: disk-bound retention, logical limit {s}; partition budget {d}% of filesystem capacity (other writers excluded).\nTraces: disk-bound retention, logical limit {s}; partition budget {d}% of filesystem capacity (other writers excluded).\nListeners: loopback:8428 (metrics), loopback:9428 (logs), loopback:{d} (traces), loopback:3000 (Grafana).\nGrafana local authentication is enabled. Access via SSH forwarding only.\nMetrics, Logs and Traces are provisioned; dashboards are unavailable.\nApplication-host ingestion is unavailable. An unchanged rerun requires no restart.\n", .{ options.domain orelse "none", options.admin_ips.items.len, options.agent_ips.items.len, options.tls orelse "none", if (options.telegram_token_op != null) "requested (unavailable)" else "disabled", policy.metrics.retention_days, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent, policy.traces.retention, policy.traces.cleanup_usage_percent, vt.port }));
+        try input.write(try std.fmt.allocPrint(input.a, "Domain: {s}\nAdmin IPs: {d}\nAgent IPs: {d}\nTLS: {s}\nTelegram: {s}\nStorage: metrics {d} days; {d}% data filesystem reserve.\nLogs: disk-bound retention, logical limit {s}; partition budget {d}% of filesystem capacity (other writers excluded).\nTraces: disk-bound retention, logical limit {s}; partition budget {d}% of filesystem capacity (other writers excluded).\nListeners: loopback:8428 (metrics), loopback:9428 (logs), loopback:{d} (traces), loopback:3000 (Grafana).\nBlackbox: loopback:9115; Alertmanager: loopback:9093; vmalert logs/metrics: loopback:8880/8881.\nProbes and Telegram require the CLI --config path; this wizard does not configure them.\nGrafana local authentication is enabled. Access via SSH forwarding only.\nMetrics, Logs and Traces are provisioned; dashboards are unavailable.\nApplication-host ingestion is unavailable. An unchanged rerun requires no restart.\n", .{ options.domain orelse "none", options.admin_ips.items.len, options.agent_ips.items.len, options.tls orelse "none", if (options.telegram_token_op != null) "requested (unavailable)" else "disabled", policy.metrics.retention_days, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent, policy.traces.retention, policy.traces.cleanup_usage_percent, vt.port }));
     }
     if (options.command == .agents_install) try input.write(try std.fmt.allocPrint(input.a, "Station IP: {s}\nServices: {d}\n", .{ options.station_ip orelse "none", options.services.items.len }));
     if (options.command == .firewall) try input.write(try std.fmt.allocPrint(input.a, "Admin IPs: {d}\nAgent IPs: {d}\nNo firewall rules can be applied in this release.\n", .{ options.admin_ips.items.len, options.agent_ips.items.len }));

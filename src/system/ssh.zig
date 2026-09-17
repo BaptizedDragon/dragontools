@@ -36,10 +36,10 @@ pub const Ssh = struct {
             command
         else if (self.options.ssh_host != null)
             // The login UID is unknown locally in alias mode. Determine it on
-            // the host before choosing the concrete root execution path.
-            try std.fmt.allocPrint(a, "if [ \"$(id -u)\" -eq 0 ]; then {s}; else {s}; fi", .{
+            // the host before choosing the concrete root execution path. Keep
+            // one command copy so bounded configuration payloads fit argv limits.
+            try std.fmt.allocPrint(a, "if [ \"$(id -u)\" -eq 0 ]; then set --; else set -- sudo -n --; fi; \"$@\" {s}", .{
                 try remote.shell(a, &.{ "sh", "-c", command }),
-                try remote.shell(a, &.{ "sudo", "-n", "--", "sh", "-c", command }),
             })
         else if (std.mem.eql(u8, self.options.user, "root"))
             command
@@ -134,6 +134,7 @@ test "monitoring SSH alias elevates by actual remote UID and preserves strict au
     const payload = "literal apostrophe ' and $(not-a-command)";
     const args = try ssh.argv(try remote.shell(a, &.{ "printf", "%s", payload }));
     try std.testing.expectEqualStrings("monitoring", args[args.len - 2]);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, args[args.len - 1], "$(not-a-command)"));
     for ([_][]const u8{ "StrictHostKeyChecking=yes", "BatchMode=yes", "ForwardAgent=no", "ClearAllForwardings=yes" }) |required| {
         var present = false;
         for (args) |arg| if (std.mem.eql(u8, required, arg)) {
@@ -163,7 +164,7 @@ test "monitoring SSH alias elevates by actual remote UID and preserves strict au
             "id() {{ test \"$#\" = 1 && test \"$1\" = -u || return 91; printf '%s' '{d}'; }}\n{s}\n{s}",
             .{ uid, sudo_fixture, args[args.len - 1] },
         );
-        const result = try std.process.run(a, std.testing.io, .{ .argv = &.{ "/bin/sh", "-c", script } });
+        const result = try std.process.run(a, std.testing.io, .{ .argv = &.{ "/bin/sh", "-c", script, "fixture", "inherited-argument" } });
         try std.testing.expectEqual(@as(u8, 0), result.term.exited);
         try std.testing.expectEqualStrings("", result.stderr);
         try std.testing.expectEqualStrings(if (uid == 0) payload else "sudo\n" ++ payload, result.stdout);

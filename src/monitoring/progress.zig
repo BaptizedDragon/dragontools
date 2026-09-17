@@ -6,6 +6,10 @@ pub const Component = enum {
     victorialogs,
     victoriatraces,
     grafana,
+    blackbox_exporter,
+    alertmanager,
+    vmalert_logs,
+    vmalert_metrics,
 
     pub fn name(self: Component) []const u8 {
         return switch (self) {
@@ -13,6 +17,10 @@ pub const Component = enum {
             .victorialogs => "VictoriaLogs",
             .victoriatraces => "VictoriaTraces",
             .grafana => "Grafana",
+            .blackbox_exporter => "Blackbox exporter",
+            .alertmanager => "Alertmanager",
+            .vmalert_logs => "vmalert logs",
+            .vmalert_metrics => "vmalert metrics",
         };
     }
 };
@@ -40,14 +48,19 @@ pub const Phase = enum {
 pub const Event = struct {
     component: Component,
     phase: Phase,
+    station_enabled: bool = false,
 
     pub fn text(self: Event) []const u8 {
         return switch (self.phase) {
             .component_started => switch (self.component) {
-                .victoriametrics => "[1/4] VictoriaMetrics\n",
-                .victorialogs => "[2/4] VictoriaLogs\n",
-                .victoriatraces => "[3/4] VictoriaTraces\n",
-                .grafana => "[4/4] Grafana\n",
+                .victoriametrics => if (self.station_enabled) "[1/8] VictoriaMetrics\n" else "[1/4] VictoriaMetrics\n",
+                .victorialogs => if (self.station_enabled) "[2/8] VictoriaLogs\n" else "[2/4] VictoriaLogs\n",
+                .victoriatraces => if (self.station_enabled) "[3/8] VictoriaTraces\n" else "[3/4] VictoriaTraces\n",
+                .grafana => if (self.station_enabled) "[4/8] Grafana\n" else "[4/4] Grafana\n",
+                .blackbox_exporter => "[5/8] Blackbox exporter\n",
+                .alertmanager => "[6/8] Alertmanager\n",
+                .vmalert_logs => "[7/8] vmalert logs\n",
+                .vmalert_metrics => "[8/8] vmalert metrics\n",
             },
             .inspecting => "      inspecting...\n",
             .converging => "      applying required changes...\n",

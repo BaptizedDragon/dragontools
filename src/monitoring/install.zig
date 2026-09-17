@@ -20,12 +20,16 @@ pub const Report = struct {
     progress: ?progress.Sink = null,
     grafana_credentials: ?*const @import("../secrets/secret.zig").Secret = null,
     logs_query_verified: bool = false,
+    station_enabled: bool = false,
+    probes: []const @import("probes.zig").Probe = &.{},
+    telegram_credentials: ?*const @import("../secrets/secret.zig").Secret = null,
+    telegram_configured: bool = false,
     component_changes_before: usize = 0,
     convergence_reported: bool = false,
     verification_reported: bool = false,
     waiting_reported: bool = false,
     pub fn emit(self: *Report, phase: progress.Phase) void {
-        if (self.progress) |sink| if (self.component) |component| sink.emit(.{ .component = component, .phase = phase });
+        if (self.progress) |sink| if (self.component) |component| sink.emit(.{ .component = component, .phase = phase, .station_enabled = self.station_enabled });
     }
     pub fn beginComponent(self: *Report, component: Component) void {
         self.component = component;
@@ -120,7 +124,7 @@ const victoriatraces_directories = "set -eu\nchanged=0\n" ++ dataDirectory("vict
 // NeedDaemonReload can be global after enable/disable. It requires a reload,
 // never a component restart. Only the component's binary/unit writer records
 // restart intent, which survives a reload performed for another component.
-fn activation(comptime component: []const u8) []const u8 {
+pub fn activation(comptime component: []const u8) []const u8 {
     return std.fmt.comptimePrint(
         \\set -eu
         \\unit=dragontools-{s}.service; pending=/var/lib/dragontools/{s}-restart-required
@@ -165,7 +169,8 @@ pub fn install(a: std.mem.Allocator, r: remote.Remote, report: *Report) !void {
     _ = try report.call(r, .directories, directories);
     report.reserve_bytes = try fs.reserve(try fs.capacity(try report.call(r, .capacity, capacity_command)));
     _ = try report.call(r, .binary, try vm.binaryCommand(a, machine.arch));
-    const unit = try units.render(a, report.reserve_bytes);
+    if (report.station_enabled) try @import("scrape.zig").prepare(a, r, report, machine.arch);
+    const unit = try units.renderStation(a, report.reserve_bytes, report.station_enabled);
     _ = try report.call(r, .unit, try @import("../system/files.zig").writeCommand(a, units.unit_path, unit, vm.pending));
     _ = try report.call(r, .activate, activate);
     try @import("verify.zig").health(a, r, report, machine.arch);
@@ -195,4 +200,20 @@ pub fn install(a: std.mem.Allocator, r: remote.Remote, report: *Report) !void {
     report.beginComponent(.grafana);
     try @import("grafana_install.zig").install(a, r, report, machine.arch);
     report.endComponent();
+    if (report.station_enabled) {
+        report.beginComponent(.blackbox_exporter);
+        try @import("blackbox.zig").install(a, r, report, machine.arch);
+        report.endComponent();
+        report.component = .victoriametrics;
+        try @import("scrape.zig").reconcile(a, r, report, machine.arch);
+        report.beginComponent(.alertmanager);
+        try @import("alertmanager.zig").install(a, r, report, machine.arch);
+        report.endComponent();
+        report.beginComponent(.vmalert_logs);
+        try @import("vmalert.zig").install(a, r, report, machine.arch, .logs);
+        report.endComponent();
+        report.beginComponent(.vmalert_metrics);
+        try @import("vmalert.zig").install(a, r, report, machine.arch, .metrics);
+        report.endComponent();
+    }
 }

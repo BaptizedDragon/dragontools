@@ -39,7 +39,24 @@ pub fn status(a: std.mem.Allocator, r: remote.Remote, report: *install.Report) !
     const vt = try report.call(r, .status, "systemctl show dragontools-victoriatraces.service --property=LoadState,ActiveState,SubState,UnitFileState --no-pager");
     report.component = .grafana;
     const grafana = try report.call(r, .status, "systemctl show dragontools-grafana.service --property=LoadState,ActiveState,SubState,UnitFileState --no-pager");
-    return std.fmt.allocPrint(a, "VictoriaMetrics: loopback:8428\n  state: {s}\n  enabled: {s}\nVictoriaLogs: loopback:9428\n  state: {s}\n  enabled: {s}\nVictoriaTraces: loopback:{d}\n  state: {s}\n  enabled: {s}\nGrafana: loopback:3000\n  state: {s}\n  enabled: {s}\n  datasources (expected policy; not queried):\n    Metrics -> VictoriaMetrics\n    Logs -> VictoriaLogs\n    Traces -> VictoriaTraces\nListeners and datasources above are the managed policy. Run monitoring verify to check effective policy, health, identity and storage.\n", .{ state(vm), enabled(vm), state(vl), enabled(vl), traces.port, state(vt), enabled(vt), state(grafana), enabled(grafana) });
+    const core = try std.fmt.allocPrint(a, "VictoriaMetrics: loopback:8428\n  state: {s}\n  enabled: {s}\nVictoriaLogs: loopback:9428\n  state: {s}\n  enabled: {s}\nVictoriaTraces: loopback:{d}\n  state: {s}\n  enabled: {s}\nGrafana: loopback:3000\n  state: {s}\n  enabled: {s}\n  datasources (expected policy; not queried):\n    Metrics -> VictoriaMetrics\n    Logs -> VictoriaLogs\n    Traces -> VictoriaTraces\nListeners and datasources above are the managed policy. Run monitoring verify to check effective policy, health, identity and storage.\n", .{ state(vm), enabled(vm), state(vl), enabled(vl), traces.port, state(vt), enabled(vt), state(grafana), enabled(grafana) });
+    if (!report.station_enabled) return core;
+    defer a.free(core);
+    var out: std.Io.Writer.Allocating = .init(a);
+    errdefer out.deinit();
+    try out.writer.writeAll(core);
+    inline for (.{
+        .{ install.Component.blackbox_exporter, "blackbox-exporter", @as(u16, 9115) },
+        .{ install.Component.alertmanager, "alertmanager", @as(u16, 9093) },
+        .{ install.Component.vmalert_logs, "vmalert-logs", @as(u16, 8880) },
+        .{ install.Component.vmalert_metrics, "vmalert-metrics", @as(u16, 8881) },
+    }) |entry| {
+        report.component = entry[0];
+        const result = try report.call(r, .status, "systemctl show dragontools-" ++ entry[1] ++ ".service --property=LoadState,ActiveState,SubState,UnitFileState --no-pager");
+        try out.writer.print("{s}: loopback:{d}\n  state: {s}\n  enabled: {s}\n", .{ entry[0].name(), entry[2], state(result), enabled(result) });
+    }
+    try out.writer.writeAll(try @import("scrape.zig").status(a, r, report));
+    return out.toOwnedSlice();
 }
 
 test "status recognizes exact properties without exposing remote text" {

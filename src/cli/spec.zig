@@ -1,8 +1,8 @@
 //! One small catalog shared by the strict parser and local UX frontends.
 const std = @import("std");
-pub const Command = enum { install, verify, status, agents_install, agents_verify, agents_status, firewall, install_oh_my_zsh };
+pub const Command = enum { install, verify, status, notify_test, agents_install, agents_verify, agents_status, firewall, install_oh_my_zsh };
 pub const Shell = enum { bash, zsh, fish };
-pub const Node = enum { root, monitoring, install, verify, status, agents, agents_install, agents_verify, agents_status, firewall, host, install_oh_my_zsh, completion, completion_bash, completion_zsh, completion_fish, wizard };
+pub const Node = enum { root, monitoring, install, verify, status, notify_test, agents, agents_install, agents_verify, agents_status, firewall, host, install_oh_my_zsh, completion, completion_bash, completion_zsh, completion_fish, wizard };
 pub const CommandSpec = struct {
     node: Node,
     parent: ?Node,
@@ -13,9 +13,10 @@ pub const CommandSpec = struct {
 pub const commands = [_]CommandSpec{
     .{ .node = .root, .parent = null, .name = "dragontool", .description = "Opinionated monitoring and small host utilities over SSH" },
     .{ .node = .monitoring, .parent = .root, .name = "monitoring", .description = "Install, verify and inspect monitoring" },
-    .{ .node = .install, .parent = .monitoring, .name = "install", .description = "Install VictoriaMetrics, VictoriaLogs, VictoriaTraces and Grafana", .command = .install },
-    .{ .node = .verify, .parent = .monitoring, .name = "verify", .description = "Verify installed VictoriaMetrics, VictoriaLogs, VictoriaTraces and Grafana", .command = .verify },
+    .{ .node = .install, .parent = .monitoring, .name = "install", .description = "Install the eight-service storage, Grafana, probe and alerting station", .command = .install },
+    .{ .node = .verify, .parent = .monitoring, .name = "verify", .description = "Verify station services, stored probe telemetry and alerting readiness", .command = .verify },
     .{ .node = .status, .parent = .monitoring, .name = "status", .description = "Show monitoring service state", .command = .status },
+    .{ .node = .notify_test, .parent = .monitoring, .name = "notify-test", .description = "Send an explicit test alert through configured Alertmanager", .command = .notify_test },
     .{ .node = .agents, .parent = .monitoring, .name = "agents", .description = "Manage monitored hosts (not yet available)" },
     .{ .node = .agents_install, .parent = .agents, .name = "install", .description = "Connect a monitored host (not yet available)", .command = .agents_install },
     .{ .node = .agents_verify, .parent = .agents, .name = "verify", .description = "Verify a monitored host (not yet available)", .command = .agents_verify },
@@ -41,13 +42,13 @@ pub const FlagSpec = struct {
     unavailable: bool = false,
     commands: []const Command,
 };
-const all = &[_]Command{ .install, .verify, .status, .agents_install, .agents_verify, .agents_status, .firewall, .install_oh_my_zsh };
+const all = &[_]Command{ .install, .verify, .status, .notify_test, .agents_install, .agents_verify, .agents_status, .firewall, .install_oh_my_zsh };
 const monitoring = &[_]Command{ .install, .verify, .status, .agents_install, .agents_verify, .agents_status, .firewall };
 const mutations = &[_]Command{ .install, .agents_install, .firewall, .install_oh_my_zsh };
 const host = &[_]Command{.install_oh_my_zsh};
-const native_ssh = &[_]Command{ .install, .verify, .status, .install_oh_my_zsh };
+const native_ssh = &[_]Command{ .install, .verify, .status, .notify_test, .install_oh_my_zsh };
 const station = &[_]Command{.install};
-const configured_station = &[_]Command{ .install, .verify, .status };
+const configured_station = &[_]Command{ .install, .verify, .status, .notify_test };
 const grafana_credentials = &[_]Command{ .install, .verify };
 const agents = &[_]Command{ .agents_install, .agents_verify };
 const network = &[_]Command{ .install, .firewall };
@@ -72,8 +73,8 @@ pub const flags = [_]FlagSpec{
     .{ .name = "--agent-ip", .description = "Agent source IP (repeatable)", .metavar = "IP", .group = "Monitoring", .repeatable = true, .unavailable = true, .commands = network },
     .{ .name = "--tls", .description = "TLS DNS-01 mode", .metavar = "manual|cloudflare", .kind = .enumeration, .values = &.{ "manual", "cloudflare" }, .group = "TLS", .unavailable = true, .commands = station },
     .{ .name = "--cloudflare-token-op", .description = "Cloudflare DNS token reference", .metavar = "REF", .kind = .reference, .group = "TLS", .unavailable = true, .commands = station },
-    .{ .name = "--telegram-bot-token-op", .description = "Telegram bot token reference", .metavar = "REF", .kind = .reference, .group = "Notifications", .unavailable = true, .commands = station },
-    .{ .name = "--telegram-channel-id", .description = "Telegram channel/chat ID", .metavar = "ID", .group = "Notifications", .unavailable = true, .commands = station },
+    .{ .name = "--telegram-bot-token-op", .description = "Legacy flag; use [telegram] secret references in --config", .metavar = "REF", .kind = .reference, .group = "Notifications", .unavailable = true, .commands = station },
+    .{ .name = "--telegram-channel-id", .description = "Legacy flag; use [telegram] chat_id secret reference in --config", .metavar = "ID", .group = "Notifications", .unavailable = true, .commands = station },
     .{ .name = "--plan", .description = "Show the existing plan without connecting", .kind = .boolean, .group = "Safety", .commands = mutations },
     .{ .name = "--help", .description = "Show command help", .kind = .boolean, .group = "Help", .commands = all },
 };

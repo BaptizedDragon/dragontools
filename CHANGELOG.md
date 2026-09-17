@@ -2,6 +2,32 @@
 
 ## 0.1.0-dev — unreleased
 
+- Install pinned blackbox_exporter 0.28.0, Alertmanager v0.34.1 and independent
+  vmalert-logs/vmalert-metrics v1.152.0 services, with dedicated accounts, reviewed
+  archive/binary checksums, atomic publication and loopback-only listeners.
+- Add bounded named HTTP/HTTPS probes in monitoring TOML. Use VictoriaMetrics'
+  native 30-second scraper, verified TLS, fixed GET/2xx semantics and owned labels;
+  constrain the reviewed exporter to HTTP/1.1 for its known HTTP/2 transport issue.
+- Deploy ServiceProbeFailed with a two-minute hold and the fixed structured-log
+  pack through separate evaluators. Collect probe durations without noisy latency
+  alerts. Down applications produce valid failed telemetry and do not fail install.
+- Reload only the native scrape configuration when probes change, preserving
+  separate restart/reload intent and unchanged no-op behavior. The first upgrade
+  enabling native scraping changes the VictoriaMetrics unit once.
+- Verify the loaded scraper metric/label policy and recover stale reloads; accept
+  bounded recent history from removed probes without confusing their identities.
+- Keep maximum-size probe configurations below SSH argument limits by selecting
+  elevation once and compressing fixed helper source with standard libraries.
+- Add optional Telegram SecretRefs resolved locally during install; protected
+  stdin transfers them to dedicated dt-alertmanager 0400 secret files. Unchanged
+  values are not rewritten. Verification never sends test notifications;
+  explicit notify-test submits a labeled Alertmanager alert without claiming receipt.
+- Add a read-only opt-in disposable-host observer for fresh failed probe samples
+  and the existing two-minute firing alert; local fixtures do not claim host validation.
+- Status observes recorded probe samples without fresh target requests. Document
+  eight-service boundaries, exact pins, source review and disposable-host gates;
+  agents, host/service metric packs, dashboards and remote ingestion remain deferred.
+
 - Drain stdin in checksum fixture mocks to avoid scheduling-dependent broken-pipe
   errors on macOS. Preserve production verification and empty-stderr assertions.
 

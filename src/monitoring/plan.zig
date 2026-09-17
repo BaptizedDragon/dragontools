@@ -7,7 +7,26 @@ const vt = @import("../components/victoriatraces.zig");
 const grafana = @import("../components/grafana.zig");
 const logs_plugin = @import("../components/grafana_victorialogs_plugin.zig");
 
-pub const unavailable = "Not yet available: dashboards, vmalert, Alertmanager, Telegram, Vector, vmagent, OTel Collector, monitoring agents, firewall, TLS, update monitoring and maintenance.\n";
+pub const unavailable = "Not yet available: dashboards, Vector, vmagent, OTel Collector, application-host agents/ingestion, firewall, TLS, update monitoring and maintenance.\n";
+
+pub fn renderStation(a: std.mem.Allocator, grafana_configured: bool, telegram_configured: bool, probe_count: usize) ![]const u8 {
+    const core = try renderWithCredentials(a, grafana_configured);
+    defer a.free(core);
+    const without_footer = try std.mem.replaceOwned(u8, a, core, unavailable ++ "No remote operations performed.\n", "");
+    defer a.free(without_footer);
+    const station_core = try std.mem.replaceOwned(u8, a, without_footer, "Plan: install VictoriaMetrics, VictoriaLogs, VictoriaTraces and Grafana.\n", "Plan: install the monitoring station (eight services).\n");
+    defer a.free(station_core);
+    return std.fmt.allocPrint(a, "{s}\nExternal HTTP probes: {d} configured (GET, HTTP 2xx, verified TLS, 30s interval / 5s scrape timeout).\n" ++
+        "Blackbox exporter {s}: loopback:9115; dedicated dt-blackbox; HTTP/1.1 only.\n" ++
+        "VictoriaMetrics native scraper: fixed configuration path; one initial unit migration, then target changes use reload without restart.\n" ++
+        "Probe status observes stored telemetry; probe_success=0 is valid monitoring state, not an installation failure.\n" ++
+        "vmalert {s}: independent logs loopback:8880 -> VictoriaLogs and metrics loopback:8881 -> VictoriaMetrics; both notify Alertmanager.\n" ++
+        "Deploy ErrorBurst/CriticalLogEvent and ServiceProbeFailed (probe_success == 0 for 2m); no latency or host-metric rules.\n" ++
+        "Alertmanager {s}: loopback:9093; clustering disabled; Telegram {s}.\n" ++
+        "Configured Telegram references resolve locally during install only, then transfer through protected stdin to dt-alertmanager 0400 secret files.\n" ++
+        "Verification never sends test alerts; notify-test is a separate explicit command.\n" ++
+        unavailable ++ "No remote operations performed.\n", .{ station_core, probe_count, @import("../components/blackbox_exporter.zig").version, @import("../components/vmalert.zig").version, @import("../components/alertmanager.zig").version, if (telegram_configured) "configured via secret references" else "disabled (no references)" });
+}
 
 pub fn render(a: std.mem.Allocator) ![]const u8 {
     return renderWithCredentials(a, false);
@@ -45,7 +64,7 @@ pub fn renderWithCredentials(a: std.mem.Allocator, configured: bool) ![]const u8
         "  Metrics/Traces query-engine and browser UI checks require manual verification through the tunnel\n\n" ++
         "Access: SSH port forwarding only; public HTTPS, TLS and firewall management are unavailable.\n\n" ++
         "Safe rerun: inspect actual state, resume pending activation, and verify before finalization. Healthy unchanged services are not restarted; unchanged valid binaries are not downloaded. No controller state database.\n" ++
-        "Alert policy is defined; rendering is partial/provisional. Host/service expressions await verified metric contracts. No rule deployment or alert evaluation/delivery.\n" ++
+        "Host and systemd-service metric rules await verified agent contracts.\n" ++
         unavailable ++
         "No remote operations performed.\n", .{
         vm.version,

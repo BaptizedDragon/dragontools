@@ -26,9 +26,13 @@ Future telemetry authorization is source-IP/network based. Monitored hosts are
 trusted infrastructure; a compromised allowlisted host can submit telemetry.
 Grafana still needs user authentication. A provider firewall is recommended outside
 the monitoring-only host rules. Raw administrative APIs must not be exposed to agent
-networks. Current VictoriaMetrics, VictoriaLogs, and VictoriaTraces bind loopback only on
-8428, 9428, and 10428; authenticated Grafana binds 127.0.0.1:3000. All are reachable by target-local users and explicitly established SSH tunnels. No firewall or TLS protection is
-claimed beyond this boundary.
+networks. Current VictoriaMetrics, VictoriaLogs, and VictoriaTraces bind loopback
+only on 8428, 9428, and 10428; authenticated Grafana binds 127.0.0.1:3000.
+Blackbox exporter, Alertmanager, vmalert-logs and vmalert-metrics bind loopback on
+9115, 9093, 8880 and 8881. Alertmanager clustering is disabled, including its
+normally separate cluster listener. These administrative and probe APIs are
+reachable by target-local users and explicitly established SSH tunnels. No
+firewall or TLS protection is claimed beyond this boundary.
 
 
 Without configured administrator secret references, a fresh Grafana database uses
@@ -77,14 +81,54 @@ metadata; upstream operational/audit logging may include a username, including
 on authenticated HTTP errors. This is separate from DragonTools' redacted output.
 The helper never logs the password. Native Grafana logging has been reviewed in
 pinned source; disposable-host credential integration has not been run.
-Future persistent TLS/notification consumers must use systemd credentials as
-described in architecture.md, with encrypted root-only sources and a reviewed
-plaintext fallback only when explicitly selected.
+Optional Telegram references resolve locally during install only. The dedicated
+protected stdin consumer stores the token and chat ID in service-owned mode-0400
+files under `/etc/dragontools/alertmanager/secrets`, with restrictive parent access.
+These persistent plaintext files are required by this explicitly configured
+consumer: they are readable by root and `dt-alertmanager`, never by ordinary file
+writers or through generated YAML, argv, units or DragonTools output. References
+are the only values retained in the controller configuration. Verification and
+status inspect installed policy without resolving Telegram references. The
+explicit `notify-test` submits a short-lived alert to Alertmanager; acceptance
+does not establish human receipt. Live rule evaluation may send real notifications
+independently of an install or verify invocation.
+
+The pinned Alertmanager Telegram error path can include the bot token in its HTTP
+URL. Its service therefore sets both `StandardOutput=null` and
+`StandardError=null`, and verification requires those effective values. Native
+Alertmanager journal logs are unavailable. Use systemd state, health/API/metrics
+and fixed semantic controller errors for diagnosis. This is not global stderr
+suppression and does not weaken shell fixture assertions. See the
+[pinned client source review](design.md#external-probing-and-alert-runtime).
+
+Future persistent TLS consumers must use systemd credentials as described in
+architecture.md, with encrypted root-only sources and a reviewed plaintext
+fallback only when explicitly selected. The Telegram consumer above is an
+explicit, separately reviewed protected-file exception.
 
 Service hardening limits privileges and filesystem writes. It is not protection
 against an already-compromised root account or controller. An artifact digest verifies
 agreement with the reviewed upstream release; it does not protect against a malicious
 publisher. Managed root directories must not be shared with untrusted writers.
+
+External HTTP/HTTPS probes are outbound requests issued as `dt-blackbox` without
+raw-socket privileges. Configuration accepts bounded names and URLs but no URL
+credentials, query strings, fragments, headers or custom labels. Names, target
+URLs and paths are non-secret metadata: they are stored with metrics, may appear
+in status, and identify failing alerts. Do not place secrets in URL paths.
+The generated module follows redirects and permits trusted configured destinations
+to resolve or redirect to private addresses; no egress sandbox or SSRF filter is
+claimed. Only trusted administrators should configure probes or access the local
+exporter's probe API. Targets and their responses are otherwise untrusted.
+
+The five-second HTTP module verifies TLS certificates, prefers IPv4 with DNS-family
+fallback, and disables HTTP/2. The reviewed blackbox 0.28.0 release contains a
+dependency affected by GO-2026-4918; disabling HTTP/2 avoids the affected transport
+for this fixed module, but does not claim the upstream release has been patched.
+There is no ICMP module. Probe history is disabled and ordinary probe logs are
+restricted to errors. Prometheus relabeling retains only the reviewed metric and
+label sets; target failure is recorded as `probe_success=0`, not a station failure.
+See the [exact pins and HTTP transport review](design.md#external-probing-and-alert-runtime).
 
 The host utility inspects the SSH login account before elevation and writes home
 content as the target account. Missing packages or switching to another target may

@@ -2,6 +2,7 @@ const std = @import("std");
 const spec = @import("spec.zig");
 const config = @import("../config/monitoring.zig");
 const references = @import("../secrets/reference.zig");
+const probes = @import("../monitoring/probes.zig");
 pub const Command = spec.Command;
 pub const Action = enum { monitoring, host, completion, wizard };
 pub const Options = struct {
@@ -16,6 +17,9 @@ pub const Options = struct {
     config_path: ?[]const u8 = null,
     grafana_user_op: ?[]const u8 = null,
     grafana_password_op: ?[]const u8 = null,
+    probes: []const probes.Probe = &.{},
+    telegram_bot_token_op: ?[]const u8 = null,
+    telegram_chat_id_op: ?[]const u8 = null,
     // Explicit defaults still conflict with alias mode after config merge.
     explicit_user: bool = false,
     explicit_port: bool = false,
@@ -182,6 +186,9 @@ fn validateMerged(o: Options, complete: bool) !void {
     if (o.ssh_host) |value| try validateValue("--ssh-host", value);
     if (o.grafana_user_op) |value| try validateValue("--grafana-user-op", value);
     if (o.grafana_password_op) |value| try validateValue("--grafana-password-op", value);
+    try probes.validate(o.probes);
+    if (o.telegram_bot_token_op) |value| _ = try references.parseOnePassword(value);
+    if (o.telegram_chat_id_op) |value| _ = try references.parseOnePassword(value);
     if (o.ssh_host != null) {
         if (o.host.len != 0) return error.ConflictingHosts;
         // Alias mode lets OpenSSH resolve every connection/authentication field.
@@ -191,6 +198,7 @@ fn validateMerged(o: Options, complete: bool) !void {
     const modes: u8 = @intFromBool(o.ssh_sock != null) + @as(u8, @intFromBool(o.identity != null)) + @as(u8, @intFromBool(o.ssh_op_path != null));
     if (modes > 1) return error.ConflictingAuthentication;
     if (complete and !o.help and (o.grafana_user_op != null) != (o.grafana_password_op != null)) return error.GrafanaCredentialReferencesRequired;
+    if (complete and !o.help and (o.telegram_bot_token_op != null) != (o.telegram_chat_id_op != null)) return error.TelegramCredentialReferencesRequired;
 }
 
 /// Transfer ownership only after validating the complete merge. On failure the
@@ -201,6 +209,9 @@ fn merge(o: *Options, values: config.Config) !void {
     if (merged.ssh_host == null and merged.host.len == 0) merged.ssh_host = values.ssh_host;
     if (merged.grafana_user_op == null) merged.grafana_user_op = values.grafana_user_op;
     if (merged.grafana_password_op == null) merged.grafana_password_op = values.grafana_password_op;
+    merged.probes = values.probes;
+    if (merged.telegram_bot_token_op == null) merged.telegram_bot_token_op = values.telegram_bot_token_op;
+    if (merged.telegram_chat_id_op == null) merged.telegram_chat_id_op = values.telegram_chat_id_op;
     try validateMerged(merged, true);
     merged.config_values = values;
     o.* = merged;
@@ -433,4 +444,40 @@ test "config and Grafana flags are available only in intended command contexts" 
     defer help_options.deinit(a);
     try loadAndMerge(a, std.testing.io, &help_options);
     try std.testing.expect(help_options.config_values == null);
+}
+
+test "monitoring merge owns normalized probes and opaque Telegram references" {
+    const a = std.testing.allocator;
+    const contents =
+        \\version = 1
+        \\[connection]
+        \\ssh_host = 'monitoring'
+        \\[telegram]
+        \\bot_token = { op = 'op://Example/DragonTools/token' }
+        \\chat_id = { op = 'op://Example/DragonTools/chat' }
+        \\[[probe]]
+        \\name = 'example'
+        \\url = 'HTTPS://EXAMPLE.COM:443'
+    ;
+    for ([_][]const u8{ "install", "verify", "status" }) |command| {
+        var options = try parse(a, &.{ "monitoring", command, "--config", "monitoring.toml" });
+        defer options.deinit(a);
+        try mergeText(a, &options, contents);
+        try std.testing.expectEqual(@as(usize, 1), options.probes.len);
+        try std.testing.expectEqualStrings("https://example.com/", options.probes[0].url);
+        try std.testing.expectEqualStrings("op://Example/DragonTools/token", options.telegram_bot_token_op.?);
+        try std.testing.expectEqualStrings("op://Example/DragonTools/chat", options.telegram_chat_id_op.?);
+        try std.testing.expect(options.telegram_token_op == null);
+        try std.testing.expect(options.telegram_channel_id == null);
+        try std.testing.expect(!options.unsupported());
+    }
+}
+
+test "legacy Telegram arguments do not silently become the supported reference pair" {
+    const a = std.testing.allocator;
+    var options = try parse(a, &.{ "monitoring", "install", "--ssh-host", "monitoring", "--telegram-bot-token-op", "op://Example/DragonTools/token", "--telegram-channel-id", "-10012345" });
+    defer options.deinit(a);
+    try std.testing.expect(options.unsupported());
+    try std.testing.expect(options.telegram_bot_token_op == null);
+    try std.testing.expect(options.telegram_chat_id_op == null);
 }

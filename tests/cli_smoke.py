@@ -54,6 +54,18 @@ username = { op = "op://REDACTION-SENTINEL/Grafana/username" }
 password = { op = "op://REDACTION-SENTINEL/Grafana/password" }
 ''')
     config_args = ["monitoring", "install", "--config", str(config), "--plan"]
+    station_config = directory / "station.toml"
+    station_config.write_text(config.read_text() + '''
+[telegram]
+bot_token = { op = "op://REDACTION-SENTINEL/DragonTools/token" }
+chat_id = { op = "op://REDACTION-SENTINEL/DragonTools/chat_id" }
+[[probe]]
+name = "landing"
+url = "HTTPS://EXAMPLE.COM:443/healthz"
+[[probe]]
+name = "orders"
+url = "https://orders.example.com/healthz"
+''')
     configured_credentials = "administrator credentials: configured via secret references"
     invalid_configs = []
     for name, contents, failure in (
@@ -62,6 +74,12 @@ password = { op = "op://REDACTION-SENTINEL/Grafana/password" }
         ("duplicate", 'version = 1\nversion = 1\n', "DuplicateMonitoringConfigKey"),
         ("version", 'version = 2\n', "UnsupportedMonitoringConfigVersion"),
         ("reference", 'version = 1\n[grafana]\nusername = { op = "REDACTION-SENTINEL" }\n', "InvalidSecretReference"),
+        ("probe-duplicate", "version=1\n[[probe]]\nname='same'\nurl='https://example.com/a'\n[[probe]]\nname='same'\nurl='https://example.com/b'\n", "DuplicateProbeName"),
+        ("probe-scheme", "version=1\n[[probe]]\nname='example'\nurl='ftp://example.com/'\n", "InvalidProbeUrl"),
+        ("probe-credentials", "version=1\n[[probe]]\nname='example'\nurl='https://REDACTION-SENTINEL@example.com/'\n", "InvalidProbeUrl"),
+        ("probe-query", "version=1\n[[probe]]\nname='example'\nurl='https://example.com/?secret=REDACTION-SENTINEL'\n", "InvalidProbeUrl"),
+        ("telegram-partial", "version=1\n[telegram]\nbot_token={op='op://Example/DragonTools/token'}\n", "TelegramCredentialReferencesRequired"),
+        ("telegram-literal", "version=1\n[telegram]\nbot_token='REDACTION-SENTINEL'\n", "InvalidMonitoringConfig"),
         ("oversize", "#" * (64 * 1024 + 1), "MonitoringConfigTooLarge"),
     ):
         invalid = directory / f"{name}.toml"
@@ -106,6 +124,7 @@ password = { op = "op://REDACTION-SENTINEL/Grafana/password" }
          1, "FlagNotAllowed"),
         (["monitoring", "install", "--ssh-host", "REDACTION-SENTINEL", "--plan"], 0, "Grafana: loopback:3000"),
         (config_args, 0, configured_credentials),
+        (["monitoring", "install", "--config", str(station_config), "--plan"], 0, "External HTTP probes: 2 configured"),
         (["monitoring", "install", "--config", os.path.relpath(config), "--plan"], 0, configured_credentials),
         ([*config_args, "--ssh-host", "other"], 0, configured_credentials),
         ([*config_args, "--host", "example.com", "--user", "ops", "--port", "2222"], 0, configured_credentials),
@@ -126,6 +145,7 @@ password = { op = "op://REDACTION-SENTINEL/Grafana/password" }
         (["monitoring", "agents", "verify", "--host", "example.com"], 1, "NotImplemented"),
         (["monitoring", "agents", "status", "--host", "example.com"], 1, "NotImplemented"),
         (["monitoring", "firewall", "--host", "example.com"], 1, "NotImplemented"),
+        (["monitoring", "notify-test", "--ssh-host", "monitoring"], 1, "TelegramConfigurationRequired"),
         (["monitoring", "install", "--host", "example.com",
           "--telegram-bot-token-op", "op://REDACTION-SENTINEL/item/token"], 1, "NotImplemented"),
         (["monitoring", "install", "--host", "REDACTION-SENTINEL;id"], 1, "InvalidHost"),
@@ -180,8 +200,8 @@ password = { op = "op://REDACTION-SENTINEL/Grafana/password" }
     assert set(host_plans) == {(False, False), (True, False), (False, True), (True, True)}
     checked += 1
 
-    # All four real components have install sections; native retention remains
-    # distinct from provisional alert rendering and unavailable agent/runtime paths.
+    # Storage/Grafana and four station services are implemented; agents remain
+    # explicitly unavailable and plans perform no secret or network operations.
     vm_heading = "VictoriaMetrics: loopback:8428"
     vl_heading = "VictoriaLogs: loopback:9428"
     vt_heading = "VictoriaTraces: loopback:10428"
@@ -211,19 +231,21 @@ password = { op = "op://REDACTION-SENTINEL/Grafana/password" }
     configured_plan = local_run(config_args).stdout
     assert "verify Logs plugin health and a bounded read-only LogsQL query through Grafana" in configured_plan
     assert "Logs plugin query requires administrator references" not in configured_plan
-    for component in ("vmalert", "Alertmanager", "Vector", "vmagent",
-                      "OTel", "agents", "firewall", "TLS", "Telegram"):
+    for component in ("Vector", "vmagent", "OTel", "agents", "firewall", "TLS"):
         assert component in unavailable, (component, unavailable)
-    # The old host metric expressions must not be described as deployed alerts.
-    assert "provisional" in plan_output.lower(), plan_output
-    assert "No rule deployment or alert evaluation/delivery" in plan_output, plan_output
+    for component in ("vmalert", "Alertmanager", "Telegram"):
+        assert component not in unavailable, (component, unavailable)
+    for text in ("eight services", "loopback:9115", "loopback:9093", "logs loopback:8880", "metrics loopback:8881",
+                 "ServiceProbeFailed", "probe_success == 0 for 2m", "reload without restart", "notify-test is a separate explicit command"):
+        assert text in plan_output, (text, plan_output)
+    assert "Host and systemd-service metric rules await verified agent contracts." in plan_output
     assert "Healthy unchanged services are not restarted" in plan_output, plan_output
     checked += 1
 
     help_paths = [
         ["host"], ["host", "install-oh-my-zsh"],
         ["monitoring"], ["monitoring", "install"], ["monitoring", "verify"],
-        ["monitoring", "status"], ["monitoring", "agents"],
+        ["monitoring", "status"], ["monitoring", "notify-test"], ["monitoring", "agents"],
         ["monitoring", "agents", "install"], ["monitoring", "agents", "verify"],
         ["monitoring", "agents", "status"], ["monitoring", "firewall"],
         ["completion"], ["wizard"],
@@ -266,7 +288,7 @@ password = { op = "op://REDACTION-SENTINEL/Grafana/password" }
         assert result.stdout.strip(), (shell, "Empty completion script")
         assert not result.stderr, (shell, result.stderr)
         assert local_run(["completion", shell]).stdout == result.stdout, shell
-        for text in ("monitoring", "agents", "firewall", "host", "install-oh-my-zsh",
+        for text in ("monitoring", "notify-test", "agents", "firewall", "host", "install-oh-my-zsh",
                      "ssh-host", "target-user", "set-default-shell", "update-managed-zshrc",
                      "tls", "manual", "cloudflare", "config", "grafana-user-op", "grafana-password-op"):
             assert text in result.stdout, (shell, text)
@@ -306,7 +328,7 @@ password = { op = "op://REDACTION-SENTINEL/Grafana/password" }
             # Boolean flags must not consume the following option as a value.
             assert "--ssh-host" in bash_complete(["dragontool", "host", "install-oh-my-zsh", flag, "--"])
         assert not bash_complete(["dragontool", "host", "install-oh-my-zsh", "--ssh-host", ""])
-        assert {"install", "verify", "status", "agents", "firewall"} <= bash_complete(
+        assert {"install", "verify", "status", "notify-test", "agents", "firewall"} <= bash_complete(
             ["dragontool", "monitoring", ""])
         assert {"install", "verify", "status"} <= bash_complete(["dragontool", "monitoring", "agents", ""])
         install_flags = bash_complete(["dragontool", "monitoring", "install", "--"])
@@ -434,7 +456,8 @@ password = { op = "op://REDACTION-SENTINEL/Grafana/password" }
     assert "REDACTION-SENTINEL" not in status.stdout + status.stderr
     checked += 1
 
-    # Successful status still performs only the four service-state queries.
+    # Successful status performs eight service-state queries plus a stored-probe
+    # read, with no target probes or credential resolution.
     # Datasource names are expected policy, never evidence of a plugin query.
     saved_ssh = ssh.read_text()
     ssh.write_text("""#!/bin/sh
@@ -443,6 +466,7 @@ case "$command" in
   *systemctl*show*--property=LoadState,ActiveState,SubState,UnitFileState*)
     printf 'status\\n' >> "$DRAGONTOOLS_TEST_MARKER"
     printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\nUnitFileState=enabled\\n';;
+  *source=base64.b64decode*) printf 'probes\\n' >> "$DRAGONTOOLS_TEST_MARKER"; printf '[]';;
   *) exit 91;;
 esac
 """)
@@ -450,7 +474,8 @@ esac
     status = subprocess.run([str(binary), "monitoring", "status", "--config", str(config)],
                             env=env, input="", capture_output=True, text=True, timeout=15)
     assert status.returncode == 0, (status.stdout, status.stderr)
-    assert marker.read_text() == "status\n" * 4
+    assert marker.read_text() == "status\n" * 8 + "probes\n"
+    assert "none configured" in status.stdout
     assert "datasources (expected policy; not queried):" in status.stdout
     for mapping in ("Metrics -> VictoriaMetrics", "Logs -> VictoriaLogs", "Traces -> VictoriaTraces"):
         assert mapping in status.stdout, status.stdout
@@ -557,26 +582,48 @@ esac
         "username": "PRIVATE-GRAFANA-USERNAME",
         "password": "PRIVATE-GRAFANA-PASSWORD '\"$(literal)\\value\t",
     }
+    dummy_telegram = {"token": "123456789:PRIVATE_TELEGRAM_TOKEN", "chat_id": "-1009876543210"}
+    dummy_values = {**dummy_credentials, **dummy_telegram}
     op.write_text(f"#!{sys.executable}\n" + "import os, sys\n"
-                  + f"values = {dummy_credentials!r}\n"
+                  + f"values = {dummy_values!r}\n"
                   + "assert len(sys.argv) == 4 and sys.argv[1:3] == ['read', '--no-newline']\n"
                   + "field = sys.argv[3].rsplit('/', 1)[1]\n"
                   + "assert field in values\n"
                   + "with open(os.environ['DRAGONTOOLS_PROVIDER_MARKER'], 'a') as output: output.write('resolved\\n')\n"
                   + "sys.stdout.write(values[field])\n")
-    ssh.write_text(f"#!{sys.executable}\n" + f"expected = {dummy_credentials!r}\n" + '''
-import json, os, shlex, sys
+    def zig_multiline(name):
+        source = Path("src/monitoring/blackbox_tests.zig").read_text()
+        block = source.split(f"pub const {name} =\n", 1)[1].split(";\n", 1)[0]
+        return "\n".join(line.strip()[2:] for line in block.splitlines() if line.strip().startswith("\\\\"))
+    ssh.write_text(f"#!{sys.executable}\n" + f"expected = {dummy_credentials!r}\ntelegram = {dummy_telegram!r}\n"
+                  + f"blackbox_config = {zig_multiline('loaded_config')!r}\nblackbox_metrics = {zig_multiline('exporter_metrics')!r}\n" + '''
+import base64, json, os, shlex, sys
 from pathlib import Path
-assert all(value not in argument for value in expected.values() for argument in sys.argv)
+assert all(value not in argument for value in [*expected.values(), *telegram.values()] for argument in sys.argv)
 command = sys.argv[-1]
 marker = Path(os.environ['DRAGONTOOLS_TEST_MARKER'])
+def python_arguments(text, needle, depth=0):
+    if depth > 6:
+        raise AssertionError('Missing fixture Python command')
+    try:
+        parts = shlex.split(text)
+    except ValueError:
+        return None
+    for index, item in enumerate(parts):
+        if item == 'python3' and parts[index + 1:index + 4] == ['-I', '-B', '-c'] and needle in parts[index + 4]:
+            return parts[index:]
+    for item in parts:
+        if item != text and needle in item:
+            found = python_arguments(item, needle, depth + 1)
+            if found is not None:
+                return found
+    return None
 metrics = {"status": "success", "data": {"resultType": "vector", "result": [
     {"metric": {"__name__": "vm_app_version"}, "value": [1, "1"]}]}}
 if "Pinned Grafana credential operations" in command:
     assert json.load(sys.stdin) == expected
     # Alias mode wraps the fixed Python command in a privileged shell selection.
-    candidates = [item for item in shlex.split(command) if "Pinned Grafana credential operations" in item]
-    args = shlex.split(candidates[0]) if command.startswith("if ") else shlex.split(command)
+    args = python_arguments(command, "Pinned Grafana credential operations")
     mode = args[-1].removesuffix(";")
     assert mode in ("bootstrap", "reconcile", "verify", "logs_verify")
     with marker.open('a') as output: output.write('stdin ' + mode + ' verified\\n')
@@ -585,6 +632,41 @@ if "Pinned Grafana credential operations" in command:
         print(expected["password"])
         sys.exit(86)
     sys.stdout.write('unchanged')
+elif 'Dedicated protected Telegram file transport' in command:
+    args = python_arguments(command, 'Dedicated protected Telegram file transport')
+    mode = args[-1].removesuffix(';')
+    assert mode in ('install', 'verify')
+    if mode == 'install':
+        assert json.load(sys.stdin) == telegram
+        with marker.open('a') as output: output.write('telegram stdin verified\\n')
+    sys.stdout.write('unchanged')
+elif 'Concrete Alertmanager API probes' in command:
+    args = python_arguments(command, 'Concrete Alertmanager API probes')
+    mode = args[-3]
+    assert mode in ('check', 'health', 'notify')
+    if mode == 'check':
+        sys.stdout.write('enabled' if os.environ.get('DRAGONTOOLS_TELEGRAM_CONFIGURED') else 'disabled')
+    elif mode == 'notify':
+        assert os.environ.get('DRAGONTOOLS_ALLOW_NOTIFY') == '1'
+        with marker.open('a') as output: output.write('notification accepted\\n')
+elif 'source=base64.b64decode' in command:
+    args = python_arguments(command, 'source=base64.b64decode')
+    mode = args[6]
+    assert mode in ('prepare', 'reconcile', 'finalize', 'managed', 'ready', 'stored', 'status')
+    if mode == 'status':
+        probes = json.loads(base64.b64decode(args[8]))
+        sys.stdout.write(json.dumps(['unhealthy' if item['name'] == 'orders' else 'healthy' for item in probes]))
+    elif mode in ('prepare', 'reconcile'):
+        assert not os.environ.get('DRAGONTOOLS_ASSERT_READONLY')
+        sys.stdout.write('unchanged')
+    elif mode == 'finalize':
+        assert not os.environ.get('DRAGONTOOLS_ASSERT_READONLY')
+elif 'dragontools-blackbox-exporter-http_ready' in command:
+    sys.stdout.write('Healthy')
+elif 'dragontools-blackbox-exporter-provisioning_ready' in command:
+    sys.stdout.write(blackbox_config)
+elif 'dragontools-blackbox-exporter-storage_ready' in command:
+    sys.stdout.write(blackbox_metrics)
 elif '/etc/os-release' in command:
     sys.stdout.write('ubuntu\\n24.04\\nx86_64\\n')
 elif 'stat -f -c' in command:
@@ -615,8 +697,8 @@ else:
         assert provider_marker.read_text() == "resolved\nresolved\n"
         modes = ("bootstrap", "reconcile", "logs_verify") if command == "install" else ("verify", "logs_verify")
         assert marker.read_text() == "".join(f"stdin {mode} verified\n" for mode in modes)
-        for number, component in enumerate(("VictoriaMetrics", "VictoriaLogs", "VictoriaTraces", "Grafana"), 1):
-            heading = f"[{number}/4] {component}"
+        for number, component in enumerate(("VictoriaMetrics", "VictoriaLogs", "VictoriaTraces", "Grafana", "Blackbox exporter", "Alertmanager", "vmalert logs", "vmalert metrics"), 1):
+            heading = f"[{number}/8] {component}"
             assert heading in result.stdout, result.stdout
             component_output = result.stdout.split(heading, 1)[1].split("[", 1)[0]
             assert "verifying..." in component_output and "healthy; no changes" in component_output
@@ -628,6 +710,7 @@ else:
         for name in ("Metrics", "Logs", "Traces"):
             assert f"{name} datasource: provisioning and backend query verified" in result.stdout
         assert "authenticated query unchecked" not in result.stdout
+        assert "No test notification sent." in result.stdout
         if command == "install":
             assert "No changes required." in result.stdout
             assert "checking VictoriaLogs datasource plugin..." in result.stdout
@@ -648,6 +731,56 @@ else:
         assert "health and authenticated query verified" not in result.stdout
         assert "Logs datasource: provisioning and backend query verified" in result.stdout
         checked += 1
+
+    # Probe configuration and Telegram references use the same regular command
+    # model. Failed target telemetry is accepted by install; only explicit notify
+    # sends a test alert. Verification uses remote protected files, not providers.
+    station_env = dict(env, DRAGONTOOLS_TELEGRAM_CONFIGURED="1")
+    for command in ("install", "verify", "install"):
+        marker.unlink(missing_ok=True)
+        provider_marker.unlink(missing_ok=True)
+        command_env = dict(station_env, DRAGONTOOLS_ASSERT_READONLY="1") if command == "verify" else station_env
+        result = subprocess.run([str(binary), "monitoring", command, "--config", str(station_config)],
+                                env=command_env, input="", capture_output=True, text=True, timeout=30)
+        output = result.stdout + result.stderr
+        assert result.returncode == 0, output
+        assert all(value not in output for value in dummy_values.values()), output
+        assert "REDACTION-SENTINEL" not in output
+        assert "VictoriaMetrics native scraper: 2 configured probes" in output
+        assert "a down target is valid monitoring state" in output
+        assert "No test notification sent." in output
+        assert "notification accepted" not in marker.read_text()
+        assert provider_marker.read_text() == "resolved\n" * (4 if command == "install" else 2)
+        if command == "install":
+            assert "No changes required." in output
+            assert marker.read_text().endswith("telegram stdin verified\n")
+        else:
+            assert "telegram stdin" not in marker.read_text()
+        checked += 1
+
+    marker.unlink(missing_ok=True)
+    provider_marker.unlink(missing_ok=True)
+    result = subprocess.run([str(binary), "monitoring", "status", "--config", str(station_config)],
+                            env=station_env, input="", capture_output=True, text=True, timeout=30)
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "landing  healthy" in output and "orders  unhealthy" in output, output
+    assert "recorded metrics; at most 90s old" in output
+    assert not marker.exists() and not provider_marker.exists()
+    assert "REDACTION-SENTINEL" not in output
+    checked += 1
+
+    result = subprocess.run([str(binary), "monitoring", "notify-test", "--config", str(station_config)],
+                            env=dict(station_env, DRAGONTOOLS_ALLOW_NOTIFY="1"), input="", capture_output=True, text=True, timeout=30)
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "Test alert accepted by Alertmanager." in output
+    assert "acceptance does not prove delivery" in output
+    assert marker.read_text() == "notification accepted\n"
+    assert not provider_marker.exists(), "notify-test unnecessarily resolved secret references"
+    assert all(value not in output for value in dummy_values.values()), output
+    assert "REDACTION-SENTINEL" not in output
+    checked += 1
 
     # Failure from the authenticated plugin query is a safe semantic failure,
     # without leaking commands, credentials, upstream response or stderr.

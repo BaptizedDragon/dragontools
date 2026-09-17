@@ -50,7 +50,7 @@ const ComponentState = struct {
         return self.check_calls[@intFromEnum(check)];
     }
 };
-const Fake = struct {
+pub const Fake = struct {
     vm: ComponentState = .{},
     vl: ComponentState = .{},
     vt: ComponentState = .{},
@@ -78,9 +78,10 @@ const Fake = struct {
             .victorialogs => &self.vl,
             .victoriatraces => &self.vt,
             .grafana => &self.gf,
+            else => unreachable, // Core four-component fixture; station lifecycle has its own fake.
         };
     }
-    fn asRemote(self: *Fake) remote.Remote {
+    pub fn asRemote(self: *Fake) remote.Remote {
         return .{ .context = self, .execute = execute, .execute_secret = executeSecret, .clock = .{ .context = self, .now_ms = now, .sleep_ms = sleep } };
     }
     fn executeSecret(ctx: *anyopaque, op: remote.Operation, command: []const u8, payload: *const Secret, budget_ms: u32) !remote.Result {
@@ -190,12 +191,14 @@ const Fake = struct {
                     .victoriametrics => check == .self_scrape_ready,
                     .victorialogs, .victoriatraces => check == .storage_ready,
                     .grafana => check == .http_ready or check == .backend_ready,
+                    else => unreachable,
                 };
                 return .{ .code = 0, .output = if (has_payload) current.health_output orelse switch (component) {
                     .victoriametrics => vm_metrics,
                     .victorialogs => vl_metrics,
                     .victoriatraces => vt_metrics,
                     .grafana => @import("grafana_verify.zig").healthy_fixture,
+                    else => unreachable,
                 } else "" };
             },
             .finalize => {
@@ -368,6 +371,7 @@ fn telemetryCheck(component: install.Component) readiness.Check {
         .victoriametrics => .self_scrape_ready,
         .victorialogs, .victoriatraces => .storage_ready,
         .grafana => .provisioning_ready,
+        else => unreachable,
     };
 }
 
@@ -788,6 +792,7 @@ test "controller rejection of invalid application metrics prevents finalization"
             .victoriametrics, .grafana => "not application metrics",
             .victorialogs => "vl_storage_is_read_only{path=\"/var/lib/dragontools/victorialogs\"} invalid\n",
             .victoriatraces => "vt_storage_is_read_only{path=\"/var/lib/dragontools/victoriatraces\"} invalid\n",
+            else => unreachable,
         };
         var report: install.Report = .{};
         const result = install.install(arena.allocator(), fake.asRemote(), &report);
@@ -796,6 +801,7 @@ test "controller rejection of invalid application metrics prevents finalization"
             .victorialogs => error.InvalidVictoriaLogsMetrics,
             .victoriatraces => error.InvalidVictoriaTracesMetrics,
             .grafana => error.InvalidGrafanaHealthResponse,
+            else => unreachable,
         }, result);
         try std.testing.expectEqual(component, report.component.?);
         try std.testing.expectEqual(remote.Operation.health, report.phase);

@@ -13,9 +13,10 @@ provider abstraction, arbitrary shell hooks, or general plugin framework.
 
 `cli/parse.zig` merges explicit monitoring configuration and validates all supplied
 inputs before SSH. CLI values override file values; the small version-1 TOML
-schema contains only an OpenSSH alias and Grafana secret references. `main.zig` rejects
+schema contains an OpenSSH alias, Grafana/Telegram secret references and bounded HTTP probes. `main.zig` rejects
 unimplemented integrations. `monitoring/install.zig` detects the host once, then
-installs and verifies VictoriaMetrics, VictoriaLogs, VictoriaTraces, then Grafana. Each concrete
+installs and verifies VictoriaMetrics, VictoriaLogs, VictoriaTraces, Grafana,
+blackbox_exporter, Alertmanager, vmalert-logs and vmalert-metrics. Each concrete
 component workflow handles its account, directories, binary, unit, activation,
 verification, and finalization; VictoriaMetrics also computes its capacity reserve.
 Host detection checks OS and prerequisites once. Before changing a component,
@@ -81,10 +82,27 @@ Browser 127.0.0.1:3000 -- SSH tunnel --> Grafana OSS 13.2.2
                                                           127.0.0.1:10428
                                                           100y; partition budget: 75%
 
+HTTP/HTTPS targets <--- blackbox_exporter 0.28.0 [127.0.0.1:9115]
+                              ^ /probe every 30s
+                              |
+                        VictoriaMetrics native scraper -> stored probe metrics
+                              |
+                 +------------+-------------------+
+                 |                                |
+             vmalert-metrics                  vmalert-logs
+             127.0.0.1:8881                   127.0.0.1:8880
+             datasource: VM                   datasource: VictoriaLogs
+                 |                                |
+                 +------------+-------------------+
+                              v
+                    Alertmanager v0.34.1 [127.0.0.1:9093]
+                              |
+                         Telegram [optional outbound HTTPS]
+
 PUBLIC INBOUND: SSH :22 from administrator IP only (operator-managed firewall)
 ```
 
-Agents, remote ingestion, dashboards, alert evaluation/delivery, monitoring
+Agents, remote ingestion, dashboards, host/service metric alerts, monitoring
 firewall, TLS, and frontend telemetry are unavailable. The controller exits after
 the command; no controller-side state database or resident remote agent is added.
 
@@ -188,9 +206,9 @@ Cleanup checks run roughly every 10 seconds with jitter and keep the newest two
 daily partitions, potentially spanning more than two days. The two budgets do not
 provide a combined shared-filesystem usage ceiling. No manual deletion is added.
 
-Alert policy is defined; rendering is partial/provisional; alert runtime is
-unavailable. `monitoring/rules.zig` renders only deterministic provisional
-VictoriaLogs `type: vlogs` YAML for ErrorBurst and CriticalLogEvent. It includes
+The fixed log/probe packs are installed and evaluated. `monitoring/rules.zig`
+supplies deterministic VictoriaLogs `type: vlogs` YAML for ErrorBurst and
+CriticalLogEvent; `monitoring/probes.zig` supplies ServiceProbeFailed. It includes
 stable severity/source labels and concise service/count annotations, without log
 payloads, request IDs, or secrets.
 
@@ -200,12 +218,12 @@ returns `ServiceMetricContractUnavailable`, while an empty service list yields a
 empty rules document. No replacement host expressions are guessed. Vector will
 supply host metrics in the agent slice; the systemd service-state solution is
 deferred. Policy and renderer tests involve no SSH or real evaluator. There is no
-CLI export command, rule installation, or alert delivery.
+standalone rule-export command or user-supplied rule configuration.
 
-The ordinary install plan describes all four available components,
+The ordinary install plan describes all eight available components,
 including their private listeners and retention, then explicitly lists unavailable
-integrations. A successful installation means all four components passed their
-checks; it does not imply agents or alerts are installed. Unsupported component paths and flags
+integrations. A successful installation means all eight components passed their
+checks; it does not imply application-host agents, host/service metric alerts or dashboards are installed. Unsupported component paths and flags
 still fail before SSH; generated YAML does not make a component available.
 
 ## Component layout and lifecycle
@@ -340,14 +358,59 @@ MemoryMax is omitted until workload/capacity testing establishes a safe bound.
 The renderer and fake-remote checks do not prove compatibility under a real systemd
 instance; supported Ubuntu/architecture VM runs remain required.
 
+## External probing and alert runtime
+
+Black-box monitoring observes configured HTTP/HTTPS endpoints from the station.
+The existing VictoriaMetrics single-node native Prometheus scraper queries local
+blackbox `/probe` and directly stores the result. No extra scraper listener,
+vmagent service or custom polling daemon is introduced. White-box application
+logs/metrics/traces still require future ingestion agents; those network edges
+remain unavailable.
+
+The narrow TOML has at most 64 unique named probes with normalized, query-free,
+credential-free HTTP/HTTPS URLs. A generated static blackbox module enforces GET,
+2xx success, IPv4 preference/fallback, five-second timeout and verified TLS.
+HTTP/2 is explicitly disabled for the reviewed release's transport advisory;
+redirects remain enabled. Metric relabeling retains only owned identities and
+fixed timing phases, excluding dynamic certificate/response labels.
+
+VictoriaMetrics gains `-promscrape.config` once. Subsequent target changes write
+`/etc/dragontools/victoriametrics/prometheus.yml`, preserve a separate scrape-reload
+marker and use native `/-/reload`; they do not restart the VM process. Reload intent
+is finalized only after loaded targets and fresh stored samples are verified.
+Both success and failure samples prove the mechanism; down applications must not
+make station installation fail. Status queries stored samples and never triggers
+fresh probes. Missing/stale results remain unknown rather than inferred healthy.
+
+Both dedicated vmalert services use the same pinned binary but independent users,
+units, rule files and restart markers. A binary replacement marks both instances;
+a rule/unit change affects only its own instance. Metrics evaluates the real probe
+contract; logs evaluates the fixed structured-log pack against VictoriaLogs.
+Remote read/write stores alert state in local VictoriaMetrics, with an in-memory
+write queue and no persistent writable path for either evaluator.
+
+Alertmanager runs without clustering and has only its loopback HTTP listener.
+Without Telegram refs it uses a discard receiver. Configured install resolves the
+bot token/chat ID locally and uses a dedicated protected stdin/file consumer;
+ordinary file primitives never receive secret values. Secret files are owned by
+`dt-alertmanager`, `0400`, in a protected root-owned directory. Unchanged values
+are compared without being printed or rewritten. Standalone verification checks
+installed policy without resolving Telegram refs. Only explicit `notify-test`
+submits a test alert; verification never does. Normal evaluators may independently
+notify genuine firing alerts while installation or verification is running.
+The pinned Telegram error path can include the token-bearing request URL, so
+Alertmanager's native stdout/stderr are disabled and their effective values are
+verified. Systemd state, health/API/metrics and fixed controller errors remain
+available; native Alertmanager journal diagnostics are not retained.
+
 ## Target near-term architecture (not implemented)
 
 The storage backends on the right exist today. All application-host collectors,
-network ingestion edges and alert evaluators/delivery below are targets:
+network ingestion edges below are targets; the station probe/alert chain is implemented:
 
 ```text
 APPLICATION HOST                        MONITORING HOST
-(all collectors unavailable)            (VM / VL / VT / Grafana installed)
+(all collectors unavailable)            (eight station services installed)
 
 journald
    |
@@ -363,11 +426,6 @@ application OTLP
    |
  OTel Collector ----------------------> VictoriaTraces
 
-                                        vmalert [unavailable]
-                                           |
-                                        Alertmanager [unavailable]
-                                           |
-                                        Telegram [unavailable]
 
 ```
 
@@ -376,7 +434,7 @@ configuration. Host metric names will be established by Vector implementation;
 systemd service-state monitoring is deferred. No frontend telemetry is included.
 
 Grafana is the normal human-facing UI, with automatically provisioned
-VictoriaMetrics, VictoriaLogs and VictoriaTraces datasources. Future vmalert sends to
+VictoriaMetrics, VictoriaLogs and VictoriaTraces datasources. Both vmalert instances send to
 Alertmanager, which optionally sends grouped Telegram warning/critical/resolved
 notifications. Backend administrative APIs stay private. An ingestion gateway must
 expose only approved write routes; allowlisting a raw VictoriaMetrics port would
@@ -429,8 +487,8 @@ by `LoadCredentialEncrypted=`. Plaintext exists only in the service credential
 runtime directory. If host encryption is unavailable, require an explicitly chosen
 root:root 0600 credential source plus `LoadCredential=`; do not silently weaken the
 policy. No plaintext `/etc/environment`, `Environment=`, argv, plans or ordinary
-config. Cloudflare DNS-scoped tokens and Telegram tokens require their own consumers;
-the current CLI refuses these options rather than store them insecurely.
+config. This remains the future TLS policy. Telegram now has an explicit dedicated
+protected-file consumer described below; no generic credential-file mechanism is added.
 
 ## Maintenance and testing
 
@@ -445,10 +503,10 @@ Unit tests cover parsing, redaction, quoting, units, storage, artifact plans and
 update-state parsing, as well as CLI metadata, completion, contextual help and
 scripted wizard validation/defaults/cancellation/command previews. Monitoring tests
 cover policy constants, explicit unavailable host/service rendering, deterministic
-provisional log rules, thresholds, and stable labels. CLI smoke tests
+log/probe rules, thresholds, and stable labels. CLI smoke tests
 check non-TTY behavior and the local help/completion boundary. Fake-remote tests
 cover independent first/second runs, drift, failures, and restart recovery for all
-four installed components;
+eight installed components;
 these prove sequencing, not actual systemd behavior. Disposable Ubuntu integration
 is documented separately and must verify the real runtime profile and no-op rerun.
 The opt-in `tests/integration/victoriatraces.sh` runner checks the three storage services,

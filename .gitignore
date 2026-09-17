@@ -3,3 +3,4 @@ zig-out/
 .DS_Store
 .idea
 monitoring.toml
+!examples/monitoring.toml

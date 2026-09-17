@@ -16,6 +16,9 @@ pub const Check = enum {
     logs_datasource_ready,
     credentials_bootstrap,
     credentials_authenticated,
+    scrape_ready,
+    probe_metrics_ready,
+    rules_ready,
 };
 pub const active_ms = 15_000;
 pub const http_ms = 30_000;

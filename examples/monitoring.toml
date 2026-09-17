@@ -1,0 +1,26 @@
+# Example OpenSSH alias and 1Password references; replace these with your own.
+# This file contains references only, never resolved usernames or passwords.
+version = 1
+
+[connection]
+ssh_host = "monitoring"
+
+[grafana]
+username = { op = "op://BaptizedDragon/Grafana/username" }
+password = { op = "op://BaptizedDragon/Grafana/password" }
+
+# Optional external HTTP/HTTPS probes. Replace URLs with your own health endpoints.
+# Query strings, URL credentials, fragments and custom labels are not supported.
+[[probe]]
+name = "software-landing"
+url = "https://service-a.example.com/healthz"
+
+[[probe]]
+name = "orderflow"
+url = "https://service-b.example.com/healthz"
+
+# Optional Telegram deployment references; these are not built-in defaults.
+# Omit this entire table for the discard receiver; install/verify never send a test.
+# [telegram]
+# bot_token = { op = "op://BaptizedDragon/DragonTools/alarms-telegram-bot-token" }
+# chat_id = { op = "op://BaptizedDragon/DragonTools/alarms-telegram-chat-id" }

@@ -1,11 +1,12 @@
 # Design decisions and staged delivery
 
-## Current milestone: metrics, logs, traces, and Grafana implemented
+## Current milestone: storage, Grafana, HTTP probes and alert runtime implemented
 
-The monitoring foundation delivers four concrete components: VictoriaMetrics,
-VictoriaLogs, VictoriaTraces, and Grafana OSS. Unfinished integrations fail before connecting. Exit 0 from install
-means all four passed their documented verification; it never means the full requested station exists.
-`status` is a read-only service-state summary; use `verify` to test health.
+The monitoring foundation delivers eight concrete services: VictoriaMetrics,
+VictoriaLogs, VictoriaTraces, Grafana OSS, blackbox_exporter, Alertmanager,
+vmalert-logs and vmalert-metrics. Unfinished integrations fail before connecting. Exit 0 from install
+means all eight passed their documented verification; it never means the full requested station exists.
+`status` reads service states and stored HTTP probe samples; use `verify` to test health.
 Help and `--plan` require no SSH. No generic primitives are public commands.
 
 Zig 0.16.0 and its standard library handle CLI parsing, process execution, memory,
@@ -30,7 +31,7 @@ does not introduce a generic public CLI framework or a resource DSL.
 
 The wizard offers monitoring install, agents, verify, status, firewall guidance,
 architecture information, and command-line help. Station setup defaults to the
-implemented VictoriaMetrics, VictoriaLogs, VictoriaTraces, and Grafana slices; roadmap settings require explicit opt-in and
+implemented eight-service station; roadmap settings require explicit opt-in and
 still fail before SSH. Agent station entry remains a numeric IP, matching
 `--station-ip`. Unsupported components and protected-file credential inputs do not
 become implemented merely because an interactive interface exists.
@@ -223,8 +224,8 @@ stored data. No manual VictoriaLogs/VictoriaTraces file deletion is permitted.
 VictoriaMetrics continues to use its free-space reserve and 90-day retention.
 
 All disk alert states remain policy only: host rendering is unavailable until the
-Vector metric contract is verified. No alert evaluation runs on the target.
-`monitoring install --plan` describes all four installed components and lists
+Vector metric contract is verified. Only the separate log/probe packs are evaluated.
+`monitoring install --plan` describes all eight installed components and lists
 unavailable integrations separately.
 There are no new CLI policy overrides or rule-deployment options.
 
@@ -294,7 +295,7 @@ directories, binary, and unit must retain their expected types, owners, and mode
 `vl_storage_is_read_only` must be zero; missing identity or read-only storage fails
 verification and cannot finalize the component. No synthetic log or remote
 application ingestion is required, so success does not demonstrate an application
-log pipeline. `monitoring verify` checks all four installed components; `status`
+log pipeline. `monitoring verify` checks all eight installed components; `status`
 reports their service states without claiming full health or active alerts.
 
 ## VictoriaTraces installation and verification
@@ -781,8 +782,190 @@ Persistent secrets will use `systemd-creds` encrypted root-only storage and
 `LoadCredentialEncrypted=`; an explicit protected-file fallback would use
 `LoadCredential=` and root:root 0600. TLS/notification consumers read only the systemd
 credential path. The opaque Secret infrastructure redacts and wipes; Grafana now has a controller-local
-1Password resolver and protected reconciliation consumer. TLS/notification consumers
-remain unavailable, so their options still fail before SSH.
+1Password resolver and protected reconciliation consumer. Telegram now uses the
+explicit protected-file exception below. TLS remains unavailable.
+
+## External probing and alert runtime
+
+The station runs blackbox_exporter, Alertmanager and two vmalert instances in
+addition to the four existing storage/UI services. VictoriaMetrics' native
+Prometheus scraper was chosen over a station vmagent: the pinned single-node
+server already supports the full relabeling/target API needed here and writes
+samples directly into its storage. No new polling daemon, persistent scrape queue
+or scraper listener is needed. This does not deliver application-host vmagent.
+See [the pinned native scraper](https://github.com/VictoriaMetrics/VictoriaMetrics/tree/v1.151.0/lib/promscrape)
+and [the single-node integration](https://github.com/VictoriaMetrics/VictoriaMetrics/blob/v1.151.0/app/vminsert/main.go).
+
+The component and listener boundary is fixed:
+
+| Service | Account | Listener | Persistent write access |
+| --- | --- | --- | --- |
+| blackbox_exporter | `dt-blackbox` | `127.0.0.1:9115` | None; account home exists but service namespace is read-only |
+| Alertmanager | `dt-alertmanager` | `127.0.0.1:9093` | `/var/lib/dragontools/alertmanager`; clustering disabled |
+| vmalert-logs | `dt-vmalert-logs` | `127.0.0.1:8880` | None; alert state uses local VictoriaMetrics |
+| vmalert-metrics | `dt-vmalert-metrics` | `127.0.0.1:8881` | None; alert state uses local VictoriaMetrics |
+
+Each has dedicated nologin accounts, root-owned executable/configuration paths,
+private temporary storage, empty capability sets, filesystem/kernel protections,
+and ordinary AF_INET/AF_INET6/AF_UNIX only. No raw-socket privilege is granted;
+ICMP, node_exporter and custom modules are absent. Blackbox needs outbound DNS and
+HTTP/HTTPS, so its network namespace is not isolated from configured targets.
+
+### Reviewed release pins
+
+Reviewed on 2026-09-17. The official blackbox release is `0.28.0`, Alertmanager is
+`v0.34.1`, and vmalert comes from VictoriaMetrics `v1.152.0` vmutils archives.
+Archive hashes were checked against official GitHub release asset digests;
+blackbox and Alertmanager additionally match their published `sha256sums.txt`.
+Extracted binary hashes below were calculated from those verified regular archive
+members without executing them. These trust the upstream release publishers;
+they are not independent code signatures or a vulnerability audit.
+
+- [blackbox release](https://github.com/prometheus/blackbox_exporter/releases/tag/v0.28.0),
+  [published checksums](https://github.com/prometheus/blackbox_exporter/releases/download/v0.28.0/sha256sums.txt)
+- [Alertmanager release](https://github.com/prometheus/alertmanager/releases/tag/v0.34.1),
+  [published checksums](https://github.com/prometheus/alertmanager/releases/download/v0.34.1/sha256sums.txt)
+- [VictoriaMetrics/vmutils release](https://github.com/VictoriaMetrics/VictoriaMetrics/releases/tag/v1.152.0),
+  [official asset metadata](https://api.github.com/repos/VictoriaMetrics/VictoriaMetrics/releases/tags/v1.152.0)
+
+| Component | Architecture | Archive SHA256 | Extracted binary SHA256 |
+| --- | --- | --- | --- |
+| blackbox_exporter | amd64 | `caf5d242fb1cf6d5cb678f3f799f22703d4fafea26b03dcbbd7e1f1825e06329` | `b79da51dce26afbc787917a3bf884ac84dcf1af8862c4ab215ca23b7c327ca04` |
+| blackbox_exporter | arm64 | `63312be0983d85e5109710a7dc93df3051157ae581853fa3655d171cc1b2806e` | `9132ceb241475206df4ea55a9174e79e563b6fb4fe188873bbb0519110ef8f57` |
+| alertmanager | amd64 | `265b9d1e55ef0d5306a436018af6d2b686c2ce051f03d968f7464ecb1372a7e8` | `154890307c382a186d4ddf9354cfa0cab08771f818aac1e647d0cf277ecef854` |
+| amtool (same archive) | amd64 | Same as Alertmanager | `1153b0dbf2a672fd54f7da597901b776a3d4e0daaa5c38f3710efc51b8c3b4c8` |
+| alertmanager | arm64 | `d98d6cbaf52151c7e76e24355fec88b11cebcb9875d4cdd8b76ddce7a7e5535c` | `cfd1845106fe1c2e1966a60805cb6c7c7bd6fae1bf77423cc1e049ca5f80c62f` |
+| amtool (same archive) | arm64 | Same as Alertmanager | `8391c16f27696ce5394b05fae09bb158cee97e38b03c2f409d3a6a0265ad30c9` |
+| vmalert | amd64 | `8eee4a98ff1665c60682475e8a8b292b8d718b63a2f023124384dd2f6a220c79` | `be382c490ad6eb417a30ad4ef34a66bf531a98b70eded79aa1006ca4455d7bc5` |
+| vmalert | arm64 | `57c567b262962a4cb8e35c0c34efe64629a3e1ea69ac0611d8d67e168df8b1e8` | `4d63b96d68f62ea1ca51e3544c35257038bf1b41e542434fe8fad02575017f3c` |
+
+Pinned URLs use these exact versioned forms, with `amd64` or `arm64` in place of
+`<arch>`; installation never fetches mutable latest metadata or runtime checksums:
+
+```text
+https://github.com/prometheus/blackbox_exporter/releases/download/v0.28.0/blackbox_exporter-0.28.0.linux-<arch>.tar.gz
+https://github.com/prometheus/alertmanager/releases/download/v0.34.1/alertmanager-0.34.1.linux-<arch>.tar.gz
+https://github.com/VictoriaMetrics/VictoriaMetrics/releases/download/v1.152.0/vmutils-linux-<arch>-v1.152.0.tar.gz
+```
+
+Only the reviewed binary members are extracted after archive verification, into
+private staging on the installation filesystem. Binary verification precedes
+atomic publication and a relative `current` symlink switch. Prior version
+directories remain for operator recovery. Correct pinned bytes are not downloaded
+again; supported ownership/mode repair does not restart healthy services.
+
+### HTTP module and metric contract
+
+`/etc/dragontools/blackbox-exporter/blackbox.yml` contains only `http_2xx`:
+HTTP GET, default 2xx success, timeout five seconds, IPv4 preference and family
+fallback, redirects enabled and TLS certificate/hostname verification enabled.
+The CLI exposes no authentication, headers, custom labels or module language.
+HTTP/2 is explicitly disabled because this upstream release uses the transport
+affected by [GO-2026-4918](https://pkg.go.dev/vuln/GO-2026-4918);
+[pinned dependency](https://github.com/prometheus/blackbox_exporter/blob/v0.28.0/go.mod)
+and [transport construction](https://github.com/prometheus/common/blob/v0.67.4/config/http_config.go)
+were reviewed. This is an HTTP/1.1 availability slice, not a claim that the upstream
+release is patched or every transitive vulnerability has been eliminated.
+Normal redirects remain as upstream implements them. A family fallback selects
+an available address family, not repeated attempts across every resolved address.
+
+Probe TOML validation occurs before SSH: at most 64 probes, unique 1–63 byte
+ASCII names, alphanumeric first byte then alphanumerics/underscore/hyphen; HTTP or
+HTTPS URLs at most 2048 bytes. Credentials, query strings, fragments, controls and
+obscured percent-encoded authorities are rejected. Scheme/hostname case, default
+ports and empty paths are normalized without rewriting meaningful path bytes.
+URLs must not contain secrets: the normalized configured target is a stored label.
+
+The native scraper uses `/probe?module=http_2xx&target=...` on `127.0.0.1:9115`,
+every 30 seconds with a five-second scrape deadline. The exporter subtracts its
+normal 0.5-second response margin, leaving a probe deadline up to 4.5 seconds.
+It returns `probe_success=0` on DNS/connect/TLS/status/timeout failure while the
+scrape itself can succeed. This is the central mechanism for detecting complete
+application disappearance, independent of logs or the application's metrics API.
+[Probe result/timeout behavior](https://github.com/prometheus/blackbox_exporter/blob/v0.28.0/prober/handler.go).
+
+Metric relabeling keeps the fixed availability, duration, HTTP status/TLS/redirect,
+IP-family and certificate-expiry metrics. Only `job`, `instance`, `probe`, `target`
+and the fixed timing `phase` remain; certificate fingerprints, subjects and
+arbitrary response fields are discarded. `ServiceProbeFailed` selects the owned
+job's `probe_success == 0`, holds two minutes, and sets critical/blackbox labels.
+Its annotations identify the probe and target without response bodies. Latency
+metrics are available for queries, but no default latency alert is installed.
+
+### Reload, alert state and verification
+
+The first upgrade enables VictoriaMetrics native scraping in its unit and may
+restart only VictoriaMetrics for that unit change. Later probe additions/removals
+atomically replace `/etc/dragontools/victoriametrics/prometheus.yml` and preserve
+`victoriametrics-scrape-reload-required` before native reload. The generated
+blackbox module and probe alert rule are independent of probe count, so those
+changes do not restart blackbox, either vmalert or other services. An unchanged
+rerun does not reload, rewrite, download or restart.
+
+Both vmalert instances share `/opt/dragontools/components/vmalert/v1.152.0/` and
+`current`, but use independent `/etc/dragontools/vmalert-{logs,metrics}/rules.yml`,
+accounts, units and restart intent. Shared binary publication marks both instances
+before changing bytes/selection. Each instance finalizes only after its own
+verification. Remote read/write point to VictoriaMetrics `127.0.0.1:8428` for alert
+state; the pinned [write client](https://github.com/VictoriaMetrics/VictoriaMetrics/blob/v1.152.0/app/vmalert/remotewrite/client.go)
+uses bounded in-memory queues and HTTP, not a persistent spool. A crash can lose
+unflushed state; local remote storage is not a stronger delivery guarantee.
+
+The logs instance queries VictoriaLogs with the fixed ErrorBurst/CriticalLogEvent
+pack; metrics queries VictoriaMetrics with ServiceProbeFailed. Both notify local
+Alertmanager. `-dryRun` validates fixed rule syntax/templates before rule-file
+publication; it exits before notifier startup. Runtime verification reads the
+loaded rule API with `exclude_alerts=true`, validates the expected identities,
+expressions, labels, intervals and recent successful evaluations. Pending/firing
+alerts are valid station state, not verification failures. No synthetic telemetry
+or test alerts are sent by verification.
+
+Blackbox verification checks exact managed files/binaries/units, account metadata,
+loaded module policy, exporter build/reload metrics, effective hardening and
+PID-owned loopback listeners. The scraper verifies loaded definitions and recent
+stored `probe_success` samples, accepting both zero and one. Status observes
+stored data and returns unknown for missing/stale results rather than making new
+requests to targets. Runtime checks have bounded readiness retries; deterministic
+identity/configuration failures fail immediately and preserve restart/reload intent.
+
+The scraper also checks the fixed loaded metric/relabel policy through
+`/api/v1/status/config`; matching active targets cannot hide a stale policy reload.
+Its narrow canonical YAML fixture was reproduced with the pinned `yaml.v2` 2.4.0
+marshaller and the reviewed VictoriaMetrics types. This serialization check is
+not execution of VictoriaMetrics or a substitute for disposable-host verification.
+Recent removed-target samples are bounded separately from the 64 current probes.
+Fixed helper source uses standard-library zlib compression for transport; target
+data remains separately encoded and quoted. Tests exercise accepted 64 KiB TOML
+at both 32 and 64 probes across mutation, verification and status SSH commands.
+
+Telegram is optional: `[telegram]` contains two existing SecretRefs, resolved
+locally during install and passed only through protected SSH stdin. The dedicated
+consumer owns `/etc/dragontools/alertmanager/secrets/telegram-bot-token` and
+`telegram-chat-id`, both `dt-alertmanager`, mode `0400`, under a protected directory.
+The generated Alertmanager YAML uses only `bot_token_file` and `chat_id_file` paths.
+No secret value enters ordinary file writers, YAML, units, argv, plans or output;
+the remote host does not need `op`. Equal values preserve files and services.
+Missing refs select a discard receiver. Configured warning/critical alerts are
+grouped by configured identity and resolved notifications are enabled.
+
+Alertmanager's pinned Telegram client propagates errors containing request URLs;
+a network error can therefore expose the token in the `/bot<TOKEN>/sendMessage`
+path. The unit sets `StandardOutput=null` and `StandardError=null`, and verification
+checks both effective properties. Native Alertmanager journal diagnostics are
+unavailable; systemd state, health/API/metrics and fixed controller errors remain.
+This suppression is specific to the secret-bearing native notifier and does not
+change verification fixture stderr assertions. [Pinned notifier](https://github.com/prometheus/alertmanager/blob/v0.34.1/notify/telegram/telegram.go),
+[client request construction](https://github.com/tucnak/telebot/blob/v3.3.8/api.go),
+[client error wrapping](https://github.com/tucnak/telebot/blob/v3.3.8/errors.go).
+
+`monitoring notify-test` is the only explicit synthetic notification path. It
+submits a clearly identified short-lived alert to installed Alertmanager; it never
+creates a failed probe target or resolves Telegram refs again. API acceptance is
+not evidence that a human received Telegram. Normal live evaluators can send real
+alerts independently while install/verify runs. Local tests cover redaction,
+rendering, retries and reruns; supported-host systemd, real TLS targets, actual
+rule evaluation timing and Telegram receipt remain separate integration gates.
+**Disposable-host integration not run.**
 
 ## Alert policy and partial rendering
 
@@ -815,7 +998,7 @@ selection, label mapping, and signal availability must be verified later.
 
 `renderLogs` remains a small deterministic local YAML renderer using the policy
 module, without a template engine or SSH. Its separate `type: vlogs` group is
-provisional until the ingestion and evaluator paths are verified:
+used by the installed logs evaluator; application-host ingestion remains deferred:
 
 | Rule | Condition |
 | --- | --- |
@@ -823,8 +1006,8 @@ provisional until the ingestion and evaluator paths are verified:
 | CriticalLogEvent | At least one normalized `critical` or `fatal` event per service over 1 minute; no additional hold |
 
 These are internal APIs; no rule-export or deployment CLI command is introduced.
-Alert policy is defined, rendering is partial/provisional, and alert runtime is
-unavailable.
+The installed workflow validates and deploys the log pack and the separate probe
+rule. Host/service metric alert rendering remains unavailable.
 
 Log rules depend on normalized structured fields: `timestamp`, `level`, `service`,
 `host`, `environment`, `request_id`, `event`, and `duration_ms`. Severity matches
@@ -836,18 +1019,17 @@ provide consistent service naming. Missing service values form one unnamed group
 until the future ingestion path normalizes them. Log annotations identify the service and count,
 without copying log messages, request IDs, or secret fields.
 
-The provisional log group specifies evaluation every minute. CriticalLogEvent has
-no `for:` delay and would fire on the next matching evaluation once deployed;
-no evaluator or synchronous delivery is present now.
+The installed log group evaluates every minute. CriticalLogEvent has no `for:`
+delay and fires on the next matching evaluation; notification delivery remains
+asynchronous through Alertmanager.
 ErrorBurst avoids alerting for each ordinary error, though overlapping windows can
-keep an alert active. Later Alertmanager grouping/deduplication controls delivery.
+keep an alert active. Alertmanager grouping/deduplication controls delivery.
 Generated log rules have stable `severity` and `source` labels and concise
 service/count summaries.
 
 Upstream supports `type: vlogs` and the log-query statistics/filter pipeline.
 Each vmalert process uses a configured datasource URL, so metrics and logs must
-eventually use separate evaluator instances or explicitly verified datasource
-routing. A `vlogs` group alone does not route a query to VictoriaLogs. The explicit
+use the separate installed evaluator instances with explicit datasource routing. A `vlogs` group alone does not route a query to VictoriaLogs. The explicit
 `_time` windows are intended for live evaluation; upstream does not support those
 custom windows for replay/backfill. [VictoriaLogs alerting documentation](https://docs.victoriametrics.com/victorialogs/vmalert/).
 
@@ -855,34 +1037,34 @@ Unit tests cover policy values, explicit host/service-rendering refusal,
 deterministic log YAML, thresholds, durations, labels, and basic structure. No
 real evaluator or application log pipeline is exercised by renderer tests. A later
 slice must verify the Vector host metric contract, the service-state solution,
-expression syntax against pinned releases, datasource routing, event-time mapping,
-ingestion latency/window boundaries, and end-to-end alert evaluation before
-installing or claiming any pack is active.
+event-time mapping, ingestion latency/window boundaries and end-to-end alert
+delivery. Pin validation and API rule checks establish narrower local contracts;
+fake-remote/renderer tests do not prove live evaluation or Telegram receipt.
 
-## Dashboards, alert deployment and Telegram: roadmap
+## Dashboards and additional alert packs: roadmap
 
 Add dashboards: Host Overview,
 Monitoring Station, Service Health, Storage, Updates / Security. Metrics, Logs and
 Traces are provisioned now. Configured credentials exercise the Logs query path;
 Metrics/Traces query-engine checks and browser UI validation remain integration gates.
 
-No generated rules are deployed or evaluated by the current installation.
-vmalert, Alertmanager, Vector, vmagent, and OTel Collector installation
-remain explicitly unavailable, as do Telegram, agents, firewall, and TLS.
-Rendering rules does not install a complete monitoring station or enable alerts.
+The current installation deploys the fixed log and external-probe packs. Vector,
+vmagent, OTel Collector, host/service metric alerts, firewall and TLS remain
+unavailable. A station-local native VictoriaMetrics scraper is implemented; this
+does not install application-host agents.
 
-Beyond the defined host/service policy and provisional log pack, later rules will include:
+Beyond the installed probe/log packs and deferred host/service policy, later rules will include:
 
 | Group | Planned rules (not rendered yet) |
 | --- | --- |
 | Pipeline | LogsNotArriving, MetricsNotArriving, VectorForwardFailure, VmagentForwardFailure, MonitoringDiskPressure |
 | Updates | SecurityUpdatesPending, CriticalSecurityUpdatePending, SecurityUpdateInstallFailed, RebootRequired, MonitoringComponentUpdateAvailable, MonitoringAgentUpdateAvailable, OSReleaseNearEndOfSupport, OSReleaseUnsupported, UpdateCheckFailed, UpdateCheckStale |
 
-Optional Telegram: vmalert → Alertmanager → bot → channel/chat. Read bot token from
-credentials, group/deduplicate warning and critical alerts, include resolved alerts,
-and send a clearly labeled test alert during installation verification. API
-acceptance alone must not be presented as proven delivery to a human. No first-class
-notification providers beyond Telegram in v0.x.
+Optional Telegram now uses vmalert → Alertmanager → bot → channel/chat with
+protected credential files and grouped warning/critical/resolved notifications.
+Only explicit `monitoring notify-test` submits a test alert. Installation and
+verification never send test notifications. API acceptance alone is not proof of
+Telegram delivery to a human. No other notification provider is exposed.
 
 ## Update monitoring and maintenance: roadmap
 

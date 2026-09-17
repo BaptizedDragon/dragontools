@@ -57,8 +57,11 @@ pub const listener_ready =
     \\
 ;
 
-fn command(a: std.mem.Allocator, arch: host.Arch, report: *install.Report, script: []const u8, check: readiness.Check) ![]const u8 {
-    return remote.shell(a, &.{ "sh", "-eu", "-c", script, try std.fmt.allocPrint(a, "dragontools-victoriametrics-{s}", .{@tagName(check)}), vm.artifact(arch).binary_sha256, try @import("../system/systemd.zig").render(a, report.reserve_bytes), try std.fmt.allocPrint(a, "{d}", .{report.reserve_bytes}), "-retentionPeriod=" ++ policy.metrics.retention });
+pub fn command(a: std.mem.Allocator, arch: host.Arch, report: *install.Report, script: []const u8, check: readiness.Check) ![]const u8 {
+    const units = @import("../system/systemd.zig");
+    const guarded = if (report.station_enabled) try std.mem.replaceOwned(u8, a, script, "-selfScrapeInterval=15s)", "-selfScrapeInterval=15s " ++ units.scrape_argument ++ ")") else try a.dupe(u8, script);
+    defer a.free(guarded);
+    return remote.shell(a, &.{ "sh", "-eu", "-c", guarded, try std.fmt.allocPrint(a, "dragontools-victoriametrics-{s}", .{@tagName(check)}), vm.artifact(arch).binary_sha256, try units.renderStation(a, report.reserve_bytes, report.station_enabled), try std.fmt.allocPrint(a, "{d}", .{report.reserve_bytes}), "-retentionPeriod=" ++ policy.metrics.retention });
 }
 
 pub fn health(a: std.mem.Allocator, r: remote.Remote, report: *install.Report, arch: host.Arch) !void {
@@ -119,6 +122,22 @@ pub fn verify(a: std.mem.Allocator, r: remote.Remote, report: *install.Report) !
     try @import("grafana_credentials.zig").verifyLogs(a, r, report);
     report.emit(if (report.logs_query_verified) .logs_query_verified else .logs_query_unchecked);
     report.endComponent();
+    if (report.station_enabled) {
+        report.beginComponent(.blackbox_exporter);
+        try @import("blackbox.zig").health(a, r, report, machine.arch);
+        report.endComponent();
+        report.component = .victoriametrics;
+        try @import("scrape.zig").health(a, r, report, machine.arch);
+        report.beginComponent(.alertmanager);
+        try @import("alertmanager.zig").health(a, r, report, machine.arch);
+        report.endComponent();
+        report.beginComponent(.vmalert_logs);
+        try @import("vmalert.zig").health(a, r, report, machine.arch, .logs);
+        report.endComponent();
+        report.beginComponent(.vmalert_metrics);
+        try @import("vmalert.zig").health(a, r, report, machine.arch, .metrics);
+        report.endComponent();
+    }
 }
 
 test "health fails on malformed, error and empty query responses" {

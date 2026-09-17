@@ -66,9 +66,10 @@ fn execute(init: std.process.Init, options: cli.Options) !void {
         return;
     }
     if (options.plan) {
-        print(init.io, try plan.renderWithCredentials(a, options.grafana_user_op != null));
+        print(init.io, try plan.renderStation(a, options.grafana_user_op != null, options.telegram_bot_token_op != null, options.probes.len));
         return;
     }
+    if (options.command == .notify_test and options.telegram_bot_token_op == null) return error.TelegramConfigurationRequired;
     // Resolve locally before even the first SSH inspection. Status and plan
     // never need secret values. All sensitive allocations have short lifetimes.
     const credentials = if ((options.command == .install or options.command == .verify) and options.grafana_user_op != null) credentials: {
@@ -84,13 +85,19 @@ fn execute(init: std.process.Init, options: cli.Options) !void {
         };
     } else null;
     defer if (credentials) |secret| secret.deinit();
+    const telegram = if (options.command == .install and options.telegram_bot_token_op != null) telegram: {
+        var provider: @import("secrets/onepassword.zig").Local = .{ .io = init.io };
+        const references = @import("secrets/reference.zig");
+        break :telegram try @import("secrets/telegram.zig").payload(std.heap.page_allocator, provider.resolver(), try references.parseOnePassword(options.telegram_bot_token_op.?), try references.parseOnePassword(options.telegram_chat_id_op.?));
+    } else null;
+    defer if (telegram) |secret| secret.deinit();
     var ssh: @import("system/ssh.zig").Ssh = .{ .allocator = a, .io = init.io, .options = options };
     const r = ssh.asRemote();
     var progress_output: ProgressOutput = .{ .io = init.io };
-    var report: @import("monitoring/install.zig").Report = .{ .grafana_credentials = credentials, .progress = .{ .context = &progress_output, .write = ProgressOutput.write } };
+    var report: @import("monitoring/install.zig").Report = .{ .station_enabled = true, .probes = options.probes, .telegram_credentials = telegram, .telegram_configured = options.telegram_bot_token_op != null, .grafana_credentials = credentials, .progress = .{ .context = &progress_output, .write = ProgressOutput.write } };
     switch (options.command) {
         .install, .verify => {
-            print(init.io, if (options.command == .install) "Installing VictoriaMetrics, VictoriaLogs, VictoriaTraces and Grafana over SSH...\n" else "Verifying VictoriaMetrics, VictoriaLogs, VictoriaTraces and Grafana over SSH...\n");
+            print(init.io, if (options.command == .install) "Installing the monitoring station over SSH (eight services)...\n" else "Verifying the monitoring station over SSH (eight services)...\n");
             const result = if (options.command == .install) @import("monitoring/install.zig").install(a, r, &report) else @import("monitoring/verify.zig").verify(a, r, &report);
             result catch |err| {
                 const advice = if (options.command == .install)
@@ -102,6 +109,7 @@ fn execute(init: std.process.Init, options: cli.Options) !void {
             };
             if (options.command == .install and report.changes == 0) print(init.io, "No changes required.\n");
             print(init.io, try std.fmt.allocPrint(a, "VictoriaMetrics: loopback:8428\n  healthy; self-scraped metrics queryable\n  retention: {s}; free-space reserve: {d} bytes ({d}% of filesystem capacity)\nVictoriaLogs: loopback:9428\n  healthy; writable storage\n  retention: disk-bound; logical limit: {s}; native partition budget: {d}% of filesystem capacity\nVictoriaTraces: loopback:{d}\n  healthy; writable storage\n  retention: disk-bound; logical limit: {s}; native partition budget: {d}% of filesystem capacity\n  Logs/traces cleanup is periodic and preserves the newest two partitions; other writers can fill the filesystem earlier.\nGrafana: loopback:3000\n  healthy; local authentication enabled\n  administrator credentials {s}\n  Metrics datasource: provisioning and backend query verified\n  Logs datasource: provisioning and backend query verified\n  Traces datasource: provisioning and backend query verified\n  Logs plugin: {s}\n  Metrics/Traces query-engine and browser UI validation remain manual integration checks\nAccess through an explicit SSH tunnel.{s}\n", .{ policy.metrics.retention, report.reserve_bytes, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent, vt.port, policy.traces.retention, policy.traces.cleanup_usage_percent, if (credentials != null) "verified" else "unmanaged", if (report.logs_query_verified) "health and authenticated query verified" else "authenticated query unchecked; configure administrator references to verify", if (credentials != null) "" else " Change the initial administrator password at first login." }));
+            print(init.io, try std.fmt.allocPrint(a, "Blackbox exporter: loopback:9115\n  healthy; HTTP/HTTPS GET probes; TLS verification enabled\nVictoriaMetrics native scraper: {d} configured probes\n  loaded definitions and fresh stored probe telemetry verified\n  a down target is valid monitoring state\nvmalert-logs: loopback:8880\n  healthy; VictoriaLogs rules evaluated\nvmalert-metrics: loopback:8881\n  healthy; ServiceProbeFailed evaluates probe_success == 0 for 2m\nAlertmanager: loopback:9093\n  healthy; clustering disabled; Telegram {s}\nNo test notification sent.\n", .{ options.probes.len, if (options.telegram_bot_token_op != null) "configured with protected secret files" else "disabled" }));
         },
         .status => {
             const output = @import("monitoring/status.zig").status(a, r, &report) catch |err| {
@@ -109,6 +117,10 @@ fn execute(init: std.process.Init, options: cli.Options) !void {
                 return err;
             };
             print(init.io, output);
+        },
+        .notify_test => {
+            try @import("monitoring/alertmanager.zig").notifyTest(a, r, &report);
+            print(init.io, "Test alert accepted by Alertmanager. Check Telegram for delivery; acceptance does not prove delivery.\n");
         },
         else => unreachable,
     }
@@ -132,6 +144,12 @@ fn personalizeHost(init: std.process.Init, options: cli.Options) !void {
     print(init.io, try output.result(a, report));
 }
 test {
+    _ = @import("components/blackbox_exporter.zig");
+    _ = @import("components/vmalert.zig");
+    _ = @import("monitoring/blackbox.zig");
+    _ = @import("monitoring/vmalert.zig");
+    _ = @import("monitoring/alertmanager.zig");
+    _ = @import("secrets/telegram.zig");
     _ = @import("cli/parse.zig");
     _ = @import("cli/spec.zig");
     _ = @import("cli/help.zig");
@@ -164,6 +182,7 @@ test {
     _ = @import("monitoring/progress.zig");
     _ = @import("monitoring/readiness.zig");
     _ = @import("monitoring/tests.zig");
+    _ = @import("monitoring/station_tests.zig");
     _ = @import("monitoring/policy.zig");
     _ = @import("monitoring/rules.zig");
     _ = @import("monitoring/verify.zig");
