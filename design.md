@@ -911,6 +911,14 @@ state; the pinned [write client](https://github.com/VictoriaMetrics/VictoriaMetr
 uses bounded in-memory queues and HTTP, not a persistent spool. A crash can lose
 unflushed state; local remote storage is not a stronger delivery guarantee.
 
+Both generated units explicitly set `-group.maxStartDelay=1s`. VictoriaMetrics
+vmalert v1.152.0 crashes with `0s`: `Group.delayBeforeStart` uses the minimum of
+the group interval and this flag as a modulo divisor, so zero causes a
+divide-by-zero panic. The positive one-second bound keeps this scheduling delay
+within the readiness deadline. Updating either unit preserves restart intent only
+for that instance; a successful restart and verification make the next install a no-op.
+[Pinned startup-delay calculation](https://github.com/VictoriaMetrics/VictoriaMetrics/blob/v1.152.0/app/vmalert/rule/group.go#L515-L543).
+
 The logs instance queries VictoriaLogs with the fixed ErrorBurst/CriticalLogEvent
 pack; metrics queries VictoriaMetrics with ServiceProbeFailed. Both notify local
 Alertmanager. `-dryRun` validates fixed rule syntax/templates before rule-file

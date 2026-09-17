@@ -16,6 +16,8 @@ const State = struct {
     restarts: usize = 0,
     downloads: usize = 0,
     config_writes: usize = 0,
+    unit_command: ?[]const u8 = null,
+    unit_writes: usize = 0,
     fail: ?readiness.Check = null,
     delayed: ?readiness.Check = null,
     attempts: usize = 0,
@@ -36,6 +38,7 @@ const Fake = struct {
     secret_writes: usize = 0,
     notify_calls: usize = 0,
     check_syntax: bool = false,
+    fail_after_unit: ?workflow.Component = null,
 
     fn state(self: *Fake, component: workflow.Component) *State {
         for (extra, 0..) |value, index| if (value == component) return &self.states[index];
@@ -145,6 +148,24 @@ const Fake = struct {
                 return .{ .code = 0, .output = "changed" };
             },
             .config => if (std.mem.indexOf(u8, command, "dragontools-vmalert-dry-run") != null or std.mem.startsWith(u8, command, "runuser ")) return .{ .code = 0, .output = "unchanged" },
+            .unit => {
+                if (current.unit_command) |existing| if (std.mem.eql(u8, existing, command)) return .{ .code = 0, .output = "unchanged" };
+                if (component == .vmalert_logs or component == .vmalert_metrics) {
+                    const vmalert = @import("vmalert.zig");
+                    const kind: vmalert.Kind = if (component == .vmalert_logs) .logs else .metrics;
+                    const other: vmalert.Kind = if (kind == .logs) .metrics else .logs;
+                    // Validate the production writer's marker argument, not just
+                    // the component selected by this controller-state fixture.
+                    try std.testing.expect(std.mem.endsWith(u8, command, try remote.quote(self.allocator, vmalert.marker(kind))));
+                    try std.testing.expect(std.mem.indexOf(u8, command, vmalert.marker(other)) == null);
+                }
+                current.unit_command = try self.allocator.dupe(u8, command);
+                current.unit_writes += 1;
+                current.pending = true;
+                current.present[@intFromEnum(op)] = true;
+                if (self.fail_after_unit == component) return .{ .code = 1 };
+                return .{ .code = 0, .output = "changed" };
+            },
             else => {},
         }
         const index = @intFromEnum(op);
@@ -159,6 +180,59 @@ const Fake = struct {
 
 const one = [_]probes.Probe{.{ .name = "landing", .url = "https://landing.example/health" }};
 const two = [_]probes.Probe{ one[0], .{ .name = "orders", .url = "https://orders.example/health" } };
+
+test "vmalert zero-delay unit migration dirties only its service and reruns become no-ops" {
+    for ([_]workflow.Component{ .vmalert_logs, .vmalert_metrics }) |affected| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var report: workflow.Report = .{ .station_enabled = true, .probes = &one };
+        var fake: Fake = .{ .allocator = a, .report = &report };
+        try workflow.install(a, fake.asRemote(), &report);
+        const current = fake.state(affected);
+        // Model a previously installed unit with the unsafe startup flag. All
+        // binaries, rules, URLs and the other service's unit are already current.
+        current.unit_command = try std.mem.replaceOwned(u8, a, current.unit_command.?, "-group.maxStartDelay=1s", "-group.maxStartDelay=0s");
+        const before = fake.states;
+        fake.fail_after_unit = affected;
+        report = .{ .station_enabled = true, .probes = &one };
+        try std.testing.expectError(error.RemoteOperationFailed, workflow.install(a, fake.asRemote(), &report));
+        try std.testing.expectEqual(affected, report.component.?);
+        try std.testing.expectEqual(remote.Operation.unit, report.phase);
+        for (extra, before) |component, previous| {
+            const state = fake.state(component);
+            try std.testing.expectEqual(component == affected, state.pending);
+            try std.testing.expectEqual(previous.restarts, state.restarts);
+            try std.testing.expectEqual(previous.unit_writes + @as(usize, @intFromBool(component == affected)), state.unit_writes);
+        }
+        try std.testing.expect(!fake.core.vm.dirty and !fake.core.vl.dirty and !fake.core.vt.dirty and !fake.core.gf.dirty);
+
+        // The unit write completed before the failure. Recovery must restart
+        // from persisted intent, verify, finalize, then leave the next run idle.
+        fake.fail_after_unit = null;
+        report = .{ .station_enabled = true, .probes = &one };
+        try workflow.install(a, fake.asRemote(), &report);
+        try std.testing.expectEqual(@as(usize, 1), report.changes);
+        report = .{ .station_enabled = true, .probes = &one };
+        try workflow.install(a, fake.asRemote(), &report);
+        try std.testing.expectEqual(@as(usize, 0), report.changes);
+        for (extra, before) |component, previous| {
+            const state = fake.state(component);
+            try std.testing.expect(!state.pending);
+            try std.testing.expectEqual(previous.restarts + @as(usize, @intFromBool(component == affected)), state.restarts);
+            try std.testing.expectEqual(previous.unit_writes + @as(usize, @intFromBool(component == affected)), state.unit_writes);
+            try std.testing.expectEqual(previous.config_writes, state.config_writes);
+            try std.testing.expectEqual(previous.downloads, state.downloads);
+        }
+        try std.testing.expectEqual(@as(usize, 1), fake.core.vm.restarts);
+        try std.testing.expectEqual(@as(usize, 1), fake.core.vl.restarts);
+        try std.testing.expectEqual(@as(usize, 1), fake.core.vt.restarts);
+        try std.testing.expectEqual(@as(usize, 1), fake.core.gf.restarts);
+        try std.testing.expectEqual(@as(usize, 1), fake.scrape_writes);
+        try std.testing.expectEqual(@as(usize, 1), fake.scrape_reloads);
+        try std.testing.expectEqual(@as(usize, 0), fake.notify_calls);
+    }
+}
 
 test "eight service station installs then remains unchanged while probe add remove only reload scraping" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

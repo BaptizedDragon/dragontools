@@ -2,6 +2,11 @@
 
 ## 0.1.0-dev — unreleased
 
+- Set `-group.maxStartDelay=1s` in both vmalert units. The pinned v1.152.0
+  `Group.delayBeforeStart` calculation panics with a zero delay due to division by
+  zero. Unit updates retain independent restart intent and unchanged reruns are
+  no-ops after successful verification.
+
 - Install pinned blackbox_exporter 0.28.0, Alertmanager v0.34.1 and independent
   vmalert-logs/vmalert-metrics v1.152.0 services, with dedicated accounts, reviewed
   archive/binary checksums, atomic publication and loopback-only listeners.
