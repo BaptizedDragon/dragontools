@@ -162,6 +162,58 @@ class ClientLifecycle(unittest.TestCase):
         self.assertEqual(before_station, snapshot(Path(self.station.BASE)))
         self.assertEqual(self.commands, [])
 
+    def test_hostname_change_preserves_client_identity_and_public_registration_finalizes(self):
+        first = self.enroll()
+        before = snapshot(Path(self.client.ETC))
+        endpoint = "monitoring.baptizeddragon.com"
+        changed = dict(self.value, station=endpoint)
+        self.assertEqual(self.station.ensure(changed), "changed")
+        inspection = self.station.inspect_station(HOST, endpoint)
+        prepared = self.client.client_prepare(HOST, endpoint, inspection)
+        self.assertEqual(prepared['action'], 'unchanged')
+        self.assertIsNone(prepared['csr'])
+        self.assertEqual(self.station.stage_registration(changed), "changed")
+        # Interrupted staged registration is readable and repeatable before commit.
+        self.assertEqual(self.station.stage_registration(changed), "unchanged")
+        for kind in ('vector', 'vmagent'):
+            self.assertEqual(self.client.client_install(kind, HOST, endpoint), "unchanged")
+            self.client.verify_credentials(kind, HOST, endpoint)
+        self.assertEqual(before, snapshot(Path(self.client.ETC)))
+        self.assertEqual(self.commands, [])
+        self.station.finalize(HOST, first['certificate_sha256'])
+        self.station.verify_station(changed)
+        self.assertEqual(self.client.client_commit(HOST, endpoint), "unchanged")
+        after = snapshot(Path(self.station.BASE))
+        self.assertEqual(self.station.ensure(changed), "unchanged")
+        self.assertEqual(self.station.stage_registration(changed), "unchanged")
+        self.assertEqual(after, snapshot(Path(self.station.BASE)))
+        self.assertEqual(before, snapshot(Path(self.client.ETC)))
+        # A name change never grants permission to change the trust root.
+        with self.assertRaises(ValueError):
+            self.client.client_prepare(HOST, endpoint, dict(inspection, **{'ca.crt': 'foreign CA'}))
+        self.assertEqual(before, snapshot(Path(self.client.ETC)))
+
+    def test_renewal_after_hostname_change_reuses_key_and_recovers(self):
+        self.enroll(days=30)
+        key = (self.root / 'client.key').read_bytes()
+        endpoint = "renewed.example"
+        changed = dict(self.value, station=endpoint)
+        self.station.ensure(changed)
+        prepared = self.client.client_prepare(HOST, endpoint, self.station.inspect_station(HOST, endpoint))
+        self.assertEqual(prepared['action'], 'renew')
+        payload = self.station.stage(changed, prepared['csr'])
+        self.client.client_stage(payload)
+        for kind in ('vector', 'vmagent'):
+            self.client.client_install(kind, HOST, endpoint)
+        # A rollback preserves the old generation and retry uses the same key.
+        self.client.client_rollback(HOST, endpoint)
+        for kind in ('vector', 'vmagent'):
+            self.client.client_install(kind, HOST, endpoint)
+        self.station.finalize(HOST, payload['certificate_sha256'])
+        self.client.client_commit(HOST, endpoint)
+        self.assertEqual((self.root / 'client.key').read_bytes(), key)
+        self.assertEqual(self.client.client_prepare(HOST, endpoint, self.station.inspect_station(HOST, endpoint))['action'], 'unchanged')
+
     def test_renewal_keeps_key_and_only_changes_installed_consumer(self):
         first = self.enroll(days=30)
         key = (self.root / 'client.key').read_bytes()

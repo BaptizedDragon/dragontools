@@ -84,7 +84,8 @@ pub fn render(a: std.mem.Allocator, node: spec.Node) ![]const u8 {
         try w.writeAll(
             \\Loads exactly ./monitoring.toml by default, or the explicit --config path.
             \\Missing/invalid config fails before SSH. Version 1 requires application name
-            \\and environment, plus target.ssh_host and station.ssh_host OpenSSH aliases.
+            \\and environment, target.ssh_host and station.ssh_host OpenSSH aliases, and
+            \\station.hostname: a DNS-only mTLS hostname (no scheme, port, path or IP).
             \\Only --config, --help and apply's --plan are accepted; connection and signal
             \\selections belong in the file. Unknown keys and duplicate names fail.
             \\Host metrics are automatic. Service logs require explicit enabled=true.

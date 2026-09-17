@@ -12,6 +12,7 @@ ssh_host = "softwarelanding"
 
 [station]
 ssh_host = "monitoring"
+hostname = "monitoring.baptizeddragon.com"
 
 [[service]]
 name = "doers"

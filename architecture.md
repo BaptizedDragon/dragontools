@@ -421,6 +421,12 @@ Telegram or other station credentials. Only `./monitoring.toml` is implicit.
 An explicit environment and application identity avoid deriving identity from the
 repository name. Plan parses locally and displays only validated public config.
 
+Application configuration separates `station.ssh_host` (administrative OpenSSH
+alias) from required `station.hostname` (DNS-only network/TLS identity). Application
+dispatch never runs `ssh -G` to choose ingestion identity. Only the hostname enters
+registration, agent URLs, server SAN issuance and app-side network diagnostics;
+the port remains 9443. Plans and read-only status/verify show both identities.
+
 Each station namespace `/etc/dragontools/apps/<application>/` has an immutable
 application/environment/machine binding, an ownership manifest and generated
 `logs.rules.yml`, `metrics.rules.yml` and `scrape.yml`. Ownership requires exact
@@ -482,8 +488,9 @@ Unavailable edge: application OTLP -> OTel Collector -> VictoriaTraces.
 and explicit private application targets before SSH. Remote services must match
 the selected canonical systemd `Id` and have no `LogNamespace`, checked before
 registration. Station aliases resolve via
-native OpenSSH configuration; their effective DNS/IPv4 `HostName` becomes the
-agent-reachable endpoint. The controller contacts both hosts with verified keys.
+native OpenSSH configuration; the legacy `monitoring agents` command uses the
+effective DNS/IPv4 `HostName` as its endpoint. Application commands instead require
+explicit `station.hostname`. The controller contacts both hosts with verified keys.
 The application machine ID supplies stable `dt-<32 hex>` identity. A small
 station registration records services, targets and certificate fingerprint; there
 is no controller state database or discovery system.
@@ -552,6 +559,14 @@ telemetry gate registry promotion and removal of the legacy station client key.
 Station finalization precedes host cleanup, so an uncertain SSH response retains
 the working candidate for recovery. Unlink is not a physical secure-erase claim.
 The registry retains public certificate/identity metadata, never new client keys.
+Server hostname changes append the explicit name to a bounded set of at most 16
+managed SANs and atomically replace only the server certificate, with ingestion
+restart intent recorded first. Existing names remain valid for other hosts.
+Application endpoints change independently of client identity: canonical and
+consumer credential metadata keep enrollment provenance, while rendered agent
+configuration supplies the current expected server name. The existing CA and
+registered machine fingerprint must still match before reuse. No hostname change
+rotates CA/server/client keys or writes another application's manifest.
 
 Apply renews client/server certificates with their existing keys at 30 days or
 less remaining (one-year leaf lifetime, ten-year CA). Valid identities are unchanged;

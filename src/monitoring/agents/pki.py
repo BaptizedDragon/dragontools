@@ -323,7 +323,7 @@ def sign(csr, host, ca):
                    "0x" + os.urandom(16).hex(), "-days", "365", "-sha256", "-extfile", stage + "/extensions", data=csr.encode())
 
 
-def generate(ca, name, subject, endpoint=None, key=None):
+def generate(ca, name, subject, endpoint=None, key=None, endpoints=None):
     # There is intentionally no station-side client generation branch.
     require((ca is None and name == "ca") or (ca is not None and name == "server" and endpoint is not None))
     with tempfile.TemporaryDirectory(prefix=".generate-", dir=BASE + "/pki") as stage:
@@ -336,12 +336,17 @@ def generate(ca, name, subject, endpoint=None, key=None):
                        "-addext", "keyUsage=critical,keyCertSign,cRLSign")
         else:
             csr = run("req", "-new", "-key", stage + "/key.pem", "-subj", "/CN=" + subject)
-            try:
-                ipaddress.ip_address(endpoint)
-                san = "IP:"
-            except ValueError:
-                san = "DNS:"
-            extensions = "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=" + san + endpoint + "\n"
+            names = endpoints if endpoints is not None else [endpoint]
+            require(0 < len(names) <= 16 and len(set(names)) == len(names) and endpoint in names)
+            sans = []
+            for item in names:
+                valid_endpoint(item)
+                try:
+                    ipaddress.ip_address(item)
+                    sans.append("IP:" + item)
+                except ValueError:
+                    sans.append("DNS:" + item)
+            extensions = "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=" + ",".join(sans) + "\n"
             write(stage + "/extensions", extensions.encode(), ROOT, ROOT)
             cert = run("x509", "-req", "-CA", ca + "/ca.crt", "-CAkey", ca + "/ca.key", "-set_serial",
                        "0x" + os.urandom(16).hex(), "-days", "365", "-sha256", "-extfile", stage + "/extensions", data=csr)
@@ -376,6 +381,27 @@ def _validate_ca():
     return values
 
 
+def _server_names():
+    # Retain previously issued identities so a hostname change on one host does
+    # not strand other enrolled hosts. Only explicit bounded DNS/IP SANs exist.
+    names = []
+    for item in _extension(BASE + "/server/server.crt", "subjectAltName").split(", "):
+        if item.startswith("DNS:"):
+            name = valid_endpoint(item[4:])
+            try:
+                ipaddress.ip_address(name)
+            except ValueError:
+                pass
+            else:
+                raise ValueError("Invalid DNS SAN")
+        else:
+            require(item.startswith("IP Address:"))
+            name = str(ipaddress.ip_address(item[11:]))
+        names.append(name)
+    require(0 < len(names) <= 16 and len(set(names)) == len(names))
+    return names
+
+
 def _station(endpoint, allow_server_renewal=False):
     account = pwd.getpwnam("dt-ingest")
     directory(BASE, 0o755, ROOT, ROOT)
@@ -385,13 +411,10 @@ def _station(endpoint, allow_server_renewal=False):
     ca = BASE + "/pki/ca"
     values = _validate_ca()
     server = bundle(BASE + "/server", account.pw_uid, account.pw_gid, ("ca.crt", "server.crt", "server.key", "endpoint"))
-    require(server["ca.crt"] == values["ca.crt"] and server["endpoint"] == valid_endpoint(endpoint).encode())
-    try:
-        address = ipaddress.ip_address(endpoint)
-        expected_san = "IP Address:" + str(address)
-    except ValueError:
-        expected_san = "DNS:" + endpoint
-    require(_extension(BASE + "/server/server.crt", "subjectAltName") == expected_san)
+    require(server["ca.crt"] == values["ca.crt"])
+    origin = valid_endpoint(server["endpoint"].decode())
+    names = _server_names()
+    require(origin in names and valid_endpoint(endpoint) in names)
     if allow_server_renewal and expires_soon(BASE + "/server/server.crt"):
         require(run("x509", "-in", BASE + "/server/server.crt", "-pubkey", "-noout") == run("pkey", "-in", BASE + "/server/server.key", "-pubout"))
         try:
@@ -429,7 +452,7 @@ def _registry(host, missing=False):
         require(fingerprint(value["certificate_pem"]) == value["certificate_sha256"])
     if "pending_certificate_pem" in value:
         require(fingerprint(value["pending_certificate_pem"]) == value["pending_certificate_sha256"])
-        registration(value["pending_registration"], host, ordinary["station"])
+        registration(value["pending_registration"], host)
         require(type(value["pending_expires_at"]) is int)
     return value
 
@@ -466,7 +489,6 @@ def inspect_station(host, endpoint):
     legacy_active = False
     legacy_expired = False
     if value:
-        require(value["station"] == endpoint)
         if "certificate_pem" not in value and value["certificate_sha256"] is not None:
             legacy_active = True
             require(legacy)
@@ -490,7 +512,7 @@ def ensure(value):
     changed = directory(BASE + "/registry", 0o750, ROOT, account.pw_gid, True) or changed
     previous = _registry(value["host"], True)
     if previous:
-        require(previous["station"] == endpoint and bool(previous.get("applications")) == bool(value.get("applications")))
+        require(bool(previous.get("applications")) == bool(value.get("applications")))
     ca = BASE + "/pki/ca"
     if not os.path.lexists(ca):
         # Missing issuance material on an initialized station is maintenance,
@@ -509,10 +531,15 @@ def ensure(value):
         mark("ingestion")
         create_bundle(BASE + "/server", account.pw_uid, account.pw_gid, values)
         changed = True
-    _station(endpoint, True)
-    if expires_soon(BASE + "/server/server.crt"):
+    origin = read(BASE + "/server/endpoint", account.pw_uid, account.pw_gid, 0o400).decode()
+    _station(origin, True)
+    names = _server_names()
+    if endpoint not in names or expires_soon(BASE + "/server/server.crt"):
+        if endpoint not in names:
+            require(len(names) < 16)
+            names.append(endpoint)
         existing = read(BASE + "/server/server.key", account.pw_uid, account.pw_gid, 0o400)
-        renewed = generate(ca, "server", endpoint, endpoint, existing)
+        renewed = generate(ca, "server", origin, origin, existing, endpoints=names)
         mark("ingestion")
         # Keep interrupted public staging outside the exact server bundle;
         # an orphan must not make the next bundle inspection unrecoverable.
@@ -529,7 +556,7 @@ def stage(value, csr):
     public = validate_csr(csr, host)
     current = _registry(host, True)
     if current:
-        require(current["station"] == endpoint and bool(current.get("applications")) == bool(value.get("applications")))
+        require(bool(current.get("applications")) == bool(value.get("applications")))
     else:
         require(not _legacy(host))
         current = dict(value, certificate_sha256=None)
@@ -571,7 +598,7 @@ def stage_registration(value):
     """Stage changed authorization for an unchanged, already verified identity."""
     registration(value)
     current = _registry(value["host"])
-    require("certificate_pem" in current and current["station"] == value["station"])
+    require("certificate_pem" in current)
     _station(value["station"])
     validate_client_certificate(None, value["host"], BASE + "/pki/ca/ca.crt", data=current["certificate_pem"].encode())
     require(bool(current.get("applications")) == bool(value.get("applications")))

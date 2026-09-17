@@ -7,7 +7,7 @@ pub fn render(a: std.mem.Allocator, config: application.Config) ![]const u8 {
     errdefer out.deinit();
     const w = &out.writer;
     try w.writeAll("Application monitoring plan (local; SSH not attempted).\n");
-    try w.print("Application: {s}\nEnvironment: {s}\nTarget SSH alias: {s}\nStation SSH alias: {s}\n", .{ config.application.name, config.application.environment, config.target_ssh_host, config.station_ssh_host });
+    try w.print("Application: {s}\nEnvironment: {s}\nTarget SSH alias: {s}\nStation:\n  SSH alias: {s}\n  ingestion hostname: {s}\n  ingestion endpoint: https://{s}:9443\n", .{ config.application.name, config.application.environment, config.target_ssh_host, config.station_ssh_host, config.station_hostname, config.station_hostname });
     try w.writeAll("Vector: ensure pinned host metrics with trusted application/environment/host identity.\nSelected journal streams:\n");
     var logs: usize = 0;
     var metrics: usize = 0;
@@ -51,6 +51,7 @@ test "application local plan describes trusted signals and only its owned namesp
         \\ssh_host='replace-me-app'
         \\[station]
         \\ssh_host='replace-me-station'
+        \\hostname='monitoring.baptizeddragon.com'
         \\[[service]]
         \\name='web'
         \\systemd='web.service'
@@ -65,6 +66,6 @@ test "application local plan describes trusted signals and only its owned namesp
     defer config.deinit();
     const output = try render(std.testing.allocator, config);
     defer std.testing.allocator.free(output);
-    for ([_][]const u8{ "local; SSH not attempted", "Target SSH alias: replace-me-app", "Station SSH alias: replace-me-station", "web: web.service", "http://127.0.0.1:16000/metrics", "https://example.com/healthz", "/etc/dragontools/apps/doers/", "ServiceProbeFailed", "vmagent: ensure", "OTel traces" }) |needle| try std.testing.expect(std.mem.indexOf(u8, output, needle) != null);
+    for ([_][]const u8{ "local; SSH not attempted", "Target SSH alias: replace-me-app", "SSH alias: replace-me-station", "ingestion hostname: monitoring.baptizeddragon.com", "https://monitoring.baptizeddragon.com:9443", "web: web.service", "http://127.0.0.1:16000/metrics", "https://example.com/healthz", "/etc/dragontools/apps/doers/", "ServiceProbeFailed", "vmagent: ensure", "OTel traces" }) |needle| try std.testing.expect(std.mem.indexOf(u8, output, needle) != null);
     for ([_][]const u8{ "op://", "client.key", "/etc/dragontools/apps/orderflow/" }) |needle| try std.testing.expect(std.mem.indexOf(u8, output, needle) == null);
 }

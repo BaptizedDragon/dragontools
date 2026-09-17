@@ -25,6 +25,7 @@ const Fake = struct {
     mutations: usize = 0,
     enrollments: usize = 0,
     enrolled: bool = false,
+    station_hostname: []const u8 = "station.example",
     committed_pending: bool = false,
     pending_registry: bool = false,
     pending_lease_expired: bool = false,
@@ -60,7 +61,7 @@ const Fake = struct {
     fn execute(ctx: *anyopaque, op: remote.Operation, command: []const u8) !remote.Result {
         const self: *Fake = @ptrCast(@alignCast(ctx));
         try std.testing.expect(std.mem.indexOf(u8, command, "PRIVATE-CERTIFICATE-SENTINEL") == null);
-        if (std.mem.indexOf(u8, command, " 'inspect' '") != null) return .{ .code = 0, .output = try std.fmt.allocPrint(self.allocator, "{{\"host\":\"dt-0123456789abcdef0123456789abcdef\",\"station\":\"station.example\",\"ca.crt\":\"PUBLIC-CA\",\"legacy\":{s},\"legacy_expired\":false,\"legacy_active\":{s},\"certificate_sha256\":\"{s}\",\"pending_certificate_sha256\":{s}}}", .{ if (self.legacy) "true" else "false", if (self.legacy) "true" else "false", if (self.committed_pending) "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" else "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", if (self.pending_registry) "\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"" else "null" }) };
+        if (std.mem.indexOf(u8, command, " 'inspect' '") != null) return .{ .code = 0, .output = try std.fmt.allocPrint(self.allocator, "{{\"host\":\"dt-0123456789abcdef0123456789abcdef\",\"station\":\"{s}\",\"ca.crt\":\"PUBLIC-CA\",\"legacy\":{s},\"legacy_expired\":false,\"legacy_active\":{s},\"certificate_sha256\":\"{s}\",\"pending_certificate_sha256\":{s}}}", .{ self.station_hostname, if (self.legacy) "true" else "false", if (self.legacy) "true" else "false", if (self.committed_pending) "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" else "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", if (self.pending_registry) "\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"" else "null" }) };
         if (std.mem.indexOf(u8, command, " 'client-prepare' '") != null) {
             if (self.enrolled and !self.renew and !self.legacy and !self.candidate) return .{ .code = 0, .output = "{\"action\":\"unchanged\",\"csr\":null,\"certificate_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}" };
             if (!self.candidate) {
@@ -578,4 +579,30 @@ test "interrupted migration refreshes expired rollout authorization before endpo
     try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
     try std.testing.expectEqual(mutations, fake.mutations);
     try std.testing.expectEqual(@as(usize, 0), report.state.changes);
+}
+
+test "hostname change restarts only ingestion and endpoint consumers then reruns unchanged" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var report: model.Report = .{};
+    var fake: Fake = .{ .allocator = a, .report = &report };
+    try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
+    var changed = registration;
+    changed.station = "monitoring.baptizeddragon.com";
+    fake.station_hostname = changed.station;
+    // The real OpenSSL fixture proves SAN reconciliation. Model its sole marker.
+    fake.state(.ingestion).pending = true;
+    report = .{};
+    try install.install(a, fake.asRemote(), fake.asRemote(), &report, changed);
+    for ([_]model.Component{ .ingestion, .vector, .vmagent }) |kind| try std.testing.expectEqual(@as(usize, 2), fake.state(kind).restarts);
+    try std.testing.expectEqual(@as(usize, 1), fake.state(.host_rules).restarts);
+    try std.testing.expectEqual(@as(usize, 1), fake.enrollments);
+    for ([_]model.Component{ .vector, .vmagent }) |kind| try std.testing.expectEqual(@as(usize, 1), fake.state(kind).credential_writes);
+    const mutations = fake.mutations;
+    report = .{};
+    try install.install(a, fake.asRemote(), fake.asRemote(), &report, changed);
+    try std.testing.expectEqual(@as(usize, 0), report.state.changes);
+    try std.testing.expectEqual(mutations, fake.mutations);
+    for ([_]model.Component{ .ingestion, .vector, .vmagent }) |kind| try std.testing.expectEqual(@as(usize, 2), fake.state(kind).restarts);
 }

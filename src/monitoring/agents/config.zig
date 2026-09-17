@@ -303,6 +303,26 @@ test "vmagent scrapes only explicit applications plus itself and cannot accept f
     try std.testing.expectError(error.NoMetricsTargets, renderVmagent(a, "app-host", "monitor", &.{}));
 }
 
+test "application hostname renders deterministic TLS destinations with strict validation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var app = try @import("../../config/application.zig").parse(a, @import("../../config/application.zig").example);
+    defer app.deinit();
+    const vector = try renderVector(a, "host", app.station_hostname, &.{"app.service"});
+    const arguments = try vmagentArguments(a, app.station_hostname);
+    for ([_][]const u8{ vector, arguments }) |output| {
+        try std.testing.expect(std.mem.indexOf(u8, output, "https://monitoring.baptizeddragon.com:9443/") != null);
+        try std.testing.expect(std.mem.indexOf(u8, output, "https://monitoring:9443") == null);
+    }
+    try std.testing.expectEqualStrings(vector, try renderVector(a, "host", app.station_hostname, &.{"app.service"}));
+    try std.testing.expectEqualStrings(arguments, try vmagentArguments(a, app.station_hostname));
+    try std.testing.expect(std.mem.indexOf(u8, vector, "verify_certificate: true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, vector, "verify_hostname: true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, arguments, "-remoteWrite.tlsCAFile=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, arguments, "tlsInsecureSkipVerify") == null);
+}
+
 test "Vector excludes only immutable image filesystems and retains protected root mounts" {
     const a = std.testing.allocator;
     const config = try renderVector(a, "app-host", "monitor.example", &.{"application.service"});

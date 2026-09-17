@@ -296,6 +296,49 @@ class StationPKI(unittest.TestCase):
         self.assertEqual([x.name for x in self.state.iterdir()], ["ingestion-restart-required"])
         self.assertEqual(pki.ensure(self.value), "unchanged")
 
+    def test_hostname_change_adds_dns_san_retains_keys_old_names_and_noop(self):
+        ca = self.base / "pki/ca"
+        server = self.base / "server"
+        before = {str(p): (p.read_bytes(), p.stat().st_mtime_ns) for p in (ca / "ca.key", ca / "ca.crt", server / "server.key", server / "endpoint")}
+        cert = (server / "server.crt").read_bytes()
+        changed = dict(self.value, station="monitoring.baptizeddragon.com")
+        self.assertEqual(pki.ensure(changed), "changed")
+        self.assertNotEqual((server / "server.crt").read_bytes(), cert)
+        self.assertIn("DNS:monitoring.baptizeddragon.com", pki._extension(str(server / "server.crt"), "subjectAltName"))
+        pki._station(changed["station"])
+        pki._station(self.value["station"])
+        self.assertEqual(before, {name: (Path(name).read_bytes(), Path(name).stat().st_mtime_ns) for name in before})
+        snapshot = self.snapshot()
+        self.assertEqual(pki.ensure(changed), "unchanged")
+        self.assertEqual(pki.ensure(self.value), "unchanged")
+        self.assertEqual(snapshot, self.snapshot())
+
+    def test_hostname_reissue_failure_preserves_working_server_certificate(self):
+        before = self.snapshot()
+        with patch.object(pki, "generate", side_effect=ValueError("fixture signing failure")):
+            with self.assertRaises(ValueError):
+                pki.ensure(dict(self.value, station="new.example"))
+        self.assertEqual(before, self.snapshot())
+        pki._station(self.value["station"])
+
+    def test_hostname_publication_interruption_retains_intent_and_does_not_reissue(self):
+        changed = dict(self.value, station="next.example")
+        original = pki._atomic
+        def interrupted(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if args[0].endswith('/server.crt'):
+                raise OSError('fixture interruption after publication')
+            return result
+        with patch.object(pki, '_atomic', side_effect=interrupted):
+            with self.assertRaises(OSError):
+                pki.ensure(changed)
+        self.assertTrue((self.state / 'ingestion-restart-required').exists())
+        before = self.snapshot()
+        with patch.object(pki, 'generate', side_effect=AssertionError('unexpected reissue')):
+            self.assertEqual(pki.ensure(changed), 'unchanged')
+        self.assertEqual(before, self.snapshot())
+        pki._station(changed['station'])
+
     def test_missing_ca_on_existing_station_never_creates_replacement(self):
         ca = self.base / "pki/ca"
         os.rename(ca, self.base / "saved-ca")
@@ -335,7 +378,7 @@ class StationPKI(unittest.TestCase):
             pki.ensure(self.value)
         self.assertEqual(before, self.snapshot())
 
-    def test_ca_key_unsafe_mode_symlink_and_unexpected_endpoint_refused(self):
+    def test_ca_key_unsafe_mode_symlink_and_unverified_endpoint_refused(self):
         key = self.base / "pki/ca/ca.key"
         key.chmod(0o440)
         with self.assertRaises(ValueError):
@@ -350,7 +393,7 @@ class StationPKI(unittest.TestCase):
         key.write_bytes(original)
         key.chmod(0o400)
         with self.assertRaises(ValueError):
-            pki.ensure(dict(self.value, station="wrong.example"))
+            pki._station("wrong.example")
 
     def test_entrypoint_errors_have_no_raw_diagnostics(self):
         stdout, stderr = io.StringIO(), io.StringIO()

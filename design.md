@@ -753,7 +753,12 @@ The schema is deliberately separate from the station TOML used by
 `monitoring install`. The app file accepts no station secrets or secret references.
 
 Required tables are application (name and explicit environment), target and
-station (OpenSSH aliases). Repeated services name exact canonical `.service`
+station (`ssh_host` for OpenSSH administration and required `hostname` for TLS).
+The hostname is 1–253 ASCII DNS bytes, with 1–63 byte labels bounded by letters
+or digits and optional internal hyphens. Schemes, ports, paths, whitespace,
+wildcards, empty/malformed labels and IP literals fail before SSH. Single-label
+DNS names are accepted explicitly. No application command infers a hostname
+from an alias or reads OpenSSH resolution for it. Repeated services name exact canonical `.service`
 units. Logs default false, optional private HTTP(S) metrics enable vmagent, and
 traces=false is accepted while traces=true fails before SSH. Zero services is
 valid and still enables Vector host metrics. Repeated probes use the existing
@@ -789,7 +794,8 @@ fail explicitly. The existing mTLS credential and disk/journald bounds apply.
 Operators must serialize applies per shared target/station; concurrent distributed
 transactions and automatic namespace migration are not implemented.
 
-Local plan prints aliases, signal selections, probes, alerts and app-owned paths;
+Local plan prints administrative aliases, the distinct ingestion hostname and
+`https://hostname:9443` endpoint, signal selections, probes, alerts and app-owned paths;
 it does not inspect remote conflicts. Apply verifies actual ownership and recent
 signals before success. Probe target failures remain valid telemetry. Read-only
 commands do not export credentials, repair configuration, clear pending markers
@@ -966,6 +972,30 @@ recorded historical consumer copy only after proving its identity, certificate
 chain, recorded fingerprint and public-key match. When no matching local key
 survives, an exact known public identity can re-enroll with a new local key and
 the full candidate/telemetry proof. Conflicting or unprovable state is refused.
+
+Application hostname changes use the same CA and existing station server key.
+The signer validates the current managed bundle, then retains its existing DNS/IP
+SANs and adds the explicitly configured DNS name, bounded to 16 names. The initial
+`server/endpoint` remains provenance and must still be covered by the certificate.
+Only one public certificate is atomically replaced, so interruption cannot leave
+mismatched endpoint/certificate files. Restart intent precedes publication; retry
+recognizes a successfully published certificate and does not issue another.
+Old names continue to work for other registered hosts; automatic SAN pruning is
+out of scope. A full SAN set fails safely and requires explicit maintenance.
+
+Client `identity.json` and `.agent-identity` station fields record enrollment
+provenance, not a mutable TLS destination. Their canonical format, valid origin,
+machine identity, certificate/key pair and fingerprint still require proof;
+preparation also compares the station's exact CA and active fingerprint. This
+lets a hostname-only change reuse all credential bytes without a CSR or signature.
+Consumer TLS uses the hostname in its exact rendered configuration. A pending
+registration can carry the new hostname alongside the active old registration;
+normal endpoint/telemetry proof gates its promotion. A simultaneous due renewal
+uses the existing client key and the ordinary recoverable candidate generation.
+Finish an existing enrollment transaction with its original config before starting
+a different hostname change. On shared hosts, only the applying app's manifest
+changes; other apps retain their signals and metadata. Keep their configured
+hostnames consistent to avoid changing the shared agents' destination repeatedly.
 
 Client/server certificates last 365 days. With more than 30 days remaining,
 apply performs no CSR, signing, key regeneration, certificate rewrite, registry

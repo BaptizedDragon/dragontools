@@ -83,6 +83,7 @@ def reconcile(desired, host, station, mutate):
     desired = scope(desired)
     directory(os.path.dirname(BASE))
     existing = []
+    previous_station = None
     present = os.path.lexists(BASE)
     if present:
         directory(BASE)
@@ -101,16 +102,19 @@ def reconcile(desired, host, station, mutate):
             require(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,62}[.]json', filename))
             raw = read(BASE + '/' + filename)
             value = json.loads(raw)
-            require(set(value) == {'version', 'host', 'station', 'application'} and value['version'] == 1 and value['host'] == host and value['station'] == station)
+            require(set(value) == {'version', 'host', 'station', 'application'} and value['version'] == 1 and value['host'] == host)
+            require(isinstance(value['station'], str) and 0 < len(value['station']) <= 253 and all(re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?', label) for label in value['station'].split('.')))
             require(scope(value['application'])['name'] + '.json' == filename)
             require(raw == encoded(value))
             existing.append(value['application'])
+            if value['application']['name'] == desired['name']:
+                previous_station = value['station']
     else:
         # Existing raw-agent state cannot be silently adopted by an application.
         require(not any(os.path.lexists(os.path.dirname(BASE) + '/' + path) for path in ('vector/vector.yaml', 'vmagent/prometheus.yml', 'vector/.agent-identity', 'vmagent/.agent-identity')))
         require(mutate)
     previous = next((app for app in existing if app['name'] == desired['name']), None)
-    require(mutate or previous == desired)
+    require(mutate or (previous == desired and previous_station == station))
     merged = sorted([app for app in existing if app['name'] != desired['name']] + [desired], key=lambda app: app['name'])
     require(len(merged) <= 32 and sum(len(app['services']) for app in merged) <= 64)
     units = set()
@@ -127,7 +131,7 @@ def reconcile(desired, host, station, mutate):
         read(pending)  # Metadata refusal still applies to partial staging.
         os.unlink(pending)
         recovered = True
-    changed = previous != desired
+    changed = previous != desired or previous_station != station
     if mutate and changed:
         if not present:
             # Publish the directory and ownership evidence together. An interrupted

@@ -27,6 +27,7 @@ pub const Config = struct {
     application: Identity,
     target_ssh_host: []const u8,
     station_ssh_host: []const u8,
+    station_hostname: []const u8,
     services: []const Service = &.{},
     probes: []const Probe = &.{},
     alerts: []const Alert = &.{},
@@ -73,6 +74,21 @@ pub fn validateIdentity(identity: Identity) !void {
 fn validateAlias(value: []const u8) !void {
     if (value.len == 0 or value.len > 253 or !std.ascii.isAlphanumeric(value[0])) return error.InvalidSshHost;
     for (value) |byte| if (!std.ascii.isAlphanumeric(byte) and std.mem.indexOfScalar(u8, "_.-:", byte) == null) return error.InvalidSshHost;
+}
+pub fn validateStationHostname(value: []const u8) !void {
+    if (value.len == 0 or value.len > 253) return error.InvalidStationHostname;
+    var labels = std.mem.splitScalar(u8, value, '.');
+    var only_digits = true;
+    while (labels.next()) |label| {
+        if (label.len == 0 or label.len > 63 or !std.ascii.isAlphanumeric(label[0]) or !std.ascii.isAlphanumeric(label[label.len - 1])) return error.InvalidStationHostname;
+        for (label) |byte| {
+            if (!std.ascii.isAlphanumeric(byte) and byte != '-') return error.InvalidStationHostname;
+            if (!std.ascii.isDigit(byte)) only_digits = false;
+        }
+    }
+    // Reject IP literals and ambiguous numeric address spellings. Single-label
+    // DNS names remain valid when explicitly supplied by the operator.
+    if (only_digits) return error.InvalidStationHostname;
 }
 pub fn durationSeconds(value: []const u8) !u32 {
     if (value.len < 2 or value.len > 6 or value[0] == '0') return error.InvalidAlertDuration;
@@ -202,6 +218,7 @@ pub fn parse(a: std.mem.Allocator, contents: []const u8) !Config {
     var environment: ?[]const u8 = null;
     var target: ?[]const u8 = null;
     var station: ?[]const u8 = null;
+    var station_hostname: ?[]const u8 = null;
     var service_tables: std.ArrayList(ServiceTable) = .empty;
     var probe_tables: std.ArrayList(ProbeTable) = .empty;
     var alert_tables: std.ArrayList(AlertTable) = .empty;
@@ -266,8 +283,12 @@ pub fn parse(a: std.mem.Allocator, contents: []const u8) !Config {
             },
             .application => try putString(if (eq(key, "name")) &name else if (eq(key, "environment")) &environment else return error.UnknownApplicationConfigKey, &line, storage),
             .target, .station => {
-                if (!eq(key, "ssh_host")) return error.UnknownApplicationConfigKey;
-                try putString(if (section == .target) &target else &station, &line, storage);
+                if (section == .station and eq(key, "hostname")) {
+                    try putString(&station_hostname, &line, storage);
+                } else {
+                    if (!eq(key, "ssh_host")) return error.UnknownApplicationConfigKey;
+                    try putString(if (section == .target) &target else &station, &line, storage);
+                }
             },
             .service => {
                 const current = &service_tables.items[service_tables.items.len - 1];
@@ -312,10 +333,12 @@ pub fn parse(a: std.mem.Allocator, contents: []const u8) !Config {
         .application = .{ .name = name orelse return error.MissingApplicationName, .environment = environment orelse return error.MissingApplicationEnvironment },
         .target_ssh_host = target orelse return error.MissingApplicationTarget,
         .station_ssh_host = station orelse return error.MissingApplicationStation,
+        .station_hostname = station_hostname orelse return error.MissingStationHostname,
     };
     try validateIdentity(result.application);
     try validateAlias(result.target_ssh_host);
     try validateAlias(result.station_ssh_host);
+    try validateStationHostname(result.station_hostname);
     const services = try storage.alloc(Service, service_tables.items.len);
     for (service_tables.items, services, 0..) |table, *service, index| {
         service.* = .{ .name = table.name orelse return error.MissingApplicationServiceName, .systemd = table.systemd orelse return error.MissingApplicationServiceUnit, .logs = table.logs orelse false, .metrics_url = table.metrics_url };
@@ -426,6 +449,7 @@ pub const example =
     \\ssh_host = 'softwarelanding'
     \\[station]
     \\ssh_host = 'monitoring'
+    \\hostname='monitoring.baptizeddragon.com'
 ;
 const logged_service =
     \\[[service]]
@@ -471,6 +495,7 @@ test "application v1 parses explicit identities signals and bounded structured a
     try std.testing.expectEqualStrings("production", config.application.environment);
     try std.testing.expectEqualStrings("softwarelanding", config.target_ssh_host);
     try std.testing.expectEqualStrings("monitoring", config.station_ssh_host);
+    try std.testing.expectEqualStrings("monitoring.baptizeddragon.com", config.station_hostname);
     try std.testing.expect(config.services[0].logs);
     try std.testing.expectEqualStrings("http://127.0.0.1:16005/metrics", config.services[0].metrics_url.?);
     try std.testing.expectEqualStrings("https://example.com/healthz", config.probes[0].url);
@@ -485,6 +510,29 @@ test "application v1 parses explicit identities signals and bounded structured a
     try std.testing.expect(default_signals.services[0].metrics_url == null);
 }
 
+test "application station hostname is required DNS-only and independent of SSH alias" {
+    const prefix = "version=1\n[application]\nname='app'\nenvironment='prod'\n[target]\nssh_host='app'\n[station]\nssh_host='admin-alias'\n";
+    const a = std.testing.allocator;
+    try std.testing.expectError(error.MissingStationHostname, parse(a, prefix));
+    try std.testing.expectError(error.UnknownApplicationConfigKey, parse(a, prefix ++ "hostnmae='station.example'"));
+    try std.testing.expectError(error.DuplicateApplicationConfigKey, parse(a, prefix ++ "hostname='one.example'\nhostname='two.example'"));
+    for ([_][]const u8{ "", "https://station.example", "station.example:9443", "station.example/path", "station example", " station", "station\t", "-station.example", "station-.example", "station..example", "station.example.", ".station", "station_example", "127.0.0.1", "2001:db8::1", "[::1]", "2130706433", "*.example" }) |hostname| {
+        const input = try std.fmt.allocPrint(a, "{s}hostname='{s}'", .{ prefix, hostname });
+        defer a.free(input);
+        try std.testing.expectError(error.InvalidStationHostname, parse(a, input));
+    }
+    try std.testing.expectError(error.InvalidStationHostname, validateStationHostname(&(@as([64]u8, @splat('a')))));
+    try std.testing.expectError(error.InvalidStationHostname, validateStationHostname(&(@as([254]u8, @splat('a')))));
+    for ([_][]const u8{ "monitoring", "monitoring.baptizeddragon.com", "Monitoring.Example", "a-1.example", "xn--bcher-kva.example" }) |hostname| {
+        const input = try std.fmt.allocPrint(a, "{s}hostname='{s}'", .{ prefix, hostname });
+        defer a.free(input);
+        var value = try parse(a, input);
+        defer value.deinit();
+        try std.testing.expectEqualStrings("admin-alias", value.station_ssh_host);
+        try std.testing.expectEqualStrings(hostname, value.station_hostname);
+    }
+}
+
 test "application schema rejects unknown duplicate keys and absent or invalid identity version" {
     const a = std.testing.allocator;
     for ([_][]const u8{ "version=2", "version=01", "version=1.0", "version='1'" }) |input| try std.testing.expectError(error.UnsupportedApplicationConfigVersion, parse(a, input));
@@ -497,7 +545,7 @@ test "application schema rejects unknown duplicate keys and absent or invalid id
     try rejection(error.DuplicateApplicationConfigKey, "[application]");
     try rejection(error.DuplicateApplicationConfigKey, "ssh_host='other'");
     for ([_][]const u8{ "../app", "app/name", "app name", "", "-app", "app.name" }) |value| {
-        const input = try std.fmt.allocPrint(a, "version=1\n[application]\nname='{s}'\nenvironment='prod'\n[target]\nssh_host='app'\n[station]\nssh_host='station'", .{value});
+        const input = try std.fmt.allocPrint(a, "version=1\n[application]\nname='{s}'\nenvironment='prod'\n[target]\nssh_host='app'\n[station]\nssh_host='station'\nhostname='station.example'", .{value});
         defer a.free(input);
         try std.testing.expectError(error.InvalidApplicationName, parse(a, input));
     }

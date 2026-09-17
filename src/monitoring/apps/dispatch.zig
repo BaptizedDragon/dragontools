@@ -27,7 +27,8 @@ pub fn scope(a: std.mem.Allocator, value: config.Config) !model.ApplicationScope
 
 /// The caller owns the operation arena. Status/verify take the same desired
 /// contract but never publish manifests, export credentials or clear intent.
-pub fn execute(a: std.mem.Allocator, app: remote.Remote, station: remote.Remote, report: *model.Report, value: config.Config, endpoint: []const u8, command: cli.Command) ![]const u8 {
+pub fn execute(a: std.mem.Allocator, app: remote.Remote, station: remote.Remote, report: *model.Report, value: config.Config, command: cli.Command) ![]const u8 {
+    const endpoint = value.station_hostname;
     const identity = try agent_install.identify(a, app, report);
     report.component = .station;
     // Refuse namespace/ownership conflicts before touching the target manifest.
@@ -65,6 +66,27 @@ pub fn execute(a: std.mem.Allocator, app: remote.Remote, station: remote.Remote,
     });
 }
 
+pub fn stationSummary(a: std.mem.Allocator, value: config.Config) ![]const u8 {
+    return std.fmt.allocPrint(a, "Station:\n  SSH: {s}\n  ingestion: {s}:9443\n", .{ value.station_ssh_host, value.station_hostname });
+}
+
+test "application station summary and SSH transport keep administrative alias separate" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var value = try config.parse(a, config.example);
+    defer value.deinit();
+    const summary = try stationSummary(a, value);
+    try std.testing.expectEqualStrings("Station:\n  SSH: monitoring\n  ingestion: monitoring.baptizeddragon.com:9443\n", summary);
+    var ssh: Ssh = .{ .allocator = a, .io = std.testing.io, .options = .{ .command = .agents_install, .ssh_host = value.station_ssh_host } };
+    const args = try ssh.argv("true");
+    try std.testing.expectEqualStrings("monitoring", args[args.len - 2]);
+    for (args) |arg| {
+        try std.testing.expect(!std.mem.eql(u8, arg, "-G"));
+        try std.testing.expect(std.mem.indexOf(u8, arg, value.station_hostname) == null);
+    }
+}
+
 pub fn run(init: std.process.Init, options: cli.Options) !void {
     const a = init.arena.allocator();
     const value = options.application_config orelse return error.ApplicationConfigurationRequired;
@@ -72,7 +94,6 @@ pub fn run(init: std.process.Init, options: cli.Options) !void {
         print(init.io, try @import("plan.zig").render(a, value));
         return;
     }
-    const endpoint = try @import("../agents/dispatch.zig").endpoint(a, init.io, value.station_ssh_host);
     // Reuse native alias authentication/elevation and bounded agent transport.
     var app: Ssh = .{ .allocator = a, .io = init.io, .options = .{ .command = .agents_install, .ssh_host = value.target_ssh_host } };
     var station: Ssh = .{ .allocator = a, .io = init.io, .options = .{ .command = .agents_install, .ssh_host = value.station_ssh_host } };
@@ -83,13 +104,15 @@ pub fn run(init: std.process.Init, options: cli.Options) !void {
         .app_status => "Inspecting application monitoring (read-only)...\n",
         else => unreachable,
     });
-    const output = execute(a, app.asRemote(), station.asRemote(), &report, value, endpoint, options.command) catch |err| {
+    print(init.io, try stationSummary(a, value));
+    const output = execute(a, app.asRemote(), station.asRemote(), &report, value, options.command) catch |err| {
         print(init.io, try std.fmt.allocPrint(a, "Application monitoring failed. Component: {s}. Check: {s}. {s}\n", .{
             @tagName(report.component),
             if (report.state.check) |check| @tagName(check) else @tagName(report.state.phase),
             if (options.command == .app_apply) "Completed changes may remain; pending intent is preserved. Correct the cause and rerun the same application config." else "This command is read-only; no configuration or restart intent was changed.",
         }));
-        if (@import("../agents/verify.zig").networkFailure(report.state.check)) print(init.io, @import("../agents/verify.zig").network_guidance);
+        if (report.state.check == .dns_unresolved) print(init.io, "Monitoring station hostname does not resolve. DragonTools does not manage DNS. Configure the DNS record and rerun the same command.\n");
+        if (report.state.check == .tcp_unreachable) print(init.io, "Monitoring ingestion is unreachable. DragonTools does not manage provider firewalls or network ACLs. Allow TCP 9443 from this monitored host and rerun.\n");
         if (report.state.check == .client_identity_inconsistent) print(init.io, "The managed client identity is inconsistent. Existing files were preserved; restore a verified local backup or correct conflicting metadata before retrying.\n");
         if (report.state.check == .ca_maintenance) print(init.io, "The private CA requires explicit maintenance. It was not rotated or replaced.\n");
         return err;
@@ -132,12 +155,13 @@ test "application ownership conflict stops before target mutation or credential 
         \\ssh_host='replace-me-app'
         \\[station]
         \\ssh_host='replace-me-station'
+        \\hostname='monitoring.baptizeddragon.com'
     );
     defer value.deinit();
     var app: Fake = .{};
     var station: Fake = .{ .station = true };
     var report: model.Report = .{};
-    try std.testing.expectError(error.UnmanagedFileConflict, execute(arena.allocator(), app.asRemote(), station.asRemote(), &report, value, "monitor.example", .app_apply));
+    try std.testing.expectError(error.UnmanagedFileConflict, execute(arena.allocator(), app.asRemote(), station.asRemote(), &report, value, .app_apply));
     try std.testing.expectEqual(@as(usize, 1), app.calls);
     try std.testing.expectEqual(@as(usize, 1), station.calls);
     try std.testing.expectEqual(@as(usize, 0), report.state.changes);
@@ -156,6 +180,7 @@ test "probe and alert edits do not change the desired application agent scope" {
         \\ssh_host='replace-me-app'
         \\[station]
         \\ssh_host='replace-me-station'
+        \\hostname='monitoring.baptizeddragon.com'
         \\[[service]]
         \\name='web'
         \\systemd='web.service'

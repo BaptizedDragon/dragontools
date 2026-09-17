@@ -62,6 +62,15 @@ with tempfile.TemporaryDirectory() as path, patch.object(apps, 'ROOT', os.getuid
     pending.symlink_to(orderflow)
     refused(lambda: apply(app('doers', False, False)))
     pending.unlink()
+    # A new endpoint updates only this app's owned metadata; other scopes merge
+    # unchanged. Read-only verification never adopts an un-applied hostname.
+    other_before = (orderflow.read_bytes(), orderflow.stat().st_mtime_ns)
+    refused(lambda: apps.reconcile(app('doers', False, False), 'dt-'+'a'*32, 'new.example', False))
+    updated, changed = apps.reconcile(app('doers', False, False), 'dt-'+'a'*32, 'new.example', True)
+    assert changed and updated['station'] == 'new.example'
+    assert (orderflow.read_bytes(), orderflow.stat().st_mtime_ns) == other_before
+    assert apps.reconcile(app('doers', False, False), 'dt-'+'a'*32, 'new.example', True) == (updated, False)
+    assert apps.reconcile(app('doers', False, False), 'dt-'+'a'*32, 'new.example', False) == (updated, False)
     # Corrupted or administrator-edited manifests cannot be adopted.
     manifest.write_bytes(manifest.read_bytes()+b' ')
     refused(lambda: apply(app('doers')))

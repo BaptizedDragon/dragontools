@@ -104,7 +104,10 @@ def client_check_public_identity(path, values, host, endpoint, allow_expired=Fal
     history = metadata.get("previous_consumers")
     require(isinstance(history, dict) and set(history) <= {"vector", "vmagent"})
     require(all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) for value in history.values()))
-    require(values["identity.json"] == client_identity(host, endpoint, values["client.crt"], history))
+    # The stored station name is enrollment provenance. The CA and machine
+    # certificate bind this key; current TLS destination comes from agent config.
+    origin = valid_endpoint(metadata["station"])
+    require(values["identity.json"] == client_identity(host, origin, values["client.crt"], history))
     validate_client_certificate(path + "/client.crt", host, path + "/ca.crt", allow_expired=allow_expired)
 
 
@@ -193,13 +196,20 @@ def client_pending(host, endpoint):
     return values, previous, txn
 
 
+def client_consumer_origin(raw, host):
+    metadata = json.loads(raw)
+    origin = valid_endpoint(metadata["station"])
+    require(raw == encoded({"host": host, "station": origin}))
+    return origin
+
+
 def client_consumer_state(kind, host, endpoint, modern=False, allow_expired=False):
     require(kind in ("vector", "vmagent"))
     account = pwd.getpwnam("dt-" + kind)
     values = agent_state(kind, account)
     if values is not None:
         require(set(values) == set(SECRET_FILES) | {".agent-identity"})
-        require(values[".agent-identity"] == encoded({"host": host, "station": endpoint}))
+        client_consumer_origin(values[".agent-identity"], host)
         client_check_pair(ETC + "/" + kind, host, modern=modern, allow_expired=allow_expired)
     return values
 
@@ -233,7 +243,7 @@ def client_recover_key(host, endpoint, inspection):
             continue
         if consumer["ca.crt"] != values["ca.crt"] or client_fingerprint(consumer["client.crt"]) not in (inspection["certificate_sha256"], history.get(kind)):
             continue
-        require(consumer.get(".agent-identity") == encoded({"host": host, "station": endpoint}))
+        client_consumer_origin(consumer[".agent-identity"], host)
         client_check_public_consumer(kind, host)
         if run("pkey", "-in", ETC + "/" + kind + "/client.key", "-pubout") != canonical_public:
             continue
@@ -323,7 +333,7 @@ def client_prepare(host, endpoint, inspection):
                 require(set(prior) in ({"ca.crt", "client.crt", ".agent-identity"}, set(SECRET_FILES) | {".agent-identity"}))
                 require(prior["ca.crt"] == current["ca.crt"])
                 require(client_fingerprint(prior["client.crt"]) in (fingerprint, json.loads(current["identity.json"])["previous_consumers"].get(kind)))
-                require(prior[".agent-identity"] == encoded({"host": host, "station": endpoint}))
+                client_consumer_origin(prior[".agent-identity"], host)
                 client_check_public_consumer(kind, host)
             else:
                 prior = client_consumer_state(kind, host, endpoint, allow_expired=action == "renew" or inspection["legacy_expired"])
@@ -409,7 +419,8 @@ def client_desired(host, endpoint):
         require(all(name in pending for name in CLIENT_FILES))
         current = {name: pending[name] for name in CLIENT_FILES}
     require(current is not None)
-    return {name: current[name] for name in SECRET_FILES} | {".agent-identity": encoded({"host": host, "station": endpoint})}
+    origin = json.loads(current["identity.json"])["station"]
+    return {name: current[name] for name in SECRET_FILES} | {".agent-identity": encoded({"host": host, "station": origin})}
 
 
 def client_systemctl(verb, kind):
@@ -440,7 +451,7 @@ def client_backup(kind, current, active):
     require(set(values) == expected)
     txn = json.loads(read(client_path() + "/.pending/transaction.json", ROOT, ROOT, 0o400))
     if values:
-        require(values[".agent-identity"] == encoded({"host": txn["host"], "station": txn["station"]}))
+        client_consumer_origin(values[".agent-identity"], txn["host"])
         require(client_fingerprint(values["client.crt"]) == txn["previous_consumers"].get(kind))
         require(hashlib.sha256(values["ca.crt"]).hexdigest() == txn["ca_sha256"])
         if state["missing_key"]:
@@ -504,7 +515,7 @@ def client_install(kind, host, endpoint):
                     prior = current
                     require(set(prior) in ({"ca.crt", "client.crt", ".agent-identity"}, set(SECRET_FILES) | {".agent-identity"}))
                     require(prior["ca.crt"] == previous["ca.crt"])
-                    require(prior[".agent-identity"] == encoded({"host": host, "station": endpoint}))
+                    client_consumer_origin(prior[".agent-identity"], host)
                     client_check_public_consumer(kind, host)
                 else:
                     prior = client_consumer_state(kind, host, endpoint, allow_expired=True)

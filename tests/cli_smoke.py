@@ -91,9 +91,25 @@ url = "https://orders.example.com/healthz"
                               expected=app_plan).stdout
     assert implicit_plan == explicit_plan
     for item in ("doers", "production", "softwarelanding", "monitoring", "Vector", "vmagent",
-                 "HighErrorRate", "web", "/etc/dragontools/apps/doers/"):
+                 "HighErrorRate", "web", "/etc/dragontools/apps/doers/",
+                 "SSH alias: monitoring", "ingestion hostname: monitoring.baptizeddragon.com",
+                 "https://monitoring.baptizeddragon.com:9443"):
         assert item in implicit_plan, (item, implicit_plan)
     checked += 1
+    hostname_line = 'hostname = "monitoring.baptizeddragon.com"'
+    for replacement, failure in (
+        ("", "MissingStationHostname"),
+        ('hostnmae = "station.example"', "UnknownApplicationConfigKey"),
+        ('hostname = "https://station.example"', "InvalidStationHostname"),
+        ('hostname = "station.example:9443"', "InvalidStationHostname"),
+        ('hostname = "station.example/path"', "InvalidStationHostname"),
+        ('hostname = "station example"', "InvalidStationHostname"),
+        ('hostname = "127.0.0.1"', "InvalidStationHostname"),
+    ):
+        app_config.write_text(example_app.replace(hostname_line, replacement))
+        for command in ("apply", "app-verify", "app-status"):
+            local_run(["monitoring", command, "--config", str(app_config)], 1, failure)
+    app_config.write_text(example_app)
     for name, suffix, failure in (
         ("app-secret", "\n[telegram]\nbot_token='REDACTION-SENTINEL'\n", "UnknownApplicationConfigKey"),
         ("app-duplicate", "\n[application]\n", "DuplicateApplicationConfigKey"),

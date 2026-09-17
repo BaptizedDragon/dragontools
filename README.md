@@ -763,6 +763,7 @@ ssh_host = "replace-me-application"
 
 [station]
 ssh_host = "replace-me-monitoring"
+hostname = "monitoring.example.com"
 
 [[service]]
 name = "web"
@@ -798,7 +799,8 @@ service names and instrumentation have not been inspected.
 | Field | v1 contract |
 | --- | --- |
 | `application.name`, `application.environment` | Both required; 1–63 ASCII letters/digits/`_`/`-`, starting with a letter/digit. Lower-case recommended. |
-| `target.ssh_host`, `station.ssh_host` | Required native OpenSSH aliases; no connection credentials. |
+| `target.ssh_host`, `station.ssh_host` | Required native OpenSSH aliases for administration; no connection credentials. |
+| `station.hostname` | Required DNS hostname for agent mTLS. No scheme, port, path, whitespace, wildcard or IP literal; port is always 9443. |
 | `service.name`, `service.systemd` | Unique service identity and exact canonical `.service` unit; no globs, aliases or journal namespaces. |
 | `service.logs.enabled` | Optional boolean, defaults to `false`. Only enabled units are forwarded. |
 | `service.metrics.url` | Optional private/loopback literal-IP or localhost HTTP(S) URL; no arbitrary DNS, credentials, redirects, query or fragment. |
@@ -840,8 +842,21 @@ dragontool monitoring app-status
 dragontool monitoring apply # Expected: No changes required.
 ```
 
-Plan is local and shows validated public identities, signals, probes, alerts and
-owned paths. Apply verifies recent agent signals, loaded probes and loaded rules.
+`station.ssh_host` is used only for administrative SSH. `station.hostname` is
+used for Vector/vmagent ingestion URLs, server DNS SAN, TLS hostname validation
+and app-side network diagnostics. Application commands never derive it from the
+alias or `ssh -G`: an alias may resolve to a management IP while agents use DNS.
+For example, `[station] ssh_host = "monitoring"` with
+`hostname = "monitoring.baptizeddragon.com"` sends administration through
+`ssh monitoring` and telemetry to `https://monitoring.baptizeddragon.com:9443`.
+Single-label names such as `monitoring` work only when supplied explicitly.
+Existing application configs must add `hostname`; omission fails before SSH.
+See the [hostname validation record](tests/integration/station-hostname-validation.md)
+for local checks and the remaining disposable-host gate.
+
+Plan is local and shows the SSH alias, ingestion hostname and full endpoint
+separately, followed by validated signals, probes, alerts and owned paths.
+Apply/verify/status display the configured alias and ingestion hostname/port. Apply verifies recent agent signals, loaded probes and loaded rules.
 A failing HTTP target is valid monitoring data; a broken probe pipeline fails.
 Verify/status never resolve station secrets or send test notifications. Live
 alert evaluation remains active independently.
@@ -1008,6 +1023,23 @@ an exactly recognized public identity can re-enroll with a new local key and
 full mTLS/telemetry verification. Unprovable state is refused. Do not delete pending
 identity state to bypass a failed verification.
 
+Changing `station.hostname` preserves the CA, server key and client keys. Apply
+adds the requested DNS SAN to the server certificate only when missing, then
+updates agent destinations and verifies the new name. Previously issued DNS/IP
+SANs remain valid for other enrolled hosts (at most 16 managed names; removing
+old names requires a future explicit maintenance operation). A changed server
+certificate restarts ingestion; endpoint changes restart Vector and configured
+vmagent, never unrelated station services. The gateway itself has no hostname
+routing configuration. Equal reruns rewrite no certificate, registration or agent
+configuration. Keep shared-host application configs on the same desired hostname
+to avoid successive applies changing the shared agents' destination back and forth.
+
+Client credential metadata retains its enrollment hostname as provenance; it is
+not the active network destination. The private CA, machine SAN and registered
+fingerprint bind that identity. Changing a destination cannot replace its CA or
+require a new client key. Read-only verification checks the actual agent config
+and performs strict server hostname verification using `station.hostname`.
+
 This is a private ingestion channel, so DragonTools intentionally uses its own
 CA rather than Let's Encrypt. The station certificate includes its configured
 DNS/IP SAN. Vector checks both certificate and hostname, and vmagent retains
@@ -1017,7 +1049,9 @@ checks station service/listener first, then app-side DNS, TCP, server TLS, clien
 authentication and the authenticated request. Safe failures include
 `dns_unresolved`, `tcp_unreachable`, `server_tls_invalid`,
 `client_certificate_rejected` and `ingestion_rejected`; no raw remote stderr is
-printed. DNS/TCP errors also say:
+printed. The legacy agents command reports the combined DNS/firewall guidance below.
+Application commands display the configured endpoint and distinguish DNS setup
+from TCP 9443/provider-firewall reachability:
 
 ```text
 DragonTools does not manage DNS or provider firewalls. Ensure the station hostname resolves and TCP 9443 is allowed.

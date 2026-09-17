@@ -125,8 +125,10 @@ Do not claim production/VM validation based on renderer or fake-remote tests.
 The monitored-host workflow installs pinned Vector 0.58.0 for selected journald
 logs and host metrics; vmagent v1.152.0 is installed only for explicit application
 Prometheus targets. OTel Collector/traces remain unavailable. Use required
-application/station OpenSSH connections; the station alias resolves its DNS/IPv4
-endpoint, never a caller-supplied Victoria URL. Validate bounded unique services
+application/station OpenSSH connections. Application config requires a distinct
+DNS-only station.hostname for ingestion/TLS, never inferred from station.ssh_host.
+The legacy agents command resolves its station alias to a DNS/IPv4 endpoint.
+Neither accepts a caller-supplied Victoria URL. Validate bounded unique services
 and named local/private credential-free HTTP(S) targets before SSH; disable scrape
 redirects and do not auto-discover ports. Use the committed observed Vector metric
 contract for CPU/memory/filesystem/inode rules; never guess collector names.

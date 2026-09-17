@@ -14,7 +14,9 @@ endpoint exposing a real application metric, and a reachable HTTP health URL.
 The Doers example is illustrative, not production discovery.
 
 Put the public application contract in a disposable repo as `monitoring.toml`.
-Replace its aliases, unit and endpoints, and require explicit app/environment.
+Replace its aliases, required station.hostname, unit and endpoints, and require
+explicit app/environment. The station SSH alias may resolve to a management IP;
+station.hostname must independently resolve from the application host.
 Never copy station credential references into it. Use the same release/source-built
 executable and native SSH authentication throughout:
 
@@ -109,3 +111,20 @@ Keep private fixture credentials on their owning disposable hosts. Inspect publi
 keys/fingerprints rather than transferring private keys for comparison. Normal
 unlink does not demonstrate physical-media erasure. Destroy disposable resources
 when finished. **Disposable-host integration not run.**
+
+## Explicit station hostname gate
+
+Use an administrative SSH alias whose HostName is an IP and an explicit
+`station.hostname` DNS record pointing at ingestion. Plan must show both names
+without invoking SSH. Apply/app-verify/app-status must use that DNS name for
+telemetry/diagnostics while administrative SSH still uses the alias.
+
+On disposable hosts only, change to another configured DNS name for the same
+station. Require the new DNS SAN, retained old SAN, identical CA/server/client
+keys, unchanged client certificate/files, updated Vector/vmagent destination and
+only ingestion/affected-agent restarts. Verify actual telemetry, then repeat
+apply and require `No changes required.` with stable cert/config bytes and PIDs.
+Interrupt after server certificate publication and after one agent update;
+rerun must resume with restart intent intact. Exercise DNS/TCP failures and TLS
+hostname mismatch with safe semantic errors, without raw stderr or key output.
+These real SSH/systemd/DNS checks remain unrun locally.

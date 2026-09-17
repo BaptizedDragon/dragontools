@@ -2,6 +2,15 @@
 
 ## 0.1.0-dev — unreleased
 
+- Require `station.hostname` in application monitoring.toml, separate from the
+  administrative `station.ssh_host` alias. Reject malformed/non-DNS endpoints
+  before SSH; use the explicit hostname for mTLS URLs, SANs and diagnostics.
+- Reconcile hostname changes with retained CA/server/client keys, bounded server
+  SAN additions, unchanged client credentials and independent service restarts.
+  Preserve other app manifests and verify before registration finalization.
+- Show both station identities in plans/apply/status/verify, update the Doers
+  example, and cover hostname changes, crypto preservation and unchanged reruns.
+
 - Generate one ECDSA P-256 client identity only on each monitored host; exchange
   bounded public CSRs/certificates over SSH. Preserve the station CA/server keys;
   remove client private-key export and retain only public client registry state.
