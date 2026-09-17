@@ -134,13 +134,20 @@ contract for CPU/memory/filesystem/inode rules; never guess collector names.
 Agent ingestion uses the narrow managed mTLS service on IPv4 :9443, dedicated
 `dt-ingest`, fixed write routes and authenticated health only. Keep raw VM/VL and
 all administrative services loopback-only. Require a registered client identity;
-station root owns CA material. Per-host credentials use dedicated protected SSH
-output/opaque wiped memory/protected stdin and service-owned 0400 files, never
-ordinary file primitives or logs. Equal credentials/registration are no-ops.
+station root owns CA/server keys and monitored hosts generate their own P-256
+client keys. Only bounded public CSRs/certificates cross SSH; private client keys
+never leave their host. Keep the root-private canonical machine identity and
+locally derived service-owned 0400 copies, exact host URI SAN/clientAuth and
+registered fingerprints. Preserve working credentials through explicit bounded
+rollout authorization, mTLS/telemetry proof and resumable finalization. Unlink
+legacy station client keys only after successful migration. Renew leaf certificates
+at 30 days using the same key; near-expiry CA requires explicit maintenance,
+never automatic rollover. Read-only verify never renews. Equal credentials and
+registration are no-ops.
 Preserve independent ingestion/Vector/vmagent restart intent. The controller and
 host roots are trusted; this is not hard multi-tenant metric-content isolation.
 The ingestion route must enforce authenticated host identity even on forged input.
-Do not broaden firewall rules or imply automatic certificate rotation.
+Do not broaden firewall rules or imply automatic CA rollover.
 
 Vector selects only named journal units, overwrites application-provided host and
 service identity, and uses bounded disk buffers with blocking backpressure. Keep
@@ -187,4 +194,4 @@ End this and every future Codex iteration with these five sections:
 When adding a component, report its exact pinned version, checksum provenance,
 and remaining verification limits. Keep deployment useful now without implying
 that dashboards, HostDown/service-state alerts, tracing agents, automatic
-certificate rotation or hard tenant isolation are already available.
+CA rollover or hard tenant isolation are already available.

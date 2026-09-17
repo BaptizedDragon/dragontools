@@ -54,16 +54,52 @@ pub fn spec(a: std.mem.Allocator, kind: common.Kind, registration: model.Registr
 }
 pub fn service(a: std.mem.Allocator, r: remote.Remote, report: *model.Report, registration: model.Registration, arch: host.Arch, kind: common.Kind) !void {
     const data = try spec(a, kind, registration, arch);
-    _ = try ready.deterministic(a, r, &report.state, .managed_state, try common.python(a, @embedFile("checks.py"), &.{ "managed", data }));
+    _ = try ready.deterministic(a, r, &report.state, .managed_state, try common.python(a, ingress.checks_program, &.{ "managed", data }));
     if (kind != .ingestion) {
         _ = try ready.deterministic(a, r, &report.state, .managed_state, try ingress.verifyCredentialsCommand(a, if (kind == .vector) .vector else .vmagent, registration.host, registration.station));
     }
-    try ready.poll(a, r, &report.state, .service_active, ready.active_ms, try common.python(a, @embedFile("checks.py"), &.{ "active", data }), ready.ready);
+    try ready.poll(a, r, &report.state, .service_active, ready.active_ms, try common.python(a, ingress.checks_program, &.{ "active", data }), ready.ready);
     if (kind != .ingestion) {
-        try ready.poll(a, r, &report.state, .http_ready, ready.http_ms, try common.python(a, @embedFile("checks.py"), &.{ "http", data }), ready.ready);
-        try ready.poll(a, r, &report.state, .secure_endpoint, ready.http_ms, try common.python(a, @embedFile("checks.py"), &.{ "endpoint", data }), ready.ready);
+        try ready.poll(a, r, &report.state, .http_ready, ready.http_ms, try common.python(a, ingress.checks_program, &.{ "http", data }), ready.ready);
+        try secureEndpoint(a, r, report, try common.python(a, ingress.checks_program, &.{ "endpoint", data }));
     }
 }
+pub const network_guidance = "DragonTools does not manage DNS or provider firewalls. Ensure the station hostname resolves and TCP 9443 is allowed.\n";
+pub fn networkFailure(check: ?ready.Check) bool {
+    return check == .dns_unresolved or check == .tcp_unreachable;
+}
+/// Keep fixed diagnostic exit codes separate from raw remote output. Only
+/// reachability/HTTP absence retries; a bad server/client identity fails closed.
+pub fn secureEndpoint(a: std.mem.Allocator, r: remote.Remote, report: *model.Report, command: []const u8) !void {
+    const Probe = struct {
+        source: remote.Remote,
+        report: *model.Report,
+        fn execute(ctx: *anyopaque, op: remote.Operation, cmd: []const u8) anyerror!remote.Result {
+            return executeTimed(ctx, op, cmd, ready.http_ms);
+        }
+        fn executeTimed(ctx: *anyopaque, op: remote.Operation, cmd: []const u8, budget: u32) anyerror!remote.Result {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            const result = try self.source.runTimed(op, cmd, budget);
+            self.report.state.check = switch (result.code) {
+                91 => .dns_unresolved,
+                92 => .tcp_unreachable,
+                93 => .server_tls_invalid,
+                94 => .client_certificate_rejected,
+                95 => .ingestion_rejected,
+                else => .secure_endpoint,
+            };
+            return switch (result.code) {
+                91, 92, 95 => .{ .code = 75 },
+                93, 94 => .{ .code = 1 },
+                else => result,
+            };
+        }
+    };
+    var probe = Probe{ .source = r, .report = report };
+    const adapted = remote.Remote{ .context = &probe, .execute = Probe.execute, .execute_timed = Probe.executeTimed, .clock = r.clock };
+    try ready.poll(a, adapted, &report.state, .secure_endpoint, ready.http_ms, command, ready.ready);
+}
+
 pub fn signals(a: std.mem.Allocator, app: remote.Remote, station: remote.Remote, report: *model.Report, registration: model.Registration, comptime mode: []const u8) !void {
     const process = if (std.mem.eql(u8, mode, "app")) "vmagent" else "vector";
     const start_command = try common.python(a, "import subprocess,sys,time; v=int(subprocess.check_output(['systemctl','show','-p','ExecMainStartTimestampMonotonic','--value','dragontools-'+sys.argv[1]+'.service'],stderr=subprocess.DEVNULL)); assert v>0; print(time.time()-time.monotonic()+v/1000000)", &.{process});
@@ -80,8 +116,8 @@ pub fn verify(a: std.mem.Allocator, app: remote.Remote, station: remote.Remote, 
     for (registration.services) |selected| _ = try report.call(app, .service_exists, try common.selectedService(a, selected));
     report.component = .station;
     _ = try report.call(station, .health, @import("install.zig").station_preflight);
-    _ = try report.call(station, .health, try ingress.verifyStationCommand(a, registration.host, registration.station, try registration.json(a)));
     try service(a, station, report, registration, machine.arch, .ingestion);
+    _ = try report.call(station, .health, try ingress.verifyStationCommand(a, registration.host, registration.station, try registration.json(a)));
     report.component = .journald;
     _ = try report.call(app, .health, try @import("journald.zig").command(a, false));
     report.component = .vector;

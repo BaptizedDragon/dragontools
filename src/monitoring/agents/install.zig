@@ -1,4 +1,4 @@
-//! Two-host convergence with independent restart intent and protected mTLS I/O.
+//! Two-host convergence with public enrollment data and host-local private keys.
 const std = @import("std");
 const remote = @import("../../system/remote.zig");
 const host = @import("../../system/host.zig");
@@ -7,7 +7,6 @@ const model = @import("model.zig");
 const common = @import("common.zig");
 const verify = @import("verify.zig");
 const ingress = @import("ingestion.zig");
-const Secret = @import("../../secrets/secret.zig").Secret;
 pub const Report = model.Report;
 pub const Registration = model.Registration;
 pub const prerequisites =
@@ -54,45 +53,107 @@ pub fn install(a: std.mem.Allocator, app: remote.Remote, station: remote.Remote,
     _ = try report.call(station, .unit, try files.writeCommand(a, try common.unitPath(a, .ingestion), try common.unit(a, .ingestion, try verify.commandLine(a, .ingestion, registration)), ingress.marker));
     _ = try report.call(station, .activate, common.activation(.ingestion));
     try verify.service(a, station, report, registration, station_machine.arch, .ingestion);
-    _ = try report.call(station, .health, try ingress.verifyStationCommand(a, registration.host, registration.station, try registration.json(a)));
 
     report.component = .journald;
     // The dedicated helper inspects effective values, retains stricter limits,
     // and rejects later conflicting drop-ins before publication.
     _ = try report.call(app, .directories, try parentDirectories(a));
     _ = try report.call(app, .config, try @import("journald.zig").command(a, true));
-    report.state.phase = .credentials;
-    const credentials = try station.readSecret(try ingress.exportCommand(a, registration.host), 30_000);
-    defer credentials.deinit();
+    // The station must be reachable and its listener verified before generating
+    // any local candidate. Only bounded public material crosses these calls.
+    report.component = .ingestion;
+    const inspection = try report.call(station, .status, try ingress.inspectCommand(a, registration.host, registration.station));
+    const inspected = try ingress.parseInspection(a, inspection, registration.host, registration.station);
+    report.component = .application_host;
+    if (inspected.legacy_active and !inspected.legacy_expired and inspected.pending_certificate_sha256 == null) {
+        // Prove the existing credential actually authenticates before generating
+        // a replacement; cryptographic parsing alone does not prove enrollment.
+        // A staged migration already passed this check. Its consumers may now
+        // use the candidate, whose rollout lease must be refreshed before probing.
+        try verify.secureEndpoint(a, app, report, try ingress.endpointCommand(a, registration.station, "/etc/dragontools/vector"));
+    }
+    const prepared = try ingress.parsePrepared(a, try report.call(app, .credentials, try ingress.prepareClientCommand(a, registration.host, registration.station, inspection)));
+    if (prepared.recovered_key) _ = try report.state.accept(.{ .code = 0, .output = "changed" });
+    var fingerprint = prepared.certificate_sha256;
+    if (prepared.csr) |csr| {
+        report.component = .ingestion;
+        const bundle = try report.call(station, .credentials, try ingress.stageCommand(a, registration.host, registration.station, try registration.json(a), csr));
+        fingerprint = try ingress.publicBundleFingerprint(a, bundle);
+        report.component = .application_host;
+        _ = try report.call(app, .credentials, try ingress.stageClientCommand(a, bundle));
+        // Prove the candidate before stopping a working consumer. The old active
+        // registration remains valid throughout the explicit rollover lease.
+        try verify.secureEndpoint(a, app, report, try ingress.endpointCommand(a, registration.station, ingress.client_directory ++ "/.pending"));
+    } else {
+        report.component = .ingestion;
+        _ = try report.call(station, .credentials, try ingress.reconcileCommand(a, registration.host, registration.station, try registration.json(a)));
+    }
+    convergeAgents(a, app, station, report, registration, app_machine.arch) catch |err| {
+        const old_still_active = if (prepared.certificate_sha256) |old|
+            if (inspected.certificate_sha256) |active| std.mem.eql(u8, old, active) else false
+        else
+            false;
+        if ((prepared.action == .migrate or prepared.action == .renew) and old_still_active) {
+            const failed_component = report.component;
+            const failed_phase = report.state.phase;
+            const failed_check = report.state.check;
+            const rollback = app.run(.credentials, try ingress.finishClientCommand(a, registration.host, registration.station, false)) catch {
+                report.component = .application_host;
+                report.state.check = .credential_recovery;
+                return error.ClientCredentialRecoveryRequired;
+            };
+            if (rollback.code != 0) {
+                report.component = .application_host;
+                report.state.check = .credential_recovery;
+                return error.ClientCredentialRecoveryRequired;
+            }
+            report.component = failed_component;
+            report.state.phase = failed_phase;
+            report.state.check = failed_check;
+        }
+        return err;
+    };
+    // Do not rollback after an uncertain station-finalize response: the station
+    // may have committed. Keep the working candidate and backups for inspection
+    // and idempotent recovery on the next apply.
+    report.component = .ingestion;
+    _ = try report.call(station, .finalize, try ingress.finalizeCommand(a, registration.host, fingerprint.?));
+    report.component = .application_host;
+    _ = try report.call(app, .finalize, try ingress.finishClientCommand(a, registration.host, registration.station, true));
+    report.enrollment = prepared.action;
+    report.component = .ingestion;
+    _ = try report.call(station, .health, try ingress.verifyStationCommand(a, registration.host, registration.station, try registration.json(a)));
+    report.component = .host_rules;
+    // Both packs are fixed; this does not rewrite native scraper targets or any
+    // station URLs. The metrics evaluator owns its independent restart intent.
+    if (registration.applications.len == 0) try @import("../vmalert.zig").install(a, station, &report.state, station_machine.arch, .metrics);
+}
+fn convergeAgents(a: std.mem.Allocator, app: remote.Remote, station: remote.Remote, report: *Report, registration: Registration, arch: host.Arch) !void {
     report.component = .vector;
-    try prepare(a, app, report, registration, app_machine.arch, .vector, credentials);
+    try prepare(a, app, report, registration, arch, .vector);
     report.configured = true;
-    try verify.service(a, app, report, registration, app_machine.arch, .vector);
+    try verify.service(a, app, report, registration, arch, .vector);
     // Once the authenticated end-to-end path works the gateway is independently
     // finalized. Later vmagent failures never dirty a verified Vector or gateway.
     _ = try report.call(station, .finalize, try common.finalize(a, .ingestion));
     try verify.signals(a, app, station, report, registration, "host");
     try verify.signals(a, app, station, report, registration, "logs");
     report.component = .vector;
-    try verify.service(a, app, report, registration, app_machine.arch, .vector);
+    try verify.service(a, app, report, registration, arch, .vector);
     _ = try report.call(app, .finalize, try common.finalize(a, .vector));
     if (registration.metricsCount() > 0) {
         report.component = .vmagent;
-        try prepare(a, app, report, registration, app_machine.arch, .vmagent, credentials);
-        try verify.service(a, app, report, registration, app_machine.arch, .vmagent);
+        try prepare(a, app, report, registration, arch, .vmagent);
+        try verify.service(a, app, report, registration, arch, .vmagent);
         try verify.signals(a, app, station, report, registration, "app");
         report.component = .vmagent;
-        try verify.service(a, app, report, registration, app_machine.arch, .vmagent);
+        try verify.service(a, app, report, registration, arch, .vmagent);
         _ = try report.call(app, .finalize, try common.finalize(a, .vmagent));
         report.vmagent_installed = true;
     } else {
         report.component = .vmagent;
         _ = try report.call(app, .activate, stop_unused_vmagent);
     }
-    report.component = .host_rules;
-    // Both packs are fixed; this does not rewrite native scraper targets or any
-    // station URLs. The metrics evaluator owns its independent restart intent.
-    if (registration.applications.len == 0) try @import("../vmalert.zig").install(a, station, &report.state, station_machine.arch, .metrics);
 }
 pub fn parentDirectories(a: std.mem.Allocator) ![]const u8 {
     return remote.shell(a, &.{
@@ -108,12 +169,11 @@ pub fn parentDirectories(a: std.mem.Allocator) ![]const u8 {
         "dragontools-agent-parents",
     });
 }
-fn prepare(a: std.mem.Allocator, app: remote.Remote, report: *Report, registration: Registration, arch: host.Arch, kind: common.Kind, secret: *const Secret) !void {
+fn prepare(a: std.mem.Allocator, app: remote.Remote, report: *Report, registration: Registration, arch: host.Arch, kind: common.Kind) !void {
     _ = try report.call(app, .user, try common.preflight(a, kind));
     _ = try report.call(app, .directories, try common.directories(a, kind));
     _ = try report.call(app, .binary, if (kind == .vector) try @import("../../components/vector.zig").binaryCommand(a, arch) else try @import("../../components/vmagent.zig").binaryCommand(a, arch));
-    report.state.phase = .credentials;
-    _ = try report.state.accept(try app.runSecret(.credentials, try ingress.installCredentialsCommand(a, if (kind == .vector) .vector else .vmagent), secret, 30_000));
+    _ = try report.call(app, .credentials, try ingress.installCredentialsCommand(a, if (kind == .vector) .vector else .vmagent, registration.host, registration.station));
     const config = try verify.configFile(a, kind, registration);
     _ = try report.call(app, .config, try files.writeCommand(a, config.path, config.content, try common.marker(a, kind)));
     // Native validation is read-only and precedes activation. Published config

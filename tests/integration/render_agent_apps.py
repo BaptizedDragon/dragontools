@@ -18,7 +18,7 @@ pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
     const args = try init.minimal.args.toSlice(a);
     if (args.len != 2) return error.OutputDirectoryRequired;
-    const value: model.Registration = .{ .host = "application-one", .station = "localhost", .services = &.{ "doers.service", "orderflow.service" }, .metrics_targets = &.{}, .applications = &.{
+    const value: model.Registration = .{ .host = "dt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", .station = "localhost", .services = &.{ "doers.service", "orderflow.service" }, .metrics_targets = &.{}, .applications = &.{
         .{ .name = "doers", .environment = "production", .services = &.{ .{ .name = "web", .systemd = "doers.service", .logs = true, .metrics_url = "http://127.0.0.1:16000/metrics" } } },
         .{ .name = "hostonly", .environment = "production", .services = &.{} },
         .{ .name = "orderflow", .environment = "staging", .services = &.{ .{ .name = "web", .systemd = "orderflow.service", .logs = true, .metrics_url = "http://127.0.0.1:16000/metrics" } } },

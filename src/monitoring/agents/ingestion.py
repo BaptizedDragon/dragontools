@@ -10,6 +10,7 @@ import socket
 import ssl
 import stat
 import threading
+import time
 import urllib.parse
 
 BASE = "/etc/dragontools/ingestion"
@@ -17,27 +18,51 @@ BODY_LIMIT = 4 * 1024 * 1024
 CONCURRENCY = 16
 TIMEOUT = 10
 ROOT = 0
+REGISTRY_LIMIT = 393216
 
 
 def registered_peer(certificate, registry, peer):
+    # The TLS context has already verified chain, dates and clientAuth purpose.
+    # A private-CA signature alone is never application authorization.
     fingerprint = hashlib.sha256(certificate).hexdigest()
     subjects = [value for rdn in peer.get("subject", ()) for key, value in rdn if key == "commonName"]
-    if len(subjects) != 1 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}", subjects[0]):
+    if len(subjects) != 1 or not re.fullmatch(r"dt-[0-9a-f]{32}", subjects[0]):
         raise ValueError("Unregistered identity")
+    host = subjects[0]
+    identity = "dragontools://hosts/" + host
+    sans = peer.get("subjectAltName", ())
+    modern_identity = tuple(sans) == (("URI", identity),)
     # Direct lookup stays bounded even as host registrations grow. Entries are
     # root-owned; the unprivileged listener never mutates registration.
-    path = os.path.join(registry, subjects[0] + ".json")
+    path = os.path.join(registry, host + ".json")
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     try:
         info = os.fstat(fd)
         if not (stat.S_ISREG(info.st_mode) and info.st_uid == ROOT and info.st_nlink == 1
-                and stat.S_IMODE(info.st_mode) == 0o640 and info.st_size <= 196608):
+                and stat.S_IMODE(info.st_mode) == 0o640 and info.st_size <= REGISTRY_LIMIT):
             raise ValueError("Invalid registration")
-        value = json.loads(os.read(fd, 196609))
+        value = json.loads(os.read(fd, REGISTRY_LIMIT + 1))
     finally:
         os.close(fd)
-    if value.get("certificate_sha256") == fingerprint and value.get("host") == subjects[0]:
-        return value
+    if not isinstance(value, dict) or value.get("host") != host:
+        raise ValueError("Unregistered identity")
+    expires = value.get("pending_expires_at")
+    now = time.time()
+    pending = value.get("pending_registration")
+    if (value.get("pending_certificate_sha256") == fingerprint and modern_identity
+            and type(expires) is int and now < expires <= now + 86405
+            and isinstance(pending, dict) and pending.get("host") == host):
+        # Only an explicitly enrolled candidate gets this finite rollout lease.
+        # The old active registration remains available until finalization.
+        return pending
+    if value.get("certificate_sha256") == fingerprint:
+        if "certificate_identity" in value:
+            if value["certificate_identity"] == identity and modern_identity:
+                return value
+        elif not sans:
+            # Exact active fingerprint plus the previous CN-only format is the
+            # sole legacy exception. Enrollment replaces it after verification.
+            return value
     raise ValueError("Unregistered identity")
 
 
@@ -228,7 +253,7 @@ class Server(http.server.ThreadingHTTPServer):
 
 
 def context(base):
-    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     tls.minimum_version = ssl.TLSVersion.TLSv1_2
     tls.verify_mode = ssl.CERT_REQUIRED
     tls.load_verify_locations(base + "/ca.crt")

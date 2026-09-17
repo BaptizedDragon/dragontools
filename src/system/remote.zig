@@ -14,7 +14,6 @@ pub const Remote = struct {
     execute: *const fn (*anyopaque, Operation, []const u8) anyerror!Result,
     execute_timed: ?*const fn (*anyopaque, Operation, []const u8, u32) anyerror!Result = null,
     execute_secret: ?*const fn (*anyopaque, Operation, []const u8, *const Secret, u32) anyerror!Result = null,
-    read_secret: ?*const fn (*anyopaque, []const u8, u32) anyerror!*Secret = null,
     clock: ?Clock = null,
     pub fn run(self: Remote, op: Operation, command: []const u8) !Result {
         return self.execute(self.context, op, command);
@@ -26,12 +25,6 @@ pub const Remote = struct {
     pub fn runSecret(self: Remote, op: Operation, command: []const u8, payload: *const Secret, budget_ms: u32) !Result {
         const execute = self.execute_secret orelse return error.SecretTransportUnavailable;
         return execute(self.context, op, command, payload, budget_ms);
-    }
-    /// Dedicated bounded capture for station-issued agent credentials. Never
-    /// route sensitive stdout through ordinary Result.output or an arena.
-    pub fn readSecret(self: Remote, command: []const u8, budget_ms: u32) !*Secret {
-        const read = self.read_secret orelse return error.SecretTransportUnavailable;
-        return read(self.context, command, budget_ms);
     }
 };
 pub fn quote(a: std.mem.Allocator, value: []const u8) ![]const u8 {

@@ -56,8 +56,9 @@ pub fn execute(a: std.mem.Allocator, app: remote.Remote, station: remote.Remote,
         if (service.logs) logs += 1;
         if (service.metrics_url != null) metrics += 1;
     }
-    return std.fmt.allocPrint(a, "{s}host metrics flowing\n{s}\n{s}\nprobes registered: {d}\napplication alerts loaded\nOTel traces: unavailable. No test notification sent.\n", .{
+    return std.fmt.allocPrint(a, "{s}{s}host metrics flowing\n{s}\n{s}\nprobes registered: {d}\napplication alerts loaded\nOTel traces: unavailable. No test notification sent.\n", .{
         if (command == .app_apply and report.state.changes == 0) "No changes required.\n" else "",
+        report.enrollmentSummary(),
         if (logs > 0) "selected service logs flowing (quiet-service metadata included)" else "selected service logs: disabled",
         if (metrics > 0) "application metrics flowing" else "application metrics: not configured",
         value.probes.len,
@@ -88,6 +89,9 @@ pub fn run(init: std.process.Init, options: cli.Options) !void {
             if (report.state.check) |check| @tagName(check) else @tagName(report.state.phase),
             if (options.command == .app_apply) "Completed changes may remain; pending intent is preserved. Correct the cause and rerun the same application config." else "This command is read-only; no configuration or restart intent was changed.",
         }));
+        if (@import("../agents/verify.zig").networkFailure(report.state.check)) print(init.io, @import("../agents/verify.zig").network_guidance);
+        if (report.state.check == .client_identity_inconsistent) print(init.io, "The managed client identity is inconsistent. Existing files were preserved; restore a verified local backup or correct conflicting metadata before retrying.\n");
+        if (report.state.check == .ca_maintenance) print(init.io, "The private CA requires explicit maintenance. It was not rotated or replaced.\n");
         return err;
     };
     print(init.io, output);

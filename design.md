@@ -882,27 +882,116 @@ ingestion program on IPv4 `0.0.0.0:9443`. TLS 1.2+ and a registered client
 certificate are mandatory. Only POST `/api/v1/write`, POST `/insert/jsonline`,
 and authenticated GET/HEAD `/health` are available. Requests cap at 4 MiB, decoded
 remote-write Snappy payloads at 16 MiB, 16 concurrent workers and a 10-second
-connection deadline. Each request checks the root-owned registry by certificate
-CN and exact SHA-256; removed/changed registration takes effect without a proxy
+connection deadline. Each request checks the root-owned registry by machine
+CN, exact URI SAN and SHA-256 fingerprint; removed/changed registration takes effect without a proxy
 restart. Incoming query strings and headers are never forwarded, and backend
 destinations are fixed. Raw
 VM/VL/VT administrative listeners remain loopback, and no Grafana/Alertmanager
 route is added. No firewall is changed: operators allow TCP 9443 from monitored
 hosts and retain their existing SSH policy.
 
-The station root owns its CA and per-host issuance material. Registration stores
-selected services/metrics targets, endpoint and the client-certificate fingerprint.
-Client bundles travel through dedicated protected SSH output and stdin, held in
-opaque wiped memory on the controller; ordinary file primitives never receive
-private data. Consumer files are mode 0400 and service-owned. Existing identical
-bundles and registrations are unchanged. Path conflicts, invalid certificates or
-expiry fail closed. Automatic rotation is deferred; no controller database exists.
-The controller, station/application roots, local SSH configuration and CA are
-trusted. A compromised registered host can submit arbitrary metric content for
-its authenticated host; this is not hard multi-tenant isolation. Station ingestion
-enforces host identity even against forged metric labels, demonstrated using the
-real pinned VictoriaMetrics collision behavior. Log ingestion additionally enforces
-registered service names.
+The station root owns the preserved ten-year CA (root:root 0400) and station
+server key. The application host alone generates its P-256 client key. This mature
+curve is supported by the Ubuntu OpenSSL/Python stack and the pinned agents. Each
+host has one identity independent of its applications: machine-ID-derived CN
+`dt-<32 lowercase hex>` and sole URI SAN `dragontools://hosts/<host-id>`. The
+station's server certificate retains the configured DNS/IP SAN; Vector verifies
+certificate and hostname, and vmagent retains normal strict TLS validation. This
+private CA channel deliberately does not use Let's Encrypt.
+
+`ingestion.zig` embeds the Python standard-library helpers. SSH transports only
+public inspection, CSR and certificate payloads, through the existing quoted,
+bounded command interface. A CSR is at most 8192 bytes and must be strict PEM
+PKCS#10. The station checks its signature, P-256 public-key validity, exact CN and
+sole host URI SAN with a narrow DER profile. Other requested extensions (including
+CA/serverAuth), extra names and attributes fail before signing. Issuance never
+copies CSR extensions: the station fixes critical CA:FALSE/digitalSignature,
+clientAuth and the expected SAN. Private key bytes are handled only inside their
+owning host's helper; no station client generator or private export command exists.
+
+The canonical client identity lives under root:root 0700
+`/etc/dragontools/monitoring-client/`, with four root-owned 0400 files:
+`ca.crt`, `client.crt`, `client.key`, `identity.json`. Per-consumer Vector/vmagent
+0400 copies are made locally, preserving the existing dedicated-user boundary.
+This avoids giving either consumer access to the other's configuration or a
+broader shared group. Root metadata, no-follow regular-file checks, bounded
+content and cryptographic identity proof precede publication; a marker alone
+cannot adopt unrelated credentials.
+
+Enrollment/renewal is an explicit recoverable sequence:
+
+1. Reconcile CA/server state and verify the station service/listener. Inspect public
+   registration; a valid legacy client must authenticate from the application host.
+   An expired legacy identity requires exact chain/key/fingerprint proof and is
+   never treated as healthy. An already staged migration resumes its proven local
+   transaction and refreshes candidate authorization before endpoint verification;
+   it does not require a switched consumer to authenticate as the old identity.
+2. Inspect the host identity. Reuse a valid key for renewal; create a new P-256 key
+   for first enrollment or migration from a station-generated key. A private
+   `.pending` generation retains the CSR and old generation across retries.
+3. Validate/sign the public CSR. Atomically stage a registry lease for that exact
+   certificate fingerprint/registration, expiring after 24 hours. A retry reuses
+   the existing signed certificate by verified public key and identity and refreshes
+   a lease only when less than one hour remains. The active identity is retained.
+4. Stage and validate the public response against the local key and CA. Prove
+   candidate mTLS before changing running consumers. Install only changed consumer
+   copies, recording restart intent and exact private backups before publication.
+5. Verify real running agent state, authenticated endpoint and fresh station
+   telemetry. Only then promote the pending public registration, remove the
+   legacy station `clients/<host>/client.key`, and commit/clean the local generation.
+   Finalization is repeatable if interrupted at either host.
+
+The gateway accepts only an active registered fingerprint or the explicit bounded
+rollout fingerprint, with the matching host SAN. A CA-signed unregistered client
+is rejected. Legacy CN-only acceptance is restricted to its exact existing active
+fingerprint while migration is pending; modern registrations require the URI SAN.
+The lease permits real telemetry proof before revoking the old identity, not
+open access to every certificate the CA has signed. Public registration fields
+record certificate PEM, fingerprint and URI identity alongside existing host/app
+metadata (serial and validity remain available from that certificate).
+
+Signing and candidate-check failure cannot change installed consumer credentials.
+Later rollout failure restores old consumer copies when available and preserves
+restart intent/candidate state. A failure after attempting station finalization is
+potentially ambiguous; do not restore an old key that may already be revoked.
+Retain the working candidate and private backups until the next apply inspects
+both hosts. The legacy key is unlinked only after successful proof/promotion;
+normal unlink cannot guarantee physical-media erasure. No generic distributed
+transaction, automatic CA replacement or controller state database is introduced.
+
+Interrupted candidates that reach the renewal window are reissued with the same
+local key. A bounded public certificate journal proves mixed publication states
+and preserves the original private backups. Canonical-key recovery may reuse a
+recorded historical consumer copy only after proving its identity, certificate
+chain, recorded fingerprint and public-key match. When no matching local key
+survives, an exact known public identity can re-enroll with a new local key and
+the full candidate/telemetry proof. Conflicting or unprovable state is refused.
+
+Client/server certificates last 365 days. With more than 30 days remaining,
+apply performs no CSR, signing, key regeneration, certificate rewrite, registry
+rewrite or agent restart. At 30 days or less it renews using the same local key;
+server-only renewal replaces only the server certificate and marks ingestion.
+CA validity of 366 days or less causes `ca_maintenance`/`CaMaintenanceRequired`,
+leaving CA material unchanged and requiring future explicit rollover. This avoids
+issuing a full-year leaf beyond CA expiry. Read-only verify rejects expired
+credentials and never renews or stages files.
+
+`endpoint.py` checks DNS from the monitored host, bounded TCP connection, trusted
+server chain/hostname, client authentication and authenticated health in order,
+after station service/listener verification. Fixed exit codes map to
+`dns_unresolved`, `tcp_unreachable`, `server_tls_invalid`,
+`client_certificate_rejected` and `ingestion_rejected`. DNS/TCP/request absence
+uses the ordinary bounded readiness policy; certificate failures are deterministic.
+The helper never prints raw exceptions, commands or key material. Operators must
+make TCP 9443 reachable and manage DNS/provider firewalls themselves. No provider
+API, DNS edit, public ACME certificate or firewall rule is added.
+
+The controller, station/application roots, OpenSSH configuration and CA are
+trusted. A registered host can submit arbitrary metric content for its identity;
+this is not hard multi-tenant isolation. Station ingestion overrides forged host
+labels, demonstrated using the pinned VictoriaMetrics backend, and enforces
+registered log application/service scope. Application namespaces, manual rules,
+Grafana assets and the unsupported traces schema are unchanged.
 
 ### Bounded local storage and verification
 

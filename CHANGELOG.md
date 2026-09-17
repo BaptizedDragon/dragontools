@@ -2,6 +2,20 @@
 
 ## 0.1.0-dev — unreleased
 
+- Generate one ECDSA P-256 client identity only on each monitored host; exchange
+  bounded public CSRs/certificates over SSH. Preserve the station CA/server keys;
+  remove client private-key export and retain only public client registry state.
+- Enforce machine-ID URI SAN, strict CSR policy and registered certificate
+  fingerprints. Migrate legacy station-generated keys with retained working
+  credentials, bounded candidate authorization, mTLS/telemetry proof and delayed
+  legacy-key unlink; interrupted enrollment/finalization resumes on apply.
+- Renew one-year client/server certificates at 30 days with the existing local
+  key. Healthy credentials remain unchanged; server renewal affects only ingestion.
+  Near-expiry CA requires explicit maintenance without automatic rollover.
+- Add safe ordered DNS/TCP/TLS/client/ingestion diagnostics, crypto/lifecycle
+  fixtures and key-locality documentation. No app ownership, tracing schema,
+  rule, Grafana, DNS or provider-firewall management changes.
+
 - Add strict application-repository monitoring.toml v1 and primary
   `monitoring apply`, with read-only app-verify/app-status and a local plan.
   Explicit app/environment identities, selected service signals, private metrics

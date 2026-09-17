@@ -68,3 +68,44 @@ dragontool monitoring apply
 Retain sanitized versions, timestamps, hashes, runtime properties, telemetry
 identities, alert transitions and no-op evidence. Never retain credentials.
 Test amd64 and arm64 hosts separately; cross-compilation is not runtime validation.
+
+## Host-local PKI migration and renewal gate
+
+Use the same two disposable hosts and aliases. These are required deployment
+checks, not results established by the local crypto/process fixtures:
+
+1. After apply, inspect ownership/mode and **public** certificate metadata only.
+   The app owns `/etc/dragontools/monitoring-client/client.key` and its local
+   service copies. The station owns only CA/server private keys: require no
+   `clients/<host>/client.key`. Inspect CN, URI SAN, clientAuth and certificate
+   validity without printing any key. All applications on one machine use the
+   same machine identity and station registry permissions.
+2. Verify actual host/app metrics and selected logs traverse mTLS, then record
+   public cert fingerprints, file mtimes and service PIDs around an unchanged
+   apply. Require `No changes required.`, no new CSR/signature, and stable
+   Vector/vmagent/ingestion identities.
+3. With fixture-only short-lived client certificates, simulate at most 30 days
+   remaining. Apply must retain the client public key, replace its certificate,
+   restart only actual credential consumers, verify fresh telemetry, finalize
+   registry/local state, and become a no-op on rerun. Read-only app-verify must
+   never renew. Independently shorten only the server certificate: its public
+   key stays the same and only ingestion restarts.
+4. Use a prior-version **disposable** installation with station-generated client
+   credentials. Require a new host-generated key, old working credentials
+   retained until the candidate path verifies, and station key unlink only after
+   successful telemetry/finalization. Test signing failure and interruption
+   before/after consumer publication and either host's finalization. Rerun must
+   recover without restoring an identity already revoked on the station.
+5. Reject malformed/wrong-host/CA/serverAuth CSRs and CA-signed but unregistered
+   clients. Verify strict server hostname validation, pending lease expiry,
+   and read-only failure for expired credentials. Near-expiry CA must report
+   maintenance and preserve the existing CA; no automatic rollover is allowed.
+6. Block DNS/TCP independently and inspect only semantic diagnostics. Expect
+   `dns_unresolved`/`tcp_unreachable` and the explicit DNS/provider-firewall
+   guidance. Wrong station hostname and unregistered client must produce
+   `server_tls_invalid`/`client_certificate_rejected`, with no raw stderr.
+
+Keep private fixture credentials on their owning disposable hosts. Inspect public
+keys/fingerprints rather than transferring private keys for comparison. Normal
+unlink does not demonstrate physical-media erasure. Destroy disposable resources
+when finished. **Disposable-host integration not run.**

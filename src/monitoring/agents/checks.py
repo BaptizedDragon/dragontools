@@ -116,14 +116,9 @@ def health(spec):
 
 def endpoint(spec):
     runtime(spec)
-    root = '/etc/dragontools/' + spec['kind']
-    context = ssl.create_default_context(cafile=root + '/ca.crt')
-    context.minimum_version = ssl.TLSVersion.TLSv1_2
-    context.load_cert_chain(root + '/client.crt', root + '/client.key')
-    conn = http.client.HTTPSConnection(spec['station'], 9443, context=context, timeout=4)
-    conn.request('GET', '/health')
-    response = conn.getresponse()
-    assert response.status == 204 and not response.read(1024)
+    # endpoint.py is embedded before this verifier by the controller. The staged
+    # credential enrollment path calls the same check() before publication.
+    sys.exit(check(spec['station'], '/etc/dragontools/' + spec['kind']))
 
 
 if __name__ == '__main__':

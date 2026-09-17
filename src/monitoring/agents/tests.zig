@@ -5,7 +5,6 @@ const model = @import("model.zig");
 const install = @import("install.zig");
 const verify = @import("verify.zig");
 const readiness = @import("../readiness.zig");
-const Secret = @import("../../secrets/secret.zig").Secret;
 const operations = @typeInfo(remote.Operation).@"enum".fields.len;
 const State = struct {
     commands: [operations]?[]const u8 = @splat(null),
@@ -13,7 +12,7 @@ const State = struct {
     active: bool = false,
     restarts: usize = 0,
     downloads: usize = 0,
-    secret_writes: usize = 0,
+    credential_writes: usize = 0,
 };
 const Fake = struct {
     allocator: std.mem.Allocator,
@@ -24,13 +23,28 @@ const Fake = struct {
     fail: ?readiness.Check = null,
     attempts: usize = 0,
     mutations: usize = 0,
-    secret_reads: usize = 0,
+    enrollments: usize = 0,
+    enrolled: bool = false,
+    committed_pending: bool = false,
+    pending_registry: bool = false,
+    pending_lease_expired: bool = false,
+    candidate: bool = false,
+    generation: usize = 1,
+    renew: bool = false,
+    legacy: bool = false,
+    fail_signing: bool = false,
+    fail_finalize: bool = false,
+    rollback_calls: usize = 0,
+    finalize_calls: usize = 0,
+    endpoint_failure: u8 = 0,
+    endpoint_attempts: usize = 0,
+    registration_command: ?[]const u8 = null,
     timeout: bool = false,
     station_unreachable: bool = false,
     fail_vector_binary: bool = false,
     ingestion_directory: bool = false,
     fn asRemote(self: *Fake) remote.Remote {
-        return .{ .context = self, .execute = execute, .execute_secret = secret, .read_secret = readSecret, .clock = .{ .context = self, .now_ms = nowMs, .sleep_ms = sleepMs } };
+        return .{ .context = self, .execute = execute, .clock = .{ .context = self, .now_ms = nowMs, .sleep_ms = sleepMs } };
     }
     fn state(self: *Fake, component: model.Component) *State {
         return &self.states[@intFromEnum(component)];
@@ -43,26 +57,65 @@ const Fake = struct {
         const self: *Fake = @ptrCast(@alignCast(ctx));
         self.now += delay;
     }
-    fn readSecret(ctx: *anyopaque, _: []const u8, _: u32) !*Secret {
-        const self: *Fake = @ptrCast(@alignCast(ctx));
-        self.secret_reads += 1;
-        return Secret.init(std.testing.allocator, "PRIVATE-CERTIFICATE-SENTINEL");
-    }
-    fn secret(ctx: *anyopaque, op: remote.Operation, command: []const u8, payload: *const Secret, _: u32) !remote.Result {
-        const self: *Fake = @ptrCast(@alignCast(ctx));
-        try std.testing.expectEqual(remote.Operation.credentials, op);
-        try std.testing.expectEqualStrings("PRIVATE-CERTIFICATE-SENTINEL", payload.protectedBytes());
-        try std.testing.expect(std.mem.indexOf(u8, command, payload.protectedBytes()) == null);
-        const current = self.state(self.report.component);
-        if (current.secret_writes != 0) return .{ .code = 0, .output = "unchanged" };
-        current.secret_writes += 1;
-        current.pending = true;
-        self.mutations += 1;
-        return .{ .code = 0, .output = "changed" };
-    }
     fn execute(ctx: *anyopaque, op: remote.Operation, command: []const u8) !remote.Result {
         const self: *Fake = @ptrCast(@alignCast(ctx));
         try std.testing.expect(std.mem.indexOf(u8, command, "PRIVATE-CERTIFICATE-SENTINEL") == null);
+        if (std.mem.indexOf(u8, command, " 'inspect' '") != null) return .{ .code = 0, .output = try std.fmt.allocPrint(self.allocator, "{{\"host\":\"dt-0123456789abcdef0123456789abcdef\",\"station\":\"station.example\",\"ca.crt\":\"PUBLIC-CA\",\"legacy\":{s},\"legacy_expired\":false,\"legacy_active\":{s},\"certificate_sha256\":\"{s}\",\"pending_certificate_sha256\":{s}}}", .{ if (self.legacy) "true" else "false", if (self.legacy) "true" else "false", if (self.committed_pending) "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" else "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", if (self.pending_registry) "\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"" else "null" }) };
+        if (std.mem.indexOf(u8, command, " 'client-prepare' '") != null) {
+            if (self.enrolled and !self.renew and !self.legacy and !self.candidate) return .{ .code = 0, .output = "{\"action\":\"unchanged\",\"csr\":null,\"certificate_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}" };
+            if (!self.candidate) {
+                self.enrollments += 1;
+                self.candidate = true;
+                if (self.enrolled) self.generation += 1;
+            }
+            return .{ .code = 0, .output = try std.fmt.allocPrint(self.allocator, "{{\"action\":\"{s}\",\"csr\":\"-----BEGIN CERTIFICATE REQUEST-----\\nPUBLIC-CSR\\n-----END CERTIFICATE REQUEST-----\\n\",\"certificate_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}", .{if (self.legacy) "migrate" else if (self.renew) "renew" else "enroll"}) };
+        }
+        if (std.mem.indexOf(u8, command, " 'stage' '") != null) {
+            if (self.fail_signing) return .{ .code = 86 };
+            self.pending_registry = true;
+            self.pending_lease_expired = false;
+            return .{ .code = 0, .output = "{\"host\":\"dt-0123456789abcdef0123456789abcdef\",\"station\":\"station.example\",\"ca.crt\":\"PUBLIC-CA\",\"client.crt\":\"PUBLIC-CERT\",\"certificate_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}" };
+        }
+        if (std.mem.indexOf(u8, command, " 'client-stage' '") != null) return .{ .code = 0, .output = "unchanged" };
+        if (std.mem.indexOf(u8, command, " 'stage-registration' '") != null) {
+            if (self.registration_command) |old| if (std.mem.eql(u8, old, command)) return .{ .code = 0, .output = "unchanged" };
+            self.registration_command = try self.allocator.dupe(u8, command);
+            // The first application is already staged with enrollment.
+            return .{ .code = 0, .output = "unchanged" };
+        }
+        if (std.mem.indexOf(u8, command, " 'client-install' '") != null) {
+            const current = self.state(self.report.component);
+            if (current.credential_writes == self.generation) return .{ .code = 0, .output = "unchanged" };
+            current.credential_writes = self.generation;
+            current.pending = true;
+            self.mutations += 1;
+            return .{ .code = 0, .output = "changed" };
+        }
+        if (std.mem.indexOf(u8, command, " 'client-rollback' '") != null) {
+            self.rollback_calls += 1;
+            for ([_]model.Component{ .vector, .vmagent }) |kind| {
+                const current = self.state(kind);
+                if (current.credential_writes == self.generation) {
+                    current.credential_writes -= 1;
+                    current.pending = true;
+                    current.restarts += 1;
+                }
+            }
+            return .{ .code = 0, .output = "changed" };
+        }
+        if (std.mem.indexOf(u8, command, " 'finalize' '") != null) {
+            self.finalize_calls += 1;
+            if (self.fail_finalize) return .{ .code = 255 };
+            self.enrolled = true;
+            self.renew = false;
+            self.legacy = false;
+            self.pending_registry = false;
+            return .{ .code = 0, .output = "unchanged" };
+        }
+        if (std.mem.indexOf(u8, command, " 'client-commit' '") != null) {
+            self.candidate = false;
+            return .{ .code = 0, .output = "unchanged" };
+        }
         if (op == .detect) return .{ .code = 0, .output = if (std.mem.eql(u8, command, "cat /etc/machine-id")) "0123456789abcdef0123456789abcdef\n" else "ubuntu\n24.04\naarch64\n" };
         if (op == .status and std.mem.indexOf(u8, command, "ExecMainStartTimestampMonotonic") != null) return .{ .code = 0, .output = "1000" };
         if (op == .service_exists) return .{ .code = 0, .output = "loaded\n" };
@@ -75,6 +128,11 @@ const Fake = struct {
         }
         if (op == .health) {
             if (self.report.state.check) |check| {
+                if (check == .secure_endpoint or verify.networkFailure(check) or check == .ingestion_rejected) {
+                    self.endpoint_attempts += 1;
+                    if (self.pending_lease_expired) return .{ .code = 94 };
+                    if (self.endpoint_failure != 0) return .{ .code = self.endpoint_failure };
+                }
                 if (self.station_unreachable and check == .host_metrics_ready) return .{ .code = 255 };
                 if (self.fail == check) {
                     self.attempts += 1;
@@ -136,7 +194,7 @@ test "agents first install signals finalize and unchanged rerun performs no muta
     try std.testing.expectEqual(before, fake.mutations);
     for ([_]model.Component{ .vector, .vmagent, .ingestion }) |kind| {
         try std.testing.expectEqual(@as(usize, 1), fake.state(kind).restarts);
-        if (kind != .ingestion) try std.testing.expectEqual(@as(usize, 1), fake.state(kind).secret_writes);
+        if (kind != .ingestion) try std.testing.expectEqual(@as(usize, 1), fake.state(kind).credential_writes);
     }
 }
 test "Vector-only and vmagent-only edits restart only the affected agent" {
@@ -171,7 +229,7 @@ test "no metrics targets skips vmagent binary account and credentials" {
     try install.install(a, fake.asRemote(), fake.asRemote(), &report, selected);
     try std.testing.expect(!report.vmagent_installed);
     try std.testing.expectEqual(@as(usize, 0), fake.state(.vmagent).downloads);
-    try std.testing.expectEqual(@as(usize, 0), fake.state(.vmagent).secret_writes);
+    try std.testing.expectEqual(@as(usize, 0), fake.state(.vmagent).credential_writes);
     try std.testing.expectEqual(@as(usize, 0), fake.state(.vmagent).restarts);
 }
 test "delayed signals retry boundedly and timeout preserves only unfinished agent intent" {
@@ -225,11 +283,11 @@ test "standalone agent verify neither mutates nor exports or resolves credential
     var fake: Fake = .{ .allocator = a, .report = &report };
     try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
     const mutations = fake.mutations;
-    const exports = fake.secret_reads;
+    const enrollments = fake.enrollments;
     report = .{};
     try verify.verify(a, fake.asRemote(), fake.asRemote(), &report, registration);
     try std.testing.expectEqual(mutations, fake.mutations);
-    try std.testing.expectEqual(exports, fake.secret_reads);
+    try std.testing.expectEqual(enrollments, fake.enrollments);
 }
 
 test "removing the last application target stops only managed vmagent and reruns idle" {
@@ -334,4 +392,190 @@ test "application host metrics without selected logs or metrics targets still in
     report = .{ .application = "hostonly" };
     try install.install(a, fake.asRemote(), fake.asRemote(), &report, selected);
     try std.testing.expectEqual(before, fake.mutations);
+}
+
+test "CSR signing failure leaves running consumers and active registration untouched" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var report: model.Report = .{};
+    var fake: Fake = .{ .allocator = a, .report = &report };
+    try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
+    const finalized = fake.finalize_calls;
+    fake.renew = true;
+    fake.fail_signing = true;
+    report = .{};
+    try std.testing.expectError(error.RemoteOperationFailed, install.install(a, fake.asRemote(), fake.asRemote(), &report, registration));
+    try std.testing.expectEqual(finalized, fake.finalize_calls);
+    try std.testing.expectEqual(@as(usize, 0), fake.rollback_calls);
+    for ([_]model.Component{ .vector, .vmagent }) |kind| {
+        try std.testing.expect(fake.state(kind).active and !fake.state(kind).pending);
+        try std.testing.expectEqual(@as(usize, 1), fake.state(kind).restarts);
+        try std.testing.expectEqual(@as(usize, 1), fake.state(kind).credential_writes);
+    }
+}
+
+test "renewal candidate TLS rejection does not publish credentials or finalize identity" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var report: model.Report = .{};
+    var fake: Fake = .{ .allocator = a, .report = &report };
+    try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
+    const finalized = fake.finalize_calls;
+    fake.renew = true;
+    fake.endpoint_failure = 93;
+    fake.endpoint_attempts = 0;
+    report = .{};
+    try std.testing.expectError(error.RemoteOperationFailed, install.install(a, fake.asRemote(), fake.asRemote(), &report, registration));
+    try std.testing.expectEqual(readiness.Check.server_tls_invalid, report.state.check.?);
+    try std.testing.expectEqual(@as(usize, 1), fake.endpoint_attempts);
+    try std.testing.expectEqual(finalized, fake.finalize_calls);
+    try std.testing.expectEqual(@as(i64, 0), fake.now);
+    try std.testing.expectEqual(@as(usize, 1), fake.state(.vector).restarts);
+    try std.testing.expectEqual(@as(usize, 1), fake.state(.vmagent).restarts);
+}
+
+test "migration telemetry failure restores old credentials retains intent and rerun finalizes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var report: model.Report = .{};
+    var fake: Fake = .{ .allocator = a, .report = &report };
+    try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
+    const finalized = fake.finalize_calls;
+    fake.legacy = true;
+    fake.delayed = .application_metrics_ready;
+    fake.timeout = true;
+    report = .{};
+    try std.testing.expectError(error.ReadinessTimedOut, install.install(a, fake.asRemote(), fake.asRemote(), &report, registration));
+    try std.testing.expectEqual(finalized, fake.finalize_calls);
+    try std.testing.expect(fake.legacy and fake.candidate);
+    try std.testing.expectEqual(@as(usize, 1), fake.rollback_calls);
+    for ([_]model.Component{ .vector, .vmagent }) |kind| {
+        try std.testing.expectEqual(@as(usize, 1), fake.state(kind).credential_writes);
+        try std.testing.expect(fake.state(kind).pending and fake.state(kind).active);
+    }
+    fake.delayed = null;
+    fake.timeout = false;
+    report = .{};
+    try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
+    try std.testing.expectEqual(@import("ingestion.zig").Action.migrate, report.enrollment);
+    try std.testing.expect(!fake.legacy and !fake.candidate);
+    try std.testing.expectEqual(@as(usize, 2), fake.enrollments);
+    for ([_]model.Component{ .vector, .vmagent }) |kind| try std.testing.expect(!fake.state(kind).pending);
+    const mutations = fake.mutations;
+    report = .{};
+    try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
+    try std.testing.expectEqual(mutations, fake.mutations);
+    try std.testing.expectEqual(@as(usize, 0), report.state.changes);
+}
+
+test "uncertain station finalization retains candidate and resumes without credential rollback" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var report: model.Report = .{};
+    var fake: Fake = .{ .allocator = a, .report = &report };
+    try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
+    fake.renew = true;
+    fake.fail_finalize = true;
+    report = .{};
+    try std.testing.expectError(error.SshConnectionFailed, install.install(a, fake.asRemote(), fake.asRemote(), &report, registration));
+    try std.testing.expectEqual(@as(usize, 0), fake.rollback_calls);
+    try std.testing.expect(fake.candidate);
+    fake.fail_finalize = false;
+    report = .{};
+    try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
+    try std.testing.expect(!fake.candidate);
+    for ([_]model.Component{ .vector, .vmagent }) |kind| try std.testing.expectEqual(@as(usize, 2), fake.state(kind).restarts);
+    try std.testing.expectEqual(@as(usize, 1), fake.state(.ingestion).restarts);
+    try std.testing.expectEqual(@as(usize, 1), fake.state(.host_rules).restarts);
+}
+
+test "endpoint failures expose safe semantic checks with bounded transient retries" {
+    const codes = [_]u8{ 91, 92, 93, 94, 95 };
+    const checks = [_]readiness.Check{ .dns_unresolved, .tcp_unreachable, .server_tls_invalid, .client_certificate_rejected, .ingestion_rejected };
+    for (codes, checks) |code, check| {
+        var report: model.Report = .{};
+        var fake: Fake = .{ .allocator = std.testing.allocator, .report = &report, .endpoint_failure = code };
+        const result = verify.secureEndpoint(std.testing.allocator, fake.asRemote(), &report, "fixed read-only endpoint probe");
+        if (code == 93 or code == 94) {
+            try std.testing.expectError(error.RemoteOperationFailed, result);
+            try std.testing.expectEqual(@as(usize, 1), fake.endpoint_attempts);
+            try std.testing.expectEqual(@as(i64, 0), fake.now);
+        } else {
+            try std.testing.expectError(error.ReadinessTimedOut, result);
+            try std.testing.expect(fake.endpoint_attempts > 2);
+            try std.testing.expectEqual(@as(i64, 30000), fake.now);
+        }
+        try std.testing.expectEqual(check, report.state.check.?);
+        try std.testing.expectEqual(@as(usize, 0), fake.mutations);
+    }
+}
+
+test "server-only restart intent never renews client or restarts agent consumers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var report: model.Report = .{};
+    var fake: Fake = .{ .allocator = a, .report = &report };
+    try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
+    fake.state(.ingestion).pending = true;
+    report = .{};
+    try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
+    try std.testing.expectEqual(@as(usize, 2), fake.state(.ingestion).restarts);
+    try std.testing.expectEqual(@as(usize, 1), fake.enrollments);
+    for ([_]model.Component{ .vector, .vmagent }) |kind| try std.testing.expectEqual(@as(usize, 1), fake.state(kind).restarts);
+}
+
+test "failure on a station-committed migration rerun never restores revoked credentials" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var report: model.Report = .{};
+    var fake: Fake = .{ .allocator = a, .report = &report };
+    try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
+    // Model station-finalize committed, followed by an interrupted client commit.
+    // Inspection reports the candidate active while prepare retains the original
+    // transaction fingerprint, so the old generation is no longer a rollback.
+    fake.renew = true;
+    fake.candidate = true;
+    fake.committed_pending = true;
+    fake.generation = 2;
+    fake.state(.vector).credential_writes = 2;
+    fake.state(.vmagent).credential_writes = 2;
+    fake.delayed = .application_metrics_ready;
+    fake.timeout = true;
+    report = .{};
+    try std.testing.expectError(error.ReadinessTimedOut, install.install(a, fake.asRemote(), fake.asRemote(), &report, registration));
+    try std.testing.expectEqual(@as(usize, 0), fake.rollback_calls);
+    try std.testing.expect(fake.candidate and fake.committed_pending);
+    for ([_]model.Component{ .vector, .vmagent }) |kind| try std.testing.expectEqual(@as(usize, 2), fake.state(kind).credential_writes);
+}
+
+test "interrupted migration refreshes expired rollout authorization before endpoint proof" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var report: model.Report = .{};
+    var fake: Fake = .{ .allocator = a, .report = &report };
+    try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
+    // The previous run proved the old identity, staged the new one and switched
+    // consumers, but stopped before finalization. Its candidate lease expired.
+    fake.legacy = true;
+    fake.candidate = true;
+    fake.pending_registry = true;
+    fake.pending_lease_expired = true;
+    fake.generation = 2;
+    report = .{};
+    try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
+    try std.testing.expect(!fake.pending_lease_expired and !fake.candidate and !fake.legacy);
+    try std.testing.expectEqual(@as(usize, 0), fake.rollback_calls);
+    try std.testing.expectEqual(@as(usize, 1), fake.enrollments);
+    const mutations = fake.mutations;
+    report = .{};
+    try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
+    try std.testing.expectEqual(mutations, fake.mutations);
+    try std.testing.expectEqual(@as(usize, 0), report.state.changes);
 }

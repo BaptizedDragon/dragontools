@@ -78,16 +78,29 @@ signature trust the reviewed publisher; this is not a third-party-code security
 audit. See [the exact pins and source review](design.md#official-victorialogs-datasource-plugin).
 
 
-Agent CA issuance material stays root-private on the station. Client bundles are
-transferred through dedicated protected SSH output/stdin, held in opaque wiped
-controller memory and installed as service-owned mode-0400 files. They never enter
-ordinary file writers, argv or progress/errors. Equal credentials and registration
-remain untouched; invalid/expired credentials fail closed. Automatic rotation is
-not implemented. Logs enforce registered service identities and overwrite host
-identity; metrics are not a fully validated multi-tenant content boundary. Vector
-has access to the journal group but its generated configuration selects only named
-units; application/agent root remains trusted. See the agent design for bounded
-buffering, journal retention and explicit data-loss limits during outages.
+The station retains only its root-private CA key and local server key. Client
+P-256 keys are generated only on monitored hosts. The controller transports bounded
+public CSRs and signed certificates, never private keys. A root-private canonical
+machine identity supplies service-owned 0400 copies locally. Strict CSR policy
+fixes the machine CN/URI SAN, CA:FALSE, digitalSignature and clientAuth. The gateway
+requires the exact registered fingerprint and machine identity in addition to TLS
+chain/purpose checks; CA-signed unregistered clients are denied.
+
+Renewal at 30 days reuses existing local keys. The CA is preserved and requires
+explicit maintenance near expiry; automatic CA rollover is unavailable. Legacy
+migration retains working credentials while an explicit 24-hour candidate lease
+permits mTLS/telemetry proof. Only successful finalization promotes the new
+registration and unlinks the old station client key; unlink does not guarantee
+physical-media erasure. Recoverable private local generations remain after
+interruption. Read-only verification never repairs or renews credentials. See
+[the PKI lifecycle](design.md#mtls-ingestion-and-trust-boundary) for rollback and
+uncertain-finalization behavior.
+
+Logs enforce registered service identities and overwrite host identity; metrics
+are not a fully validated multi-tenant content boundary. Vector has access to the
+journal group but its generated configuration selects only named units;
+application/agent root remains trusted. See the agent design for bounded buffering,
+journal retention and explicit data-loss limits during outages.
 
 ## Secrets and privileges
 

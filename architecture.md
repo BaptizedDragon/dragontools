@@ -521,15 +521,51 @@ loopback, including VictoriaTraces with its extra gRPC listener disabled. Neithe
 Grafana nor Alertmanager is exposed. The operator must allow TCP 9443 from
 monitored hosts; DragonTools performs no firewall mutation.
 
-CA/private issuance material stays root-private on the station. Each service
-receives only its client bundle via protected SSH output, opaque wiped controller
-memory and protected stdin; mode-0400 private keys never enter ordinary file
-primitives, arguments or logs. Equal bundles and registrations are no-ops. Existing
-unrecognized paths/credentials are refused. Automatic certificate rotation and
-hard tenant isolation are deferred: the controller/station/app roots and CA are
-trusted, and a compromised registered agent can submit arbitrary metric content
-for its own authenticated host. The station enforces host identity even against a
-forged submitted label, verified with the pinned native backend.
+Private-key ownership follows the hosts, not the controller:
+
+```text
+APPLICATION HOST                             MONITORING STATION
+monitoring-client/client.key (P-256)          pki/ca/ca.key (root:root 0400)
+  generated here; never exported             server/server.key (local only)
+  | local restrictive copies                  |
+  +-> Vector / vmagent                        +-> narrow CSR signer
+  |                                             ^ public CSR over SSH
+  +-- mTLS :9443 ----------------------------> registry + ingestion gateway
+       host CN + URI SAN                      |-> VM 127.0.0.1:8428
+       dragontools://hosts/dt-<machine-id>      +-> VL 127.0.0.1:9428
+
+CONTROLLER: public CSR/certificate orchestration; no long-term private keys
+```
+
+The embedded `pki.py` owns station CA/server state and a bounded CSR signer;
+`client_pki.py` owns root-private host identity, resumable enrollment and local
+service-owned 0400 copies. No shared credential group or private SSH export exists.
+The signer accepts only P-256 proof of possession, the expected machine CN and
+sole URI SAN. It rejects other requested extensions and issues a fixed clientAuth,
+CA:FALSE profile. The gateway requires chain, client purpose, host SAN and an
+explicit registry fingerprint; CA signing alone grants no access.
+
+A 24-hour pending registry lease authorizes only the exact enrolled replacement
+while retaining the old active identity. Local private backups survive publication;
+a failure before finalization can restore old consumer files. Real mTLS and fresh
+telemetry gate registry promotion and removal of the legacy station client key.
+Station finalization precedes host cleanup, so an uncertain SSH response retains
+the working candidate for recovery. Unlink is not a physical secure-erase claim.
+The registry retains public certificate/identity metadata, never new client keys.
+
+Apply renews client/server certificates with their existing keys at 30 days or
+less remaining (one-year leaf lifetime, ten-year CA). Valid identities are unchanged;
+server renewal dirties only ingestion. CA lifetime of 366 days or less requires
+explicit maintenance and never triggers automatic rollover. Read-only verify
+creates no CSR, staged file or certificate. `endpoint.py` provides ordered,
+bounded DNS/TCP/server-TLS/client-auth/request diagnostics without raw errors.
+DNS/provider firewalls remain operator prerequisites; there is no Let's Encrypt
+or public-Grafana TLS integration in this private channel.
+
+Unrecognized credential paths are refused. Host roots and CA remain trusted;
+compromised registered agents can submit arbitrary metric content for their own
+identity. This is not hard tenant isolation. The station enforces host identity
+even against a forged submitted label, verified with the pinned native backend.
 
 The application journal is bounded by a managed drop-in only when effective
 administrator settings are insufficient. Limits are calculated from filesystem

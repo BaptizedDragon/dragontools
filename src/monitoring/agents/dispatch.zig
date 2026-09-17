@@ -8,7 +8,7 @@ const ingress = @import("ingestion.zig");
 fn print(io: std.Io, value: []const u8) void {
     std.Io.File.stdout().writeStreamingAll(io, value) catch {};
 }
-pub const plan = "Agent installation plan (local; SSH not attempted).\nVector: selected journald logs, host metrics, internal telemetry; bounded disk buffers.\nvmagent: installed only for explicitly configured private application metrics targets.\nStation: register stable machine identity; protected per-host mTLS credentials; write-only HTTPS ingestion on 9443.\nRaw backends remain loopback-only. No firewall rules change; allow agent access to station 9443 explicitly.\nBound journald with a managed drop-in only when necessary; retain stricter administrator limits.\nRestart only affected services; verify recent station signals before finalization.\nOTel traces and systemd-service state alerts remain unavailable.\nNo remote operations performed.\n";
+pub const plan = "Agent installation plan (local; SSH not attempted).\nVector: selected journald logs, host metrics, internal telemetry; bounded disk buffers.\nvmagent: installed only for explicitly configured private application metrics targets.\nStation: register machine URI identity; sign public CSRs; mTLS ingestion on 9443. Client private keys stay on the monitored host.\nRaw backends remain loopback-only. No firewall rules change; allow agent access to station 9443 explicitly.\nBound journald with a managed drop-in only when necessary; retain stricter administrator limits.\nRestart only affected services; verify recent station signals before finalization.\nOTel traces and systemd-service state alerts remain unavailable.\nNo remote operations performed.\n";
 /// Native OpenSSH resolves the configured station name. Only its validated
 /// HostName becomes the application-reachable TLS endpoint; identities, proxies,
 /// and controller SSH credentials are never copied to the application host.
@@ -80,8 +80,12 @@ pub fn run(init: std.process.Init, options: cli.Options) !void {
     const result = if (options.command == .agents_install) @import("install.zig").install(a, app.asRemote(), station.asRemote(), &report, registration) else @import("verify.zig").verify(a, app.asRemote(), station.asRemote(), &report, registration);
     result catch |err| {
         print(init.io, try std.fmt.allocPrint(a, "Agent verification/install failed. Component: {s}. Check: {s}. {s}\n", .{ @tagName(report.component), if (report.state.check) |check| @tagName(check) else @tagName(report.state.phase), if (report.configured) "Configuration was applied; signal delivery has not been fully verified. Pending restart intent remains; rerun the same command." else "Later steps were not attempted. Completed changes may remain; rerun after correcting the cause." }));
+        if (@import("verify.zig").networkFailure(report.state.check)) print(init.io, @import("verify.zig").network_guidance);
+        if (report.state.check == .client_identity_inconsistent) print(init.io, "The managed client identity is inconsistent. Existing files were preserved; restore a verified local backup or correct conflicting metadata before retrying.\n");
+        if (report.state.check == .ca_maintenance) print(init.io, "The private CA requires explicit maintenance. It was not rotated or replaced.\n");
         return err;
     };
+    print(init.io, report.enrollmentSummary());
     if (options.command == .agents_install and report.state.changes == 0) print(init.io, "No changes required.\n");
     print(init.io, "Vector\n  active; enabled\n  host metrics flowing\n  selected log stream identities flowing (quiet-service metadata included)\n");
     print(init.io, if (registration.metrics_targets.len > 0) "vmagent\n  active; enabled\n  application metrics flowing\n" else "vmagent\n  not required (no application metrics targets)\n");

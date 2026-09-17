@@ -40,7 +40,7 @@ def prepare_credentials(fixture):
         "-keyout", str(certs / "ca.key"), "-out", str(certs / "ca.crt"), "-subj", "/CN=Disposable fixture CA",
         "-addext", "basicConstraints=critical,CA:TRUE,pathlen:0", "-addext", "keyUsage=critical,keyCertSign,cRLSign")
     for name, subject, extensions in (("server", "localhost", "extendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost\n"),
-                                      ("client", "application-one", "extendedKeyUsage=clientAuth\n")):
+                                      ("client", "dt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "extendedKeyUsage=clientAuth\nsubjectAltName=URI:dragontools://hosts/dt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n")):
         run("req", "-new", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", str(certs / (name + ".key")),
             "-out", str(certs / (name + ".csr")), "-subj", "/CN=" + subject)
         (certs / "extensions").write_text("basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\n" + extensions)
@@ -137,13 +137,14 @@ def main():
         registry = temp / "registry"
         registry.mkdir()
         cert = (fixture / "certs/client.crt").read_text()
-        record = {"version": 1, "host": "application-one", "station": "localhost",
+        record = {"version": 1, "host": "dt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "station": "localhost",
                   "services": ["doers.service", "orderflow.service"],
                   "metrics_targets": [{"name": "software", "url": "http://127.0.0.1:16000/metrics"}],
-                  "certificate_sha256": hashlib.sha256(ssl.PEM_cert_to_DER_cert(cert)).hexdigest()}
+                  "certificate_sha256": hashlib.sha256(ssl.PEM_cert_to_DER_cert(cert)).hexdigest(),
+                  "certificate_identity": "dragontools://hosts/dt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
         if applications:
-            record = dict(json.loads((fixture / "apps-registration.json").read_text()), certificate_sha256=record["certificate_sha256"])
-        record_path = registry / "application-one.json"
+            record = dict(json.loads((fixture / "apps-registration.json").read_text()), certificate_sha256=record["certificate_sha256"], certificate_identity=record["certificate_identity"])
+        record_path = registry / "dt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"
         record_path.write_text(json.dumps(record))
         record_path.chmod(0o640)
         def start(args, input_stream=False):
@@ -167,8 +168,8 @@ def main():
             tls.load_cert_chain(str(fixture / "certs/client.crt"), str(fixture / "certs/client.key"))
             request(9443, "GET", "/health", context=tls)
             request(9443, "POST", "/api/v1/write", sample(), tls, {"Content-Encoding": "snappy"})
-            values = until(lambda: query('dragontools_identity_fixture{host="application-one"}'))
-            assert values[0]["metric"]["host"] == "application-one"
+            values = until(lambda: query('dragontools_identity_fixture{host="dt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'))
+            assert values[0]["metric"]["host"] == "dt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             assert not query('dragontools_identity_fixture{host="forged-host"}')
             print("PASS: real VictoriaMetrics v1.151.0 enforces authenticated host over duplicate submitted label", flush=True)
 
@@ -191,14 +192,14 @@ def main():
             if applications:
                 event = {"_SYSTEMD_UNIT": "doers.service", "message": json.dumps(dict(message="structured fixture", application="forged", environment="forged", service="forged", host="forged", request_id="fixture-request", level="info")), "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "PRIORITY": "6"}
                 vector.stdin.write((json.dumps(event) + "\n").encode()); vector.stdin.flush()
-            until(lambda: query('host_cpu_seconds_total{host="application-one"}'))
+            until(lambda: query('host_cpu_seconds_total{host="dt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'))
             until(lambda: signals.check("host", record, vector_since))
             assert not signals.check("host", record, time.time() + 3600)
             assert vector.poll() is None
             print("PASS: real Vector v0.58.0 host metrics traverse mTLS into real VictoriaMetrics", flush=True)
             def streams():
                 result = request(9428, "POST", "/select/logsql/query",
-                                 urllib.parse.urlencode({"query": 'host:="application-one" type:="dragontools_stream" | fields service'}),
+                                 urllib.parse.urlencode({"query": 'host:="dt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" type:="dragontools_stream" | fields service'}),
                                  headers={"Content-Type": "application/x-www-form-urlencoded"})
                 names = {json.loads(line)["service"] for line in result.splitlines()}
                 return names == ({"web"} if applications else {"doers.service", "orderflow.service"})
@@ -211,11 +212,11 @@ def main():
                     result = request(9428, "POST", "/select/logsql/query", urllib.parse.urlencode({"query": 'request_id:="fixture-request" | limit 1'}), headers={"Content-Type": "application/x-www-form-urlencoded"})
                     if not result.strip(): return False
                     event = json.loads(result.splitlines()[0])
-                    assert all(event.get(key) == value for key, value in dict(application="doers", environment="production", service="web", host="application-one").items())
+                    assert all(event.get(key) == value for key, value in dict(application="doers", environment="production", service="web", host="dt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").items())
                     return True
                 until(trusted_event)
                 for app in record["applications"]:
-                    assert query('host_cpu_seconds_total{application=' + json.dumps(app['name']) + ',environment=' + json.dumps(app['environment']) + ',host="application-one"}')
+                    assert query('host_cpu_seconds_total{application=' + json.dumps(app['name']) + ',environment=' + json.dumps(app['environment']) + ',host="dt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}')
                 host_only = next(app for app in record['applications'] if app['name'] == 'hostonly')
                 assert not host_only['services']
                 print("PASS: native application logs override forged identities; three host scopes include a service-free application", flush=True)
@@ -231,7 +232,7 @@ def main():
                             "-remoteWrite.tlsCertFile=" + str(fixture / "certs/client.crt"),
                             "-remoteWrite.tlsKeyFile=" + str(fixture / "certs/client.key"),
                             "-remoteWrite.tmpDataPath=" + str(temp / "vmagent"), "-remoteWrite.maxDiskUsagePerURL=1GiB"])
-            until(lambda: query('fixture_requests_total{host="application-one",application="doers",environment="production",service="web"}' if applications else 'fixture_requests_total{host="application-one",app="software"}'))
+            until(lambda: query('fixture_requests_total{host="dt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",application="doers",environment="production",service="web"}' if applications else 'fixture_requests_total{host="dt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",app="software"}'))
             until(lambda: signals.check("app", record, vmagent_since))
             assert not signals.check("app", record, time.time() + 3600)
             assert vmagent.poll() is None

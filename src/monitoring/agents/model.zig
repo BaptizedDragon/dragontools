@@ -6,8 +6,18 @@ pub const Report = struct {
     component: Component = .application_host,
     state: @import("../install.zig").Report = .{},
     configured: bool = false,
+    enrollment: @import("ingestion.zig").Action = .unchanged,
     application: ?[]const u8 = null,
     vmagent_installed: bool = false,
+    pub fn enrollmentSummary(self: Report) []const u8 {
+        return switch (self.enrollment) {
+            .unchanged => "",
+            .enroll => "local client identity enrolled\nmTLS verified\n",
+            .reenroll => "local client identity re-enrolled\nmTLS verified\n",
+            .renew => "local client certificate renewed\nmTLS verified\n",
+            .migrate => "legacy certificate detected\nlocal client identity enrolled\nmTLS verified\n",
+        };
+    }
     pub fn call(self: *Report, r: remote.Remote, op: remote.Operation, command: []const u8) ![]const u8 {
         return self.state.call(r, op, command);
     }

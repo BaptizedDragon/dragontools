@@ -37,7 +37,7 @@ pub fn render(a: std.mem.Allocator, config: application.Config) ![]const u8 {
         }
     }
     try w.print("Owned station namespace: /etc/dragontools/apps/{s}/\n  manifest.json, logs.rules.yml, metrics.rules.yml, scrape.yml\n", .{config.application.name});
-    try w.writeAll("Ensure bounded journald and Vector buffers; preserve stricter administrator limits.\nUse registered mTLS ingestion on station TCP 9443; raw backends stay loopback-only.\nInspect actual ownership and other application manifests during apply; preserve their signals.\nReconcile shared station loaders once if needed; later changes affect only their consumers.\nVerify recent signals, loaded probes and rules before clearing pending intent.\nNo firewall changes, secret resolution, SSH or mutations performed by this plan.\nOTel traces, custom metrics alerts and dashboards: unavailable.\n");
+    try w.writeAll("Ensure bounded journald and Vector buffers; preserve stricter administrator limits.\nUse registered mTLS ingestion on station TCP 9443; raw backends stay loopback-only.\nGenerate client private keys only on the monitored host; exchange public CSRs/certificates. Renew near-expiry leaf certificates with existing keys.\nInspect actual ownership and other application manifests during apply; preserve their signals.\nReconcile shared station loaders once if needed; later changes affect only their consumers.\nVerify recent signals, loaded probes and rules before clearing pending intent.\nNo firewall changes, secret resolution, SSH or mutations performed by this plan.\nOTel traces, custom metrics alerts and dashboards: unavailable.\n");
     return out.toOwnedSlice();
 }
 

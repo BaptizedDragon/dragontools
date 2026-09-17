@@ -70,6 +70,14 @@ pub const Report = struct {
             41 => return error.ServiceAccountConflict,
             42 => return error.SystemdDropInConflict,
             43 => return error.UnexpectedManagedSymlink,
+            87 => {
+                self.check = .ca_maintenance;
+                return error.CaMaintenanceRequired;
+            },
+            88 => {
+                self.check = .client_identity_inconsistent;
+                return error.ClientIdentityInconsistent;
+            },
             255 => return error.SshConnectionFailed,
             else => return error.RemoteOperationFailed,
         }

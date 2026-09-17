@@ -866,7 +866,7 @@ restart only the affected evaluator. Failures preserve pending intent.
 
 Trusted application/environment/host/service overwrite application log fields and
 scrape labels. mTLS, bounded buffers, journald limits and signal freshness use the
-agent policy below. Certificate rotation, custom metrics alerts, dashboards and
+agent policy below. Automatic CA rollover, custom metrics alerts, dashboards and
 OTel deployment remain unavailable. See the [two-host application gate](tests/integration/README.md#application-contract-two-host-gate)
 before claiming deployment validation.
 
@@ -944,21 +944,90 @@ The station installs a narrow DragonTools Python ingestion service as `dt-ingest
 on IPv4 TCP **9443**. It requires a registered client certificate and TLS 1.2 or
 newer, and exposes only fixed metrics/log writes plus an authenticated health
 route. Raw VictoriaMetrics/VictoriaLogs stay on loopback; Grafana, Alertmanager and
-VictoriaTraces gain no public route. CA material remains root-private on the
-station. Per-host credentials cross protected SSH I/O and are installed as mode
-0400 files readable only by their consuming service. They never enter argv,
-ordinary configuration, progress or errors; equal credentials are unchanged.
-The controller stores no state database. Registration records host ID, selected
-services/targets and client-certificate identity on the station.
+VictoriaTraces gain no public route. The station owns its CA and server private
+keys. Each application host generates its own **ECDSA P-256** client key; only a
+bounded public CSR and signed certificate cross SSH through the controller. The
+controller stores neither long-term private key nor a state database. Python 3
+standard-library helpers are embedded in the controller; no Python package or
+remote helper download is needed.
 
-This authenticates hosts, not mutually untrusted tenants. A compromised
-application root or agent credential can submit arbitrary metric content for its
-authenticated host; do not treat mTLS as metric-content validation. The ingestion
-route enforces host identity even when submitted metrics contain a forged host
-label, verified against the pinned native VictoriaMetrics backend. Logs enforce registered service names. The station, controller,
-OpenSSH configuration, host roots and station CA are trusted. Automatic certificate
-rotation is not implemented; expiration or incompatible credential state fails
-closed and requires deliberate operator recovery.
+### Private ingestion certificates
+
+One machine identity serves every application on the same host:
+`dt-<32 lowercase machine-id hex>`, with URI SAN
+`dragontools://hosts/<host-id>`. SSH aliases, IP addresses and repository paths
+are connection/configuration values, never certificate identity. Application
+permissions remain in the station registry. The station accepts only a signed
+P-256 CSR with the exact host CN and URI SAN; extra identities, CA privileges,
+serverAuth and unknown requested extensions are rejected. Issued certificates
+have CA:FALSE, digitalSignature and clientAuth. The gateway checks the TLS chain,
+client purpose and exact registered fingerprint/host SAN. An unregistered
+CA-signed certificate has no ingestion access.
+
+The application host keeps the root-owned mode-0700 directory
+`/etc/dragontools/monitoring-client/` with mode-0400 `ca.crt`, `client.crt`,
+`client.key` and `identity.json`. Vector and vmagent retain their service-owned
+mode-0400 copies, derived locally from this one identity; no broad shared group
+is added. The key never leaves the application host. The station's CA key remains
+root:root 0400 under `/etc/dragontools/ingestion/pki/ca/`; its server key remains
+local to the station. Private keys never enter controller argv, output, ordinary
+managed-file writes or logs.
+
+CA lifetime is ten years; server/client certificates last one year. `apply`
+(and legacy `agents install`) inspects expiry on every run. More than 30 days
+remaining is a no-op: no CSR, signature, credential rewrite or agent restart.
+At 30 days or less, a client certificate renews with the same local private key.
+Server renewal likewise reuses the station key and marks only ingestion for
+restart. A CA with 366 days or less remaining stops apply with `ca_maintenance`;
+it is never automatically replaced. This leaves room for a full one-year leaf
+certificate. Explicit CA rollover remains future work. Read-only `app-verify`
+never renews or repairs credentials.
+
+Existing station-generated identities migrate automatically during apply. The
+old credential must first authenticate while it remains valid. An expired legacy
+credential is checked for its exact registered identity, chain and key match; it
+is never reported healthy. The host generates a new local key and
+retains the old service credentials while the station signs a public CSR. The
+registry temporarily authorizes that exact candidate fingerprint for a bounded
+24-hour rollout, alongside the old active identity. This explicit enrollment
+lease permits candidate mTLS and real telemetry proof; it does not authorize
+other CA-signed certificates. After the new path verifies, finalization promotes
+the new registration and unlinks the legacy station
+`clients/<host>/client.key`. Normal unlink removes the managed file; physical-media
+erasure cannot be guaranteed.
+
+A signing or candidate TLS failure leaves installed credentials intact. A later
+credential rollout failure restores retained old consumer credentials where
+available and keeps restart intent and the candidate for retry. If finalization's
+SSH result is uncertain, the working candidate and local backups remain for
+recovery rather than restoring a possibly revoked identity. Rerun the same apply
+after correcting the cause; serialize applies per host/station. Missing or
+incompatible managed key state is never reported healthy. A missing canonical key
+is recovered only from a matching host-local consumer copy; if no copy survives,
+an exactly recognized public identity can re-enroll with a new local key and
+full mTLS/telemetry verification. Unprovable state is refused. Do not delete pending
+identity state to bypass a failed verification.
+
+This is a private ingestion channel, so DragonTools intentionally uses its own
+CA rather than Let's Encrypt. The station certificate includes its configured
+DNS/IP SAN. Vector checks both certificate and hostname, and vmagent retains
+normal CA/hostname validation. **TCP 9443 must be reachable from monitored hosts.**
+DNS, provider firewalls and router/NAT setup are outside DragonTools. Verification
+checks station service/listener first, then app-side DNS, TCP, server TLS, client
+authentication and the authenticated request. Safe failures include
+`dns_unresolved`, `tcp_unreachable`, `server_tls_invalid`,
+`client_certificate_rejected` and `ingestion_rejected`; no raw remote stderr is
+printed. DNS/TCP errors also say:
+
+```text
+DragonTools does not manage DNS or provider firewalls. Ensure the station hostname resolves and TCP 9443 is allowed.
+```
+
+The controller, station/application roots, local OpenSSH configuration and CA
+remain trusted. A compromised registered host can submit arbitrary metric content
+for its authenticated host; mTLS is not metric-content validation or hard tenant
+isolation. The gateway still overrides forged host labels and enforces registered
+log service/application identities.
 
 Vector uses two bounded disk buffers, **268435488 bytes per sink** (upstream's
 minimum, approximately 256 MiB), with blocking backpressure, 10-second requests
@@ -995,6 +1064,8 @@ ingestion into pinned VictoriaMetrics/VictoriaLogs and authenticated host-label
 override. It replaced journald with a fixture source. Full disposable-host
 installation, journal collection, outage recovery and systemd hardening remain
 separate integration gates: see [the checklist](tests/integration/README.md).
+The [PKI validation record](tests/integration/pki-validation.md) distinguishes
+crypto, controller and native-process evidence from that remaining host gate.
 
 ## Command availability
 

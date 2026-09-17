@@ -8,7 +8,7 @@ pub const Ssh = struct {
     options: Options,
     elevation: Elevation = .root,
     pub fn asRemote(self: *Ssh) remote.Remote {
-        return .{ .context = self, .execute = execute, .execute_timed = executeTimed, .execute_secret = executeSecret, .read_secret = readSecret, .clock = .{ .context = self, .now_ms = nowMs, .sleep_ms = sleepMs } };
+        return .{ .context = self, .execute = execute, .execute_timed = executeTimed, .execute_secret = executeSecret, .clock = .{ .context = self, .now_ms = nowMs, .sleep_ms = sleepMs } };
     }
     fn nowMs(ctx: *anyopaque) i64 {
         const self: *Ssh = @ptrCast(@alignCast(ctx));
@@ -63,15 +63,6 @@ pub const Ssh = struct {
             if (std.mem.eql(u8, result.output.protectedBytes(), token)) return .{ .code = 0, .output = token };
         }
         return error.InvalidCredentialResponse;
-    }
-    fn readSecret(ctx: *anyopaque, command: []const u8, budget_ms: u32) !*@import("../secrets/secret.zig").Secret {
-        const self: *Ssh = @ptrCast(@alignCast(ctx));
-        const result = try @import("../secrets/process.zig").run(std.heap.page_allocator, self.io, try self.argv(command), null, 32768, budget_ms);
-        if (result.code != 0) {
-            result.deinit();
-            return error.AgentCredentialExportFailed;
-        }
-        return result.output;
     }
     fn executeTimed(ctx: *anyopaque, _: remote.Operation, command: []const u8, budget_ms: u32) !remote.Result {
         const self: *Ssh = @ptrCast(@alignCast(ctx));
