@@ -37,7 +37,7 @@ pub fn render(a: std.mem.Allocator, node: spec.Node) ![]const u8 {
     try w.print("{s}\n\nUsage:\n  ", .{item.description});
     try writePath(w, node);
     if (item.command) |command| {
-        try w.writeAll(if (spec.flagAllowed(spec.flag("--config").?, command)) " (--config PATH | --ssh-host ALIAS | --host HOST) [options]\n" else if (spec.flagAllowed(spec.flag("--ssh-host").?, command)) " (--ssh-host ALIAS | --host HOST) [options]\n" else " --host HOST [options]\n");
+        try w.writeAll(if (spec.applicationCommand(command)) (if (command == .app_apply) " [--config PATH] [--plan]\n" else " [--config PATH]\n") else if (spec.flagAllowed(spec.flag("--config").?, command)) " (--config PATH | --ssh-host ALIAS | --host HOST) [options]\n" else if (spec.flagAllowed(spec.flag("--station").?, command)) " (--ssh-host ALIAS | --host HOST) --station ALIAS [options]\n" else if (spec.flagAllowed(spec.flag("--ssh-host").?, command)) " (--ssh-host ALIAS | --host HOST) [options]\n" else " --host HOST [options]\n");
     } else {
         var has_children = false;
         for (spec.commands) |child| {
@@ -55,9 +55,11 @@ pub fn render(a: std.mem.Allocator, node: spec.Node) ![]const u8 {
     }
 
     if (item.command) |command| {
-        try w.writeAll(if (spec.flagAllowed(spec.flag("--ssh-host").?, command)) "\nConnection (choose one):\n" else "\nRequired:\n");
-        if (spec.flagAllowed(spec.flag("--ssh-host").?, command)) try writeFlag(w, spec.flag("--ssh-host").?);
-        try writeFlag(w, spec.flag("--host").?);
+        if (!spec.applicationCommand(command)) {
+            try w.writeAll(if (spec.flagAllowed(spec.flag("--ssh-host").?, command)) "\nConnection (choose one):\n" else "\nRequired:\n");
+            if (spec.flagAllowed(spec.flag("--ssh-host").?, command)) try writeFlag(w, spec.flag("--ssh-host").?);
+            try writeFlag(w, spec.flag("--host").?);
+        }
         // Group names and option availability are defined once in spec.zig.
         for (spec.flags, 0..) |flag, i| {
             if (!spec.flagAllowed(flag, command) or isRequiredConnection(flag, command) or std.mem.eql(u8, flag.name, "--help")) continue;
@@ -73,11 +75,31 @@ pub fn render(a: std.mem.Allocator, node: spec.Node) ![]const u8 {
         }
         if (spec.flagAllowed(spec.flag("--ssh-host").?, command)) {
             try w.writeAll("\nAlias mode: OpenSSH resolves HostName, User, Port, IdentityAgent, IdentityFile\nand ProxyJump through normal SSH configuration. Do not combine --ssh-host\nwith direct connection options. Direct mode defaults: user root, port 22,\nenvironment agent/default identities. Strict host-key checking is always enabled.\n");
-        } else try w.writeAll("\nSSH defaults: user root, port 22, environment agent/default identities.\nStrict host-key checking is always enabled. Explicit authentication modes are exclusive.\n");
-        if (spec.flagAllowed(spec.flag("--config").?, command)) try w.writeAll("\nConfiguration is explicit: no default file is searched. Version 1 supports only\nconnection.ssh_host and Grafana username/password { op = \"op://...\" } references.\nRelative config paths are allowed. Literal credentials and unknown keys fail.\nCLI values override config; --host replaces the configured SSH alias.\nBoth Grafana references are required together after merging. Help, completion,\nstatus and --plan never resolve secrets; install and verify resolve them locally.\nWithout references, Grafana administrator credentials remain unmanaged.\n");
+        } else if (!spec.applicationCommand(command)) try w.writeAll("\nSSH defaults: user root, port 22, environment agent/default identities.\nStrict host-key checking is always enabled. Explicit authentication modes are exclusive.\n");
+        if (!spec.applicationCommand(command) and spec.flagAllowed(spec.flag("--config").?, command)) try w.writeAll("\nConfiguration is explicit: no default file is searched. Version 1 supports only\nconnection.ssh_host and Grafana username/password { op = \"op://...\" } references.\nRelative config paths are allowed. Literal credentials and unknown keys fail.\nCLI values override config; --host replaces the configured SSH alias.\nBoth Grafana references are required together after merging. Help, completion,\nstatus and --plan never resolve secrets; install and verify resolve them locally.\nWithout references, Grafana administrator credentials remain unmanaged.\n");
     }
     try w.writeAll("\n  --help\n      Show help for this command.\n");
 
+    if (item.command) |command| if (spec.applicationCommand(command)) {
+        try w.writeAll(
+            \\Loads exactly ./monitoring.toml by default, or the explicit --config path.
+            \\Missing/invalid config fails before SSH. Version 1 requires application name
+            \\and environment, plus target.ssh_host and station.ssh_host OpenSSH aliases.
+            \\Only --config, --help and apply's --plan are accepted; connection and signal
+            \\selections belong in the file. Unknown keys and duplicate names fail.
+            \\Host metrics are automatic. Service logs require explicit enabled=true.
+            \\Private service metrics endpoints enable vmagent; HTTP(S) probes and bounded
+            \\log/probe alerts belong to this application's station namespace.
+            \\Traces and custom metrics alerts are explicitly unsupported.
+            \\Apply --plan parses locally and contacts no SSH hosts or secret providers.
+            \\App verification is read-only and sends no test alerts. Existing station
+            \\secrets, unrelated applications and manual assets remain untouched.
+            \\Use normal OpenSSH configuration; strict host-key checking remains enabled.
+            \\Wizard application mode returns this same CLI with default-No confirmation.
+            \\
+        );
+        return out.toOwnedSlice();
+    };
     if (node == .completion) try w.writeAll(
         \\
         \\Print a local completion script to stdout. No SSH, network or secret access.
@@ -128,6 +150,22 @@ pub fn render(a: std.mem.Allocator, node: spec.Node) ![]const u8 {
         );
         return out.toOwnedSlice();
     }
+    if (node == .agents or node == .agents_install or node == .agents_verify or node == .agents_status) {
+        try w.writeAll(
+            \\Vector forwards only selected journald services and bounded host metrics.
+            \\vmagent is installed only when --metrics-target is supplied.
+            \\Install requires at least one unique --service. Target names must be unique;
+            \\URLs use HTTP/HTTPS, localhost or literal private/local addresses, without
+            \\credentials, queries or fragments. Public/DNS metrics endpoints are rejected.
+            \\--station is required for install, verify and status and uses normal OpenSSH
+            \\configuration. DragonTools owns the ingestion ports and secure transport.
+            \\Verify/status may omit selections to inspect the saved registration.
+            \\Verify is read-only; successful install requires station-side signal arrival.
+            \\OTel traces agents remain unavailable. --plan performs no remote operations.
+            \\
+        );
+        return out.toOwnedSlice();
+    }
     if (node == .root) try w.writeAll("\nHost utility: host install-oh-my-zsh installs only missing shell setup.\n");
     try w.print("\nImplemented: VictoriaMetrics, VictoriaLogs, VictoriaTraces and Grafana.\nVictoriaMetrics: loopback:8428; retention {s}; reserve {d}%.\nVictoriaLogs: loopback:9428; disk-bound retention; logical limit {s}; native partition budget {d}% of filesystem capacity.\nVictoriaTraces: loopback:{d}; disk-bound retention; logical limit {s}; native partition budget {d}% of filesystem capacity.\nGrafana: loopback:3000; local authentication enabled; Metrics, Logs and Traces provisioned.\nAccess through SSH forwarding only. The official VictoriaLogs plugin is pinned; dashboards remain unavailable.\nLogs/traces preserve the newest two partitions. Cleanup is periodic.\nEach native partition budget excludes other writers; adequate headroom is required.\nReruns inspect actual state and recover pending activation. Healthy unchanged services are not restarted.\n", .{ policy.metrics.retention, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent, vt.port, policy.traces.retention, policy.traces.cleanup_usage_percent });
     try w.writeAll(
@@ -139,7 +177,8 @@ pub fn render(a: std.mem.Allocator, node: spec.Node) ![]const u8 {
         \\Telegram resolves locally during install only; protected files never enter argv or configuration.
         \\Status reads stored probe metrics. Verify is read-only and sends no test alerts.
         \\Send a test explicitly with monitoring notify-test --config monitoring.toml.
-        \\Agents, dashboards, firewall, TLS and legacy Telegram flags are unavailable.
+        \\Vector logs/host metrics and optional vmagent app metrics use monitoring agents.
+        \\OTel traces agents, dashboards, firewall, TLS and legacy Telegram flags are unavailable.
         \\Unavailable options are validated, then rejected before SSH, including with --plan.
         \\
     );
@@ -177,8 +216,10 @@ test "workflow help has contextual options and explicit availability" {
     try std.testing.expect(std.mem.indexOf(u8, verify, "  --tls") == null);
     const agents = try render(a, .agents_install);
     defer a.free(agents);
-    try std.testing.expect(std.mem.indexOf(u8, agents, "dragontool monitoring agents install --host HOST") != null);
+    try std.testing.expect(std.mem.indexOf(u8, agents, "dragontool monitoring agents install (--ssh-host ALIAS | --host HOST) --station ALIAS") != null);
     try std.testing.expect(std.mem.indexOf(u8, agents, "--service") != null);
+    try std.testing.expect(std.mem.indexOf(u8, agents, "--metrics-target") != null);
+    try std.testing.expect(std.mem.indexOf(u8, agents, "Verify/status may omit selections") != null);
 }
 
 test "completion and wizard help explain local behavior" {
@@ -205,5 +246,18 @@ test "host help describes alias resolution and preservation without monitoring o
     }
     for ([_][]const u8{ "  --tls", "  --service", "  --ssh-op-path", "VictoriaMetrics" }) |excluded| {
         try std.testing.expect(std.mem.indexOf(u8, command, excluded) == null);
+    }
+}
+
+test "application help gives one default config and no station override options" {
+    for ([_]spec.Node{ .app_apply, .app_verify, .app_status }) |node| {
+        const output = try render(std.testing.allocator, node);
+        defer std.testing.allocator.free(output);
+        try std.testing.expect(std.mem.indexOf(u8, output, "./monitoring.toml") != null);
+        try std.testing.expect(std.mem.indexOf(u8, output, "--config PATH") != null);
+        try std.testing.expect(std.mem.indexOf(u8, output, "  --ssh-host") == null);
+        try std.testing.expect(std.mem.indexOf(u8, output, "  --host") == null);
+        try std.testing.expect(std.mem.indexOf(u8, output, "  --grafana-user-op") == null);
+        try std.testing.expectEqual(node == .app_apply, std.mem.indexOf(u8, output, "  --plan") != null);
     }
 }

@@ -95,7 +95,7 @@ pub fn renderScrape(a: std.mem.Allocator, probes: []const Probe) ![]const u8 {
     var out: std.Io.Writer.Allocating = .init(a);
     errdefer out.deinit();
     const w = &out.writer;
-    try w.writeAll("# Managed by DragonTools\nglobal:\n  scrape_interval: 30s\n  scrape_timeout: 5s\n");
+    try w.writeAll("# Managed by DragonTools\nglobal:\n  scrape_interval: 30s\n  scrape_timeout: 5s\nscrape_config_files: ['/etc/dragontools/apps/*/scrape.yml']\n");
     if (probes.len == 0) {
         try w.writeAll("scrape_configs: []\n");
         return out.toOwnedSlice();
@@ -145,6 +145,7 @@ pub fn renderRules(a: std.mem.Allocator) ![]const u8 {
         \\        expr: probe_success{job="dragontools-blackbox"} == 0
         \\        for: 2m
         \\        labels:
+        \\          managed_by: dragontools
         \\          severity: critical
         \\          source: blackbox
         \\        annotations:

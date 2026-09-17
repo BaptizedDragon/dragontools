@@ -115,6 +115,13 @@ const Fake = struct {
             .health => {
                 const check = self.report.check.?;
                 if (current.fail == check) return .{ .code = 1 };
+                // Ownership of app glob inputs is checked before the evaluator
+                // exists or starts; all runtime checks still require active.
+                if (check == .application_ownership) {
+                    try std.testing.expect(component == .vmalert_logs or component == .vmalert_metrics);
+                    try std.testing.expect(std.mem.indexOf(u8, command, "app_all()") != null);
+                    return .{ .code = 0 };
+                }
                 if (current.delayed == check) {
                     current.attempts += 1;
                     if (current.attempts <= 2) return .{ .code = 75 };

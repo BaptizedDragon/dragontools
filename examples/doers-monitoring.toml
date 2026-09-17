@@ -1,0 +1,44 @@
+# Illustrative application contract. Replace aliases, unit and metrics endpoint
+# after checking your deployment; these values have not been verified on a host.
+# Application repositories must never contain station or telemetry credentials.
+version = 1
+
+[application]
+name = "doers"
+environment = "production"
+
+[target]
+ssh_host = "softwarelanding"
+
+[station]
+ssh_host = "monitoring"
+
+[[service]]
+name = "doers"
+systemd = "doers.service"
+
+[service.logs]
+enabled = true
+
+[service.metrics]
+url = "http://127.0.0.1:16005/metrics"
+
+[service.traces]
+enabled = false # true fails clearly until trace agents are implemented
+
+[[probe]]
+name = "web"
+url = "https://doers.business/healthz"
+
+[[alert]]
+name = "HighErrorRate"
+source = "logs"
+service = "doers"
+level = "error"
+window = "5m"
+threshold = 10
+severity = "warning"
+
+# Every probe gets ServiceProbeFailed (critical for 2m) automatically.
+# One source="probe" alert referencing probe="web" can override that default;
+# it replaces the default for that probe rather than creating duplicate alerts.

@@ -1,8 +1,10 @@
 const std = @import("std");
 const spec = @import("spec.zig");
 const config = @import("../config/monitoring.zig");
+const application = @import("../config/application.zig");
 const references = @import("../secrets/reference.zig");
 const probes = @import("../monitoring/probes.zig");
+const targets = @import("../monitoring/agents/targets.zig");
 pub const Command = spec.Command;
 pub const Action = enum { monitoring, host, completion, wizard };
 pub const Options = struct {
@@ -24,6 +26,7 @@ pub const Options = struct {
     explicit_user: bool = false,
     explicit_port: bool = false,
     config_values: ?config.Config = null,
+    application_config: ?application.Config = null,
     target_user: ?[]const u8 = null,
     set_default_shell: bool = false,
     update_managed_zshrc: bool = false,
@@ -32,7 +35,9 @@ pub const Options = struct {
     ssh_sock: ?[]const u8 = null,
     identity: ?[]const u8 = null,
     ssh_op_path: ?[]const u8 = null,
+    station: ?[]const u8 = null,
     station_ip: ?[]const u8 = null,
+    metrics_targets: std.ArrayList(targets.Target) = .empty,
     domain: ?[]const u8 = null,
     tls: ?[]const u8 = null,
     cloudflare_token_op: ?[]const u8 = null,
@@ -44,13 +49,15 @@ pub const Options = struct {
 
     pub fn deinit(self: *Options, a: std.mem.Allocator) void {
         if (self.config_values) |*values| values.deinit();
+        if (self.application_config) |*values| values.deinit();
         self.services.deinit(a);
+        self.metrics_targets.deinit(a);
         self.admin_ips.deinit(a);
         self.agent_ips.deinit(a);
     }
     pub fn unsupported(self: Options) bool {
-        return self.command == .agents_install or self.command == .agents_verify or self.command == .agents_status or self.command == .firewall or
-            self.ssh_op_path != null or self.station_ip != null or self.services.items.len > 0 or self.admin_ips.items.len > 0 or self.agent_ips.items.len > 0 or self.domain != null or self.tls != null or self.cloudflare_token_op != null or self.telegram_token_op != null or self.telegram_channel_id != null;
+        return self.command == .firewall or
+            self.ssh_op_path != null or self.station_ip != null or self.admin_ips.items.len > 0 or self.agent_ips.items.len > 0 or self.domain != null or self.tls != null or self.cloudflare_token_op != null or self.telegram_token_op != null or self.telegram_channel_id != null;
     }
 };
 fn eq(a: []const u8, b: []const u8) bool {
@@ -82,7 +89,7 @@ pub fn validateValue(name: []const u8, value: []const u8) !void {
     if (item.kind == .boolean) return error.UnexpectedValue;
     if (eq(name, "--host")) {
         if (!token(value, ".-:")) return error.InvalidHost;
-    } else if (eq(name, "--ssh-host")) {
+    } else if (eq(name, "--ssh-host") or eq(name, "--station")) {
         if (!token(value, "_.-:")) return error.InvalidSshHost;
     } else if (eq(name, "--user") or eq(name, "--target-user")) {
         if (!token(value, "_-")) return error.InvalidUser;
@@ -101,7 +108,9 @@ pub fn validateValue(name: []const u8, value: []const u8) !void {
     } else if (item.kind == .reference) {
         if (!reference(value)) return error.InvalidReference;
     } else if (eq(name, "--service")) {
-        if (!token(value, "_.@:-") or !std.mem.endsWith(u8, value, ".service")) return error.InvalidService;
+        try targets.validateService(value);
+    } else if (eq(name, "--metrics-target")) {
+        _ = try targets.parseOne(value);
     } else if (eq(name, "--station-ip") or eq(name, "--admin-ip") or eq(name, "--agent-ip")) {
         if (!ip(value)) return error.InvalidIP;
     } else if (eq(name, "--domain")) {
@@ -125,6 +134,14 @@ fn assign(a: std.mem.Allocator, o: *Options, name: []const u8, value: []const u8
     }
     if (eq(name, "--grafana-password-op")) {
         o.grafana_password_op = value;
+        return;
+    }
+    if (eq(name, "--station")) {
+        o.station = value;
+        return;
+    }
+    if (eq(name, "--metrics-target")) {
+        try o.metrics_targets.append(a, try targets.parseOne(value));
         return;
     }
     if (eq(name, "--user")) o.explicit_user = true;
@@ -183,10 +200,14 @@ pub fn parse(a: std.mem.Allocator, args: []const []const u8) !Options {
 }
 
 fn validateMerged(o: Options, complete: bool) !void {
+    if (spec.applicationCommand(o.command)) return;
     if (o.ssh_host) |value| try validateValue("--ssh-host", value);
     if (o.grafana_user_op) |value| try validateValue("--grafana-user-op", value);
     if (o.grafana_password_op) |value| try validateValue("--grafana-password-op", value);
     try probes.validate(o.probes);
+    try targets.validateServices(o.services.items);
+    try targets.validate(o.metrics_targets.items);
+    try targets.validateSelectionSize(o.services.items, o.metrics_targets.items);
     if (o.telegram_bot_token_op) |value| _ = try references.parseOnePassword(value);
     if (o.telegram_chat_id_op) |value| _ = try references.parseOnePassword(value);
     if (o.ssh_host != null) {
@@ -195,6 +216,10 @@ fn validateMerged(o: Options, complete: bool) !void {
         if (o.explicit_user or o.explicit_port or o.ssh_sock != null or o.identity != null or o.ssh_op_path != null) return error.ConflictingSshMode;
     }
     if (complete and !o.help and o.host.len == 0 and o.ssh_host == null) return error.HostRequired;
+    if (complete and !o.help and (o.command == .agents_install or o.command == .agents_verify or o.command == .agents_status)) {
+        if (o.station == null) return error.StationRequired;
+        if (o.command == .agents_install and o.services.items.len == 0) return error.ServiceRequired;
+    }
     const modes: u8 = @intFromBool(o.ssh_sock != null) + @as(u8, @intFromBool(o.identity != null)) + @as(u8, @intFromBool(o.ssh_op_path != null));
     if (modes > 1) return error.ConflictingAuthentication;
     if (complete and !o.help and (o.grafana_user_op != null) != (o.grafana_password_op != null)) return error.GrafanaCredentialReferencesRequired;
@@ -221,6 +246,11 @@ fn merge(o: *Options, values: config.Config) !void {
 /// parser/config path imports a resolver or spawns a process.
 pub fn loadAndMerge(a: std.mem.Allocator, io: std.Io, o: *Options) !void {
     if (o.help or o.action != .monitoring) return;
+    if (spec.applicationCommand(o.command)) {
+        if (o.application_config != null) return error.ApplicationConfigAlreadyLoaded;
+        o.application_config = try application.load(a, io, o.config_path orelse application.default_path);
+        return;
+    }
     if (o.config_path) |path_value| {
         var values = try config.load(a, io, path_value);
         errdefer values.deinit();
@@ -236,7 +266,7 @@ fn mergeText(a: std.mem.Allocator, o: *Options, contents: []const u8) !void {
 
 test "CLI hierarchy, repeated services, and rejected injection" {
     const a = std.testing.allocator;
-    var o = try parse(a, &.{ "monitoring", "agents", "install", "--host", "app01.example.com", "--service", "one.service", "--service", "two.service" });
+    var o = try parse(a, &.{ "monitoring", "agents", "install", "--host", "app01.example.com", "--station", "monitoring", "--service", "one.service", "--service", "two.service" });
     defer o.deinit(a);
     try std.testing.expectEqual(Command.agents_install, o.command);
     try std.testing.expectEqual(@as(usize, 2), o.services.items.len);
@@ -246,6 +276,33 @@ test "CLI hierarchy, repeated services, and rejected injection" {
     try std.testing.expectError(error.ConflictingAuthentication, parse(a, &.{ "monitoring", "install", "--host", "x", "--ssh-sock", "/tmp/sock", "--identity", "/tmp/key" }));
     try std.testing.expectError(error.InvalidIP, parse(a, &.{ "monitoring", "firewall", "--host", "x", "--admin-ip", "999.1.1.1" }));
     try std.testing.expectError(error.DuplicateFlag, parse(a, &.{ "monitoring", "install", "--host", "x", "--host", "y" }));
+}
+
+test "agent CLI accepts SSH aliases and validates all selections before dispatch" {
+    const a = std.testing.allocator;
+    var options = try parse(a, &.{ "monitoring", "agents", "install", "--ssh-host", "application", "--station", "monitoring", "--service", "app.service", "--metrics-target", "app=http://127.0.0.1:16000/metrics", "--metrics-target", "worker=https://10.1.2.3/metrics", "--plan" });
+    defer options.deinit(a);
+    try std.testing.expect(!options.unsupported());
+    try std.testing.expectEqualStrings("application", options.ssh_host.?);
+    try std.testing.expectEqualStrings("monitoring", options.station.?);
+    try std.testing.expectEqual(@as(usize, 2), options.metrics_targets.items.len);
+    try std.testing.expectEqualStrings("app", options.metrics_targets.items[0].name);
+    try std.testing.expectEqualStrings("http://127.0.0.1:16000/metrics", options.metrics_targets.items[0].url);
+    for ([_][]const u8{ "verify", "status" }) |command| {
+        var read_only = try parse(a, &.{ "monitoring", "agents", command, "--ssh-host", "application", "--station", "monitoring" });
+        defer read_only.deinit(a);
+        try std.testing.expect(!read_only.unsupported());
+        try std.testing.expectEqual(@as(usize, 0), read_only.services.items.len);
+        try std.testing.expectEqual(@as(usize, 0), read_only.metrics_targets.items.len);
+        try std.testing.expectError(error.StationRequired, parse(a, &.{ "monitoring", "agents", command, "--ssh-host", "application" }));
+    }
+    try std.testing.expectError(error.StationRequired, parse(a, &.{ "monitoring", "agents", "install", "--ssh-host", "application", "--service", "app.service" }));
+    try std.testing.expectError(error.ServiceRequired, parse(a, &.{ "monitoring", "agents", "install", "--ssh-host", "application", "--station", "monitoring" }));
+    try std.testing.expectError(error.DuplicateService, parse(a, &.{ "monitoring", "agents", "install", "--ssh-host", "application", "--station", "monitoring", "--service", "app.service", "--service", "app.service" }));
+    try std.testing.expectError(error.DuplicateMetricsTargetName, parse(a, &.{ "monitoring", "agents", "install", "--ssh-host", "application", "--station", "monitoring", "--service", "app.service", "--metrics-target", "app=http://127.0.0.1/a", "--metrics-target", "app=http://127.0.0.1/b" }));
+    try std.testing.expectError(error.InvalidMetricsTargetUrl, parse(a, &.{ "monitoring", "agents", "install", "--ssh-host", "application", "--station", "monitoring", "--service", "app.service", "--metrics-target", "app=http://public.example/metrics" }));
+    try std.testing.expectError(error.InvalidSshHost, parse(a, &.{ "monitoring", "agents", "install", "--ssh-host", "application", "--station", "https://monitoring.example/", "--service", "app.service" }));
+    try std.testing.expectError(error.FlagNotAllowed, parse(a, &.{ "monitoring", "install", "--ssh-host", "monitoring", "--metrics-target", "app=http://127.0.0.1/metrics" }));
 }
 
 test "local entry points and hierarchical help share command metadata" {
@@ -480,4 +537,40 @@ test "legacy Telegram arguments do not silently become the supported reference p
     try std.testing.expect(options.unsupported());
     try std.testing.expect(options.telegram_bot_token_op == null);
     try std.testing.expect(options.telegram_chat_id_op == null);
+}
+
+test "application CLI commands accept only config plan and help before local load" {
+    const a = std.testing.allocator;
+    for ([_][]const u8{ "apply", "app-verify", "app-status" }) |command| {
+        var options = try parse(a, &.{ "monitoring", command });
+        defer options.deinit(a);
+        try std.testing.expect(spec.applicationCommand(options.command));
+        try std.testing.expect(options.config_path == null);
+        try std.testing.expect(options.application_config == null);
+        for ([_][]const u8{ "--ssh-host", "--host", "--station", "--service", "--grafana-user-op" }, [_][]const u8{ "app", "app", "station", "app.service", "op://Example/item/key" }) |flag, value| try std.testing.expectError(error.FlagNotAllowed, parse(a, &.{ "monitoring", command, flag, value }));
+        var help_options = try parse(a, &.{ "monitoring", command, "--config", "/does/not/exist.toml", "--help" });
+        defer help_options.deinit(a);
+        try loadAndMerge(a, std.testing.io, &help_options);
+        try std.testing.expect(help_options.application_config == null);
+    }
+    for ([_][]const u8{ "app-verify", "app-status" }) |command| try std.testing.expectError(error.FlagNotAllowed, parse(a, &.{ "monitoring", command, "--plan" }));
+    var plan = try parse(a, &.{ "monitoring", "apply", "--plan" });
+    defer plan.deinit(a);
+    try std.testing.expect(plan.plan);
+}
+
+test "application CLI loads only its schema and missing config fails locally" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path_value = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/monitoring.toml", .{tmp.sub_path});
+    defer a.free(path_value);
+    var options = try parse(a, &.{ "monitoring", "apply", "--config", path_value, "--plan" });
+    defer options.deinit(a);
+    try std.testing.expectError(error.UnableToReadApplicationConfig, loadAndMerge(a, std.testing.io, &options));
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "monitoring.toml", .data = application.example });
+    try loadAndMerge(a, std.testing.io, &options);
+    try std.testing.expectEqualStrings("doers", options.application_config.?.application.name);
+    try std.testing.expect(options.config_values == null);
+    try std.testing.expectError(error.ApplicationConfigAlreadyLoaded, loadAndMerge(a, std.testing.io, &options));
 }

@@ -8,7 +8,7 @@ pub const Ssh = struct {
     options: Options,
     elevation: Elevation = .root,
     pub fn asRemote(self: *Ssh) remote.Remote {
-        return .{ .context = self, .execute = execute, .execute_timed = executeTimed, .execute_secret = executeSecret, .clock = .{ .context = self, .now_ms = nowMs, .sleep_ms = sleepMs } };
+        return .{ .context = self, .execute = execute, .execute_timed = executeTimed, .execute_secret = executeSecret, .read_secret = readSecret, .clock = .{ .context = self, .now_ms = nowMs, .sleep_ms = sleepMs } };
     }
     fn nowMs(ctx: *anyopaque) i64 {
         const self: *Ssh = @ptrCast(@alignCast(ctx));
@@ -32,19 +32,21 @@ pub const Ssh = struct {
             if (self.options.ssh_sock) |sock| try args.appendSlice(a, &.{ "-o", try std.fmt.allocPrint(a, "IdentityAgent={s}", .{sock}) });
             if (self.options.identity) |identity| try args.appendSlice(a, &.{ "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-i", identity });
         }
+        const agent_command = self.options.command == .agents_install or self.options.command == .agents_verify or self.options.command == .agents_status;
+        const transport_command = if (agent_command and command.len > 8192) try compactAgentCommand(a, command) else command;
         const cmd = if (self.elevation == .login_user)
-            command
+            transport_command
         else if (self.options.ssh_host != null)
             // The login UID is unknown locally in alias mode. Determine it on
             // the host before choosing the concrete root execution path. Keep
             // one command copy so bounded configuration payloads fit argv limits.
             try std.fmt.allocPrint(a, "if [ \"$(id -u)\" -eq 0 ]; then set --; else set -- sudo -n --; fi; \"$@\" {s}", .{
-                try remote.shell(a, &.{ "sh", "-c", command }),
+                try remote.shell(a, &.{ "sh", "-c", transport_command }),
             })
         else if (std.mem.eql(u8, self.options.user, "root"))
-            command
+            transport_command
         else
-            try remote.shell(a, &.{ "sudo", "-n", "--", "sh", "-c", command });
+            try remote.shell(a, &.{ "sudo", "-n", "--", "sh", "-c", transport_command });
         try args.appendSlice(a, &.{ "--", self.options.ssh_host orelse self.options.host, cmd });
         return args.toOwnedSlice(a);
     }
@@ -61,6 +63,15 @@ pub const Ssh = struct {
             if (std.mem.eql(u8, result.output.protectedBytes(), token)) return .{ .code = 0, .output = token };
         }
         return error.InvalidCredentialResponse;
+    }
+    fn readSecret(ctx: *anyopaque, command: []const u8, budget_ms: u32) !*@import("../secrets/secret.zig").Secret {
+        const self: *Ssh = @ptrCast(@alignCast(ctx));
+        const result = try @import("../secrets/process.zig").run(std.heap.page_allocator, self.io, try self.argv(command), null, 32768, budget_ms);
+        if (result.code != 0) {
+            result.deinit();
+            return error.AgentCredentialExportFailed;
+        }
+        return result.output;
     }
     fn executeTimed(ctx: *anyopaque, _: remote.Operation, command: []const u8, budget_ms: u32) !remote.Result {
         const self: *Ssh = @ptrCast(@alignCast(ctx));
@@ -80,6 +91,23 @@ pub const Ssh = struct {
         }, .output = result.stdout };
     }
 };
+
+/// Agent configuration can contain 64 service selectors/targets. Compress the
+/// already quoted non-secret command to stay below SSH/kernel argument limits.
+/// The protected stdin stream is inherited unchanged by exec (never encoded).
+fn compactAgentCommand(a: std.mem.Allocator, command: []const u8) ![]const u8 {
+    var out: std.Io.Writer.Allocating = try .initCapacity(a, 4096);
+    defer out.deinit();
+    var buffer: [std.compress.flate.max_window_len]u8 = undefined;
+    var compress: std.compress.flate.Compress = try .init(&out.writer, &buffer, .zlib, .default);
+    try compress.writer.writeAll(command);
+    try compress.finish();
+    const encoder = std.base64.standard.Encoder;
+    const encoded = try a.alloc(u8, encoder.calcSize(out.written().len));
+    defer a.free(encoded);
+    _ = encoder.encode(encoded, out.written());
+    return remote.shell(a, &.{ "python3", "-I", "-B", "-c", "import base64,os,sys,zlib; os.execl('/bin/sh','sh','-c',zlib.decompress(base64.b64decode(sys.argv[1],validate=True)).decode())", encoded });
+}
 test "SSH strict trust and identity options" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -174,4 +202,26 @@ test "monitoring SSH alias elevates by actual remote UID and preserves strict au
     try std.testing.expectEqual(@as(u8, 77), result.term.exited);
     try std.testing.expectEqualStrings("", result.stdout);
     try std.testing.expectEqualStrings("", result.stderr);
+}
+
+test "compressed agent commands retain literal arguments and protected stdin" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const value = try a.alloc(u8, 65536);
+    @memset(value, '\'');
+    const command = try remote.shell(a, &.{ "printf", "%s", value });
+    const encoded = try compactAgentCommand(a, command);
+    try std.testing.expect(encoded.len < 8192);
+    const output = try std.process.run(a, std.testing.io, .{ .argv = &.{ "sh", "-c", encoded } });
+    try std.testing.expectEqual(@as(u8, 0), output.term.exited);
+    try std.testing.expectEqualStrings("", output.stderr);
+    try std.testing.expectEqualStrings(value, output.stdout);
+    const payload = try @import("../secrets/secret.zig").Secret.init(std.testing.allocator, "PRIVATE-STDIN-FIXTURE");
+    defer payload.deinit();
+    const copy = try compactAgentCommand(a, "python3 -I -B -c 'import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())'");
+    const captured = try @import("../secrets/process.zig").run(std.testing.allocator, std.testing.io, &.{ "sh", "-c", copy }, payload, 128, 5000);
+    defer captured.deinit();
+    try std.testing.expectEqual(@as(u8, 0), captured.code);
+    try std.testing.expectEqualStrings(payload.protectedBytes(), captured.output.protectedBytes());
 }

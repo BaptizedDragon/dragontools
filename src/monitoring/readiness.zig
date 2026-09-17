@@ -5,6 +5,7 @@ const install = @import("install.zig");
 
 pub const Check = enum {
     managed_state,
+    application_ownership,
     plugin_integrity,
     service_active,
     http_ready,
@@ -19,6 +20,10 @@ pub const Check = enum {
     scrape_ready,
     probe_metrics_ready,
     rules_ready,
+    secure_endpoint,
+    host_metrics_ready,
+    log_stream_ready,
+    application_metrics_ready,
 };
 pub const active_ms = 15_000;
 pub const http_ms = 30_000;

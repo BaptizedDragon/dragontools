@@ -7,7 +7,7 @@ const vt = @import("../components/victoriatraces.zig");
 const grafana = @import("../components/grafana.zig");
 const logs_plugin = @import("../components/grafana_victorialogs_plugin.zig");
 
-pub const unavailable = "Not yet available: dashboards, Vector, vmagent, OTel Collector, application-host agents/ingestion, firewall, TLS, update monitoring and maintenance.\n";
+pub const unavailable = "Not yet available: dashboards, OTel Collector/traces agents, HostDown and systemd-service state alerts, firewall, public Grafana TLS, update monitoring and maintenance.\n";
 
 pub fn renderStation(a: std.mem.Allocator, grafana_configured: bool, telegram_configured: bool, probe_count: usize) ![]const u8 {
     const core = try renderWithCredentials(a, grafana_configured);
@@ -21,7 +21,7 @@ pub fn renderStation(a: std.mem.Allocator, grafana_configured: bool, telegram_co
         "VictoriaMetrics native scraper: fixed configuration path; one initial unit migration, then target changes use reload without restart.\n" ++
         "Probe status observes stored telemetry; probe_success=0 is valid monitoring state, not an installation failure.\n" ++
         "vmalert {s}: independent logs loopback:8880 -> VictoriaLogs and metrics loopback:8881 -> VictoriaMetrics; both notify Alertmanager.\n" ++
-        "Deploy ErrorBurst/CriticalLogEvent and ServiceProbeFailed (probe_success == 0 for 2m); no latency or host-metric rules.\n" ++
+        "Deploy ErrorBurst/CriticalLogEvent, ServiceProbeFailed (probe_success == 0 for 2m), and five host-pressure rules selecting verified Vector metrics; no latency rules.\n" ++
         "Alertmanager {s}: loopback:9093; clustering disabled; Telegram {s}.\n" ++
         "Configured Telegram references resolve locally during install only, then transfer through protected stdin to dt-alertmanager 0400 secret files.\n" ++
         "Verification never sends test alerts; notify-test is a separate explicit command.\n" ++
@@ -62,9 +62,10 @@ pub fn renderWithCredentials(a: std.mem.Allocator, configured: bool) ![]const u8
         "  {s}\n" ++
         "  {s}\n" ++
         "  Metrics/Traces query-engine and browser UI checks require manual verification through the tunnel\n\n" ++
-        "Access: SSH port forwarding only; public HTTPS, TLS and firewall management are unavailable.\n\n" ++
+        "Grafana access: SSH port forwarding only; public Grafana HTTPS/TLS and firewall management are unavailable.\n\n" ++
         "Safe rerun: inspect actual state, resume pending activation, and verify before finalization. Healthy unchanged services are not restarted; unchanged valid binaries are not downloaded. No controller state database.\n" ++
-        "Host and systemd-service metric rules await verified agent contracts.\n" ++
+        "Host metric rules use verified Vector contracts; systemd-service state alerts remain deferred.\n" ++
+        "Application-host logs/metrics use monitoring agents with authenticated mTLS ingestion on station :9443; station install alone does not install agents.\n" ++
         unavailable ++
         "No remote operations performed.\n", .{
         vm.version,

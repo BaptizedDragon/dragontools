@@ -2,6 +2,40 @@
 
 ## 0.1.0-dev — unreleased
 
+- Add strict application-repository monitoring.toml v1 and primary
+  `monitoring apply`, with read-only app-verify/app-status and a local plan.
+  Explicit app/environment identities, selected service signals, private metrics
+  targets, station HTTP probes and bounded log/probe alerts share CLI validation.
+- Preserve independent application namespaces and exact generated-file ownership;
+  merge shared-host agent signals without discarding other apps. Trusted identity
+  overrides log/scrape fields. Shared host rules retain application/environment/host.
+  App rules/probes use fixed native includes and independent reload/restart intent.
+- Add illustrative Doers and central station examples, dashboard ownership policy,
+  and the two-host application integration checklist. Traces and custom metrics
+  alerts fail explicitly; manual rules/assets and station secrets are preserved.
+- Add tag-triggered four-platform standalone release archives and SHA256SUMS,
+  gated by Linux/macOS tests. CI also packages all four cross-build targets.
+  Release-binary users need no Zig installation; no release is published by this change.
+
+- Implement monitored-host `agents install/verify/status` with required station
+  OpenSSH aliases, selected journal services and bounded named private HTTP(S)
+  application targets. Shared parsing/help/completion/wizard validate before SSH.
+- Pin Vector 0.58.0 and optional vmagent v1.152.0 for Linux amd64/arm64 with reviewed
+  archive/extracted-binary hashes, dedicated accounts and independent safe reruns.
+  Observe the Vector host metric contract in an isolated Linux fixture and deploy
+  CPUHigh, MemoryPressure, DiskWarning, DiskCritical and InodesCritical accordingly.
+- Add registered per-host mTLS ingestion on station TCP 9443, fixed write routes,
+  protected service-owned client credentials and loopback-only raw backends.
+  Credentials and registration are unchanged on equal reruns; no firewall is changed.
+- Bound Vector disk buffers, vmagent queue and effective journald retention while
+  preserving stricter administrator limits. Verify actual recent station signals
+  with bounded retries; quiet selected streams use distinct info-level metadata,
+  never synthetic application errors. A timeout fails and preserves restart intent.
+- Document the logs/metrics availability and trust boundary, certificate-rotation
+  limitation, source-provenance pins and the still-unrun two-host Ubuntu/systemd
+  checklist. OTel/traces agents, HostDown/service-state alerts and dashboards remain
+  deferred; the isolated metric fixture is not disposable-host integration.
+
 - Set `-group.maxStartDelay=1s` in both vmalert units. The pinned v1.152.0
   `Group.delayBeforeStart` calculation panics with a zero delay due to division by
   zero. Unit updates retain independent restart intent and unchanged reruns are

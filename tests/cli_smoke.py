@@ -27,10 +27,10 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
                DRAGONTOOLS_PROVIDER_MARKER=str(provider_marker), NO_COLOR="1", TERM="dumb")
     checked = 0
 
-    def local_run(args, code=0, expected=None):
+    def local_run(args, code=0, expected=None, cwd=None):
         """Pipe stdin explicitly so no-argument/wizard checks cannot read the terminal."""
         global checked
-        result = subprocess.run([str(binary), *args], env=env, input="",
+        result = subprocess.run([str(binary), *args], env=env, input="", cwd=cwd,
                                 capture_output=True, text=True, timeout=15)
         output = result.stdout + result.stderr
         assert result.returncode == code, (args, result.returncode, output)
@@ -66,6 +66,44 @@ url = "HTTPS://EXAMPLE.COM:443/healthz"
 name = "orders"
 url = "https://orders.example.com/healthz"
 ''')
+    # Application repository defaults are one local file, never station config or
+    # secret resolution. Plans and invalid configs must never spawn SSH.
+    app_repository = directory / "application-repository"
+    app_repository.mkdir()
+    for command in ("apply", "app-verify", "app-status"):
+        local_run(["monitoring", command], 1, "UnableToReadApplicationConfig", cwd=app_repository)
+        local_run(["monitoring", command, "--config", str(directory / "missing.toml")],
+                  1, "UnableToReadApplicationConfig")
+        local_run(["monitoring", command, "--config", str(directory / "missing.toml"), "--help"],
+                  expected="./monitoring.toml")
+        for flag, value in (("--ssh-host", "app"), ("--station", "monitoring"),
+                            ("--service", "app.service"), ("--grafana-user-op", "op://v/i/f")):
+            local_run(["monitoring", command, flag, value], 1, "FlagNotAllowed")
+    for command in ("app-verify", "app-status"):
+        local_run(["monitoring", command, "--plan"], 1, "FlagNotAllowed")
+    app_config = app_repository / "monitoring.toml"
+    example_app = Path("examples/doers-monitoring.toml").read_text()
+    app_config.write_text(example_app)
+    app_plan = "Application monitoring plan (local; SSH not attempted)."
+    implicit_plan = local_run(["monitoring", "apply", "--plan"], expected=app_plan,
+                              cwd=app_repository).stdout
+    explicit_plan = local_run(["monitoring", "apply", "--config", str(app_config), "--plan"],
+                              expected=app_plan).stdout
+    assert implicit_plan == explicit_plan
+    for item in ("doers", "production", "softwarelanding", "monitoring", "Vector", "vmagent",
+                 "HighErrorRate", "web", "/etc/dragontools/apps/doers/"):
+        assert item in implicit_plan, (item, implicit_plan)
+    checked += 1
+    for name, suffix, failure in (
+        ("app-secret", "\n[telegram]\nbot_token='REDACTION-SENTINEL'\n", "UnknownApplicationConfigKey"),
+        ("app-duplicate", "\n[application]\n", "DuplicateApplicationConfigKey"),
+        ("app-traces", "\n[[service]]\nname='worker'\nsystemd='worker.service'\n[service.traces]\nenabled=true\n", "ApplicationTracesUnsupported"),
+        ("app-custom-metrics", "\n[[alert]]\nname='Custom'\nsource='metrics'\nseverity='warning'\n", "ApplicationMetricsAlertsUnsupported"),
+        ("app-public-metrics", "\n[[service]]\nname='worker'\nsystemd='worker.service'\n[service.metrics]\nurl='https://public.example/metrics'\n", "InvalidMetricsTargetUrl"),
+    ):
+        invalid = directory / f"{name}.toml"
+        invalid.write_text(example_app + suffix)
+        local_run(["monitoring", "apply", "--config", str(invalid), "--plan"], 1, failure)
     configured_credentials = "administrator credentials: configured via secret references"
     invalid_configs = []
     for name, contents, failure in (
@@ -88,6 +126,10 @@ url = "https://orders.example.com/healthz"
     partial_config = directory / "partial.toml"
     partial_config.write_text('version = 1\n[connection]\nssh_host = "monitoring"\n'
                               '[grafana]\nusername = { op = "op://Example/Grafana/username" }\n')
+    large_agent_selection = ["monitoring", "agents", "install", "--ssh-host", "application", "--station", "monitoring", "--service", "app.service", "--plan"]
+    for index in range(64):
+        large_agent_selection += ["--metrics-target", f"app{index}=http://127.0.0.1/" + "a" * 2000]
+    local_run(large_agent_selection, 1, "AgentSelectionsTooLarge")
     plan_output = ""
     host_plans = {}
     cases = [
@@ -141,9 +183,16 @@ url = "https://orders.example.com/healthz"
         (["monitoring", "status", "--config", str(config), "--grafana-user-op", "op://Example/Grafana/username"], 1, "FlagNotAllowed"),
         (["host", "install-oh-my-zsh", "--config", str(config)], 1, "FlagNotAllowed"),
         (["monitoring", "agents", "install", "--host", "example.com",
-          "--service", "one.service", "--service", "two.service"], 1, "NotImplemented"),
-        (["monitoring", "agents", "verify", "--host", "example.com"], 1, "NotImplemented"),
-        (["monitoring", "agents", "status", "--host", "example.com"], 1, "NotImplemented"),
+          "--service", "one.service", "--service", "two.service"], 1, "StationRequired"),
+        (["monitoring", "agents", "verify", "--host", "example.com"], 1, "StationRequired"),
+        (["monitoring", "agents", "status", "--host", "example.com"], 1, "StationRequired"),
+        (["monitoring", "agents", "install", "--ssh-host", "application", "--station", "monitoring"], 1, "ServiceRequired"),
+        (["monitoring", "agents", "install", "--ssh-host", "application", "--station", "https://monitoring.example/", "--service", "app.service"], 1, "InvalidSshHost"),
+        (["monitoring", "agents", "install", "--ssh-host", "application", "--station", "monitoring", "--service", "app.service", "--service", "app.service"], 1, "DuplicateService"),
+        (["monitoring", "agents", "install", "--ssh-host", "application", "--station", "monitoring", "--service", "REDACTION-SENTINEL;id.service"], 1, "InvalidService"),
+        (["monitoring", "agents", "install", "--ssh-host", "application", "--station", "monitoring", "--service", "app.service", "--metrics-target", "app=http://REDACTION-SENTINEL/metrics"], 1, "InvalidMetricsTargetUrl"),
+        (["monitoring", "agents", "install", "--ssh-host", "application", "--station", "monitoring", "--service", "app.service", "--metrics-target", "app=http://127.0.0.1/a", "--metrics-target", "app=http://127.0.0.1/b"], 1, "DuplicateMetricsTargetName"),
+        (["monitoring", "agents", "install", "--ssh-host", "application", "--station", "monitoring", "--service", "app.service", "--metrics-target", "app=http://127.0.0.1:16000/metrics", "--plan"], 0, "Agent installation plan"),
         (["monitoring", "firewall", "--host", "example.com"], 1, "NotImplemented"),
         (["monitoring", "notify-test", "--ssh-host", "monitoring"], 1, "TelegramConfigurationRequired"),
         (["monitoring", "install", "--host", "example.com",
@@ -156,7 +205,7 @@ url = "https://orders.example.com/healthz"
         (["monitoring", "verify", "--host", "example.com", "--tls", "manual"], 1, "FlagNotAllowed"),
         (["monitoring", "install", "--host", "example.com", "--ssh-op-path", "REDACTION-SENTINEL"], 1, "InvalidReference"),
         (["monitoring", "agents", "install", "--host", "example.com",
-          "--service", "one.service", "--plan"], 1, "NotImplemented"),
+          "--station", "monitoring", "--service", "one.service", "--plan"], 0, "Agent installation plan"),
         (["monitoring", "firewall", "--host", "example.com", "--plan"], 1, "NotImplemented"),
         (["monitoring", "install", "--host", "example.com", "--tls", "manual", "--plan"], 1, "NotImplemented"),
         (["monitoring", "install", "--host", "example.com", "--agent-ip", "192.0.2.10", "--plan"], 1, "NotImplemented"),
@@ -200,8 +249,8 @@ url = "https://orders.example.com/healthz"
     assert set(host_plans) == {(False, False), (True, False), (False, True), (True, True)}
     checked += 1
 
-    # Storage/Grafana and four station services are implemented; agents remain
-    # explicitly unavailable and plans perform no secret or network operations.
+    # Storage/Grafana and four station services are implemented. Plans perform
+    # no secret or network operations; agents are a separate implemented workflow.
     vm_heading = "VictoriaMetrics: loopback:8428"
     vl_heading = "VictoriaLogs: loopback:9428"
     vt_heading = "VictoriaTraces: loopback:10428"
@@ -231,20 +280,21 @@ url = "https://orders.example.com/healthz"
     configured_plan = local_run(config_args).stdout
     assert "verify Logs plugin health and a bounded read-only LogsQL query through Grafana" in configured_plan
     assert "Logs plugin query requires administrator references" not in configured_plan
-    for component in ("Vector", "vmagent", "OTel", "agents", "firewall", "TLS"):
+    for component in ("OTel", "firewall", "TLS"):
         assert component in unavailable, (component, unavailable)
     for component in ("vmalert", "Alertmanager", "Telegram"):
         assert component not in unavailable, (component, unavailable)
     for text in ("eight services", "loopback:9115", "loopback:9093", "logs loopback:8880", "metrics loopback:8881",
                  "ServiceProbeFailed", "probe_success == 0 for 2m", "reload without restart", "notify-test is a separate explicit command"):
         assert text in plan_output, (text, plan_output)
-    assert "Host and systemd-service metric rules await verified agent contracts." in plan_output
+    assert "Host metric rules use verified Vector contracts; systemd-service state alerts remain deferred." in plan_output
     assert "Healthy unchanged services are not restarted" in plan_output, plan_output
     checked += 1
 
     help_paths = [
         ["host"], ["host", "install-oh-my-zsh"],
-        ["monitoring"], ["monitoring", "install"], ["monitoring", "verify"],
+        ["monitoring"], ["monitoring", "apply"], ["monitoring", "app-verify"], ["monitoring", "app-status"],
+        ["monitoring", "install"], ["monitoring", "verify"],
         ["monitoring", "status"], ["monitoring", "notify-test"], ["monitoring", "agents"],
         ["monitoring", "agents", "install"], ["monitoring", "agents", "verify"],
         ["monitoring", "agents", "status"], ["monitoring", "firewall"],
@@ -254,6 +304,13 @@ url = "https://orders.example.com/healthz"
     for path in help_paths:
         result = local_run([*path, "--help"], expected="Usage:")
         help_output[tuple(path)] = result.stdout
+    for command in ("apply", "app-verify", "app-status"):
+        app_help = help_output[("monitoring", command)]
+        assert "./monitoring.toml" in app_help and "--config PATH" in app_help
+        assert "  --ssh-host" not in app_help and "  --host" not in app_help
+        assert "  --grafana-user-op" not in app_help
+        assert ("  --plan" in app_help) == (command == "apply")
+    checked += 3
     install_help = help_output[("monitoring", "install")]
     assert "--tls" in install_help and "--host" in install_help and "--ssh-host" in install_help
     assert all(flag in install_help for flag in ("--config", "--grafana-user-op", "--grafana-password-op"))
@@ -276,7 +333,8 @@ url = "https://orders.example.com/healthz"
     assert "--config" in status_help and "  --grafana-user-op" not in status_help
     assert "  --tls" not in verify_help and "  --plan" not in verify_help, verify_help
     agents_help = help_output[("monitoring", "agents", "install")]
-    assert "--service" in agents_help and "--station-ip" in agents_help
+    assert all(flag in agents_help for flag in ("--service", "--station", "--ssh-host", "--metrics-target"))
+    assert "Verify/status may omit selections" in agents_help
     assert "--tls" not in agents_help, agents_help
     firewall_help = help_output[("monitoring", "firewall")]
     assert "--admin-ip" in firewall_help and "--agent-ip" in firewall_help
@@ -331,6 +389,12 @@ url = "https://orders.example.com/healthz"
         assert {"install", "verify", "status", "notify-test", "agents", "firewall"} <= bash_complete(
             ["dragontool", "monitoring", ""])
         assert {"install", "verify", "status"} <= bash_complete(["dragontool", "monitoring", "agents", ""])
+        assert {"--ssh-host", "--station", "--service", "--metrics-target"} <= bash_complete(["dragontool", "monitoring", "agents", "install", "--"])
+        assert {"apply", "app-verify", "app-status"} <= bash_complete(["dragontool", "monitoring", ""])
+        assert bash_complete(["dragontool", "monitoring", "apply", "--"]) == {"--config", "--plan", "--help"}
+        assert bash_complete(["dragontool", "monitoring", "app-verify", "--"]) == {"--config", "--help"}
+        assert str(app_config) in bash_complete(["dragontool", "monitoring", "apply", "--config", str(app_repository / "monitoring")])
+        checked += 4
         install_flags = bash_complete(["dragontool", "monitoring", "install", "--"])
         assert {"--host", "--ssh-host", "--tls", "--plan", "--identity"} <= install_flags
         assert {"--config", "--grafana-user-op", "--grafana-password-op"} <= install_flags
@@ -349,7 +413,7 @@ url = "https://orders.example.com/healthz"
         assert str(identity) in bash_complete(["dragontool", "monitoring", "install", "--identity", str(directory / "identity-")])
         assert str(config) in bash_complete(["dragontool", "monitoring", "install", "--config", str(directory / "monitoring")])
         assert "--grafana-user-op" not in bash_complete(["dragontool", "monitoring", "status", "--"])
-        checked += 17
+        checked += 18
     else:
         print("SKIP: Bash completion behavior (shell not installed)")
 
@@ -378,13 +442,19 @@ url = "https://orders.example.com/healthz"
             assert "--ssh-host" in zsh_candidates(["dragontool", "host", "install-oh-my-zsh", flag, "--"])
         assert zsh_candidates(["dragontool", "host", "install-oh-my-zsh", "--identity", ""]) == {"NATIVE_PATH_COMPLETION"}
         assert {"install", "verify", "status"} <= zsh_candidates(["dragontool", "monitoring", "agents", ""])
+        assert {"--ssh-host", "--station", "--service", "--metrics-target"} <= zsh_candidates(["dragontool", "monitoring", "agents", "install", "--"])
         assert zsh_candidates(["dragontool", "monitoring", "install", "--tls", ""]) == {"manual", "cloudflare"}
+        assert {"apply", "app-verify", "app-status"} <= zsh_candidates(["dragontool", "monitoring", ""])
+        assert zsh_candidates(["dragontool", "monitoring", "apply", "--"]) == {"--config", "--plan", "--help"}
+        assert zsh_candidates(["dragontool", "monitoring", "app-status", "--"]) == {"--config", "--help"}
+        assert zsh_candidates(["dragontool", "monitoring", "apply", "--config", ""]) == {"NATIVE_PATH_COMPLETION"}
+        checked += 4
         verify_flags = zsh_candidates(["dragontool", "monitoring", "verify", "--"])
         assert {"--host", "--ssh-host"} <= verify_flags and "--tls" not in verify_flags and "--plan" not in verify_flags
         assert {"--config", "--grafana-user-op", "--grafana-password-op"} <= verify_flags
         assert zsh_candidates(["dragontool", "monitoring", "install", "--identity", ""]) == {"NATIVE_PATH_COMPLETION"}
         assert zsh_candidates(["dragontool", "monitoring", "verify", "--config", ""]) == {"NATIVE_PATH_COMPLETION"}
-        checked += 11
+        checked += 12
     else:
         print("SKIP: Zsh completion behavior (shell not installed)")
 
@@ -410,7 +480,13 @@ url = "https://orders.example.com/healthz"
         assert not fish_complete("dragontool host install-oh-my-zsh --ssh-host ")
         assert not fish_complete("dragontool host install-oh-my-zsh --target-user ")
         assert {"install", "verify", "status"} <= fish_complete("dragontool monitoring agents ")
+        assert {"--ssh-host", "--station", "--service", "--metrics-target"} <= fish_complete("dragontool monitoring agents install --")
         assert fish_complete("dragontool monitoring install --tls ") == {"manual", "cloudflare"}
+        assert {"apply", "app-verify", "app-status"} <= fish_complete("dragontool monitoring ")
+        assert fish_complete("dragontool monitoring apply --") == {"--config", "--plan", "--help"}
+        assert fish_complete("dragontool monitoring app-verify --") == {"--config", "--help"}
+        assert str(app_config) in fish_complete(f"dragontool monitoring apply --config {app_repository}/monitoring")
+        checked += 4
         verify_flags = fish_complete("dragontool monitoring verify --")
         assert {"--host", "--ssh-host"} <= verify_flags and "--tls" not in verify_flags and "--plan" not in verify_flags
         assert {"--config", "--grafana-user-op", "--grafana-password-op"} <= verify_flags
@@ -423,7 +499,7 @@ url = "https://orders.example.com/healthz"
         assert "--tls" in fish_complete("dragontool monitoring install --host 'agents' --")
         assert "--grafana-user-op" not in fish_complete("dragontool monitoring status --")
         assert not fish_complete("dragontool monitoring install --grafana-user-op ")
-        checked += 17
+        checked += 18
     else:
         print("SKIP: Fish completion behavior (shell not installed)")
 

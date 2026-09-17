@@ -1,5 +1,14 @@
 # Security policy
 
+Application repositories contain only the strict public `monitoring.toml`
+contract. Station credentials/references belong in separately managed station
+configuration. `monitoring apply` validates before SSH and binds app namespaces
+to explicit application/environment/machine identity. Exact manifest ownership
+protects generated files; edits, unmanaged files and rebinding fail rather than
+being adopted. Other apps, manual rules and Grafana assets are preserved.
+The controller and host roots remain trusted. Future dashboards require owned
+deterministic UIDs/app folders; no arbitrary configuration upload is supported.
+
 Do not report credential leaks or exploitable vulnerabilities in public issues.
 Use the repository's **Security → Advisories → Report a vulnerability** private
 reporting feature if enabled. If unavailable, ask the maintainer for a private
@@ -22,8 +31,11 @@ to OpenSSH, so local SSH configuration and its configured proxy commands are als
 trusted. Strict host-key checks remain enabled in both modes. SSH private keys
 remain with the agent or OpenSSH identity file; 1Password itself is optional.
 
-Future telemetry authorization is source-IP/network based. Monitored hosts are
-trusted infrastructure; a compromised allowlisted host can submit telemetry.
+Agent telemetry requires per-host registered mTLS certificates on the separate
+station ingestion listener :9443. Monitored hosts are trusted infrastructure; a
+compromised registered host can submit arbitrary metric content for its own
+authenticated identity; the ingestion route enforces the host label. This does not provide
+hard multi-tenant isolation.
 Grafana still needs user authentication. A provider firewall is recommended outside
 the monitoring-only host rules. Raw administrative APIs must not be exposed to agent
 networks. Current VictoriaMetrics, VictoriaLogs, and VictoriaTraces bind loopback
@@ -31,8 +43,9 @@ only on 8428, 9428, and 10428; authenticated Grafana binds 127.0.0.1:3000.
 Blackbox exporter, Alertmanager, vmalert-logs and vmalert-metrics bind loopback on
 9115, 9093, 8880 and 8881. Alertmanager clustering is disabled, including its
 normally separate cluster listener. These administrative and probe APIs are
-reachable by target-local users and explicitly established SSH tunnels. No
-firewall or TLS protection is claimed beyond this boundary.
+reachable by target-local users and explicitly established SSH tunnels. The agent ingress listener requires TLS 1.2+ and registered clients, permits only
+fixed write routes plus authenticated health, and keeps raw backends private.
+Operators permit TCP 9443 from monitored hosts; DragonTools changes no firewall.
 
 
 Without configured administrator secret references, a fresh Grafana database uses
@@ -42,7 +55,8 @@ Explicit references opt in to reconciliation and read-only authenticated identit
 verification. Authentication is checked before mutation so correct credentials do
 not trigger a reset or restart. Anonymous access, auth proxy and user signup remain
 disabled. Target-local users can reach loopback and the target OS/administrators
-remain trusted. No firewall ports, TLS or ingestion is added.
+remain trusted. Grafana setup adds no firewall ports, public TLS or ingestion;
+agent mTLS is a separate workflow.
 Grafana verification reads non-secret datasource fields from SQLite and queries local
 backends as its service account. Configured credentials additionally check the
 administrator identity and the official Logs plugin health/query path through
@@ -62,6 +76,18 @@ Grafana restart intent through failed verification. No plugin TCP listener or
 public backend access is added on supported Linux targets. The checksum and
 signature trust the reviewed publisher; this is not a third-party-code security
 audit. See [the exact pins and source review](design.md#official-victorialogs-datasource-plugin).
+
+
+Agent CA issuance material stays root-private on the station. Client bundles are
+transferred through dedicated protected SSH output/stdin, held in opaque wiped
+controller memory and installed as service-owned mode-0400 files. They never enter
+ordinary file writers, argv or progress/errors. Equal credentials and registration
+remain untouched; invalid/expired credentials fail closed. Automatic rotation is
+not implemented. Logs enforce registered service identities and overwrite host
+identity; metrics are not a fully validated multi-tenant content boundary. Vector
+has access to the journal group but its generated configuration selects only named
+units; application/agent root remains trusted. See the agent design for bounded
+buffering, journal retention and explicit data-loss limits during outages.
 
 ## Secrets and privileges
 

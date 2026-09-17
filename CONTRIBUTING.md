@@ -7,6 +7,7 @@ zig fmt build.zig src
 zig build
 zig build test --summary all
 python3 tests/cli_smoke.py
+python3 -I -B tests/release_test.py
 ./zig-out/bin/dragontool --help
 ./zig-out/bin/dragontool monitoring install --host example.com --plan
 ./zig-out/bin/dragontool host install-oh-my-zsh --ssh-host monitoring --plan
@@ -54,6 +55,20 @@ Cross-build the four controller combinations with `zig build -Dtarget=...`:
 runs native tests on macOS/Linux. Integration requires separately supplied disposable
 VM infrastructure and is not silently skipped inside a claimed successful VM test.
 
+CI packages the same four targets. `.github/workflows/release.yml` runs native
+Linux/macOS tests before building tagged release archives and `SHA256SUMS`.
+`tools/package_release.py` creates deterministic tar metadata and rejects incomplete
+archive sets; only the publish job receives repository write permission. A tag
+must already exist (`gh release create --verify-tag`); existing releases are not
+silently overwritten. Users of release binaries need OpenSSH, not a runtime Zig
+installation. Publishing is separate from local packaging validation.
+
+Application tests must cover missing/invalid config before SSH, per-app ownership,
+shared-host merge, rule removal, fresh scoped signal checks and unchanged reruns.
+Retain empty-stderr assertions and stdin-draining pipeline fixtures on both OSes.
+The [two-host application gate](tests/integration/README.md#application-contract-two-host-gate)
+includes real journal collection, failed-target alerting and process stability.
+
 ## Change review
 
 Keep security changes small. Record upstream artifact/flag sources, verify archive
@@ -61,7 +76,7 @@ and executable digests for both architectures, test negative paths, and update t
 availability matrix. Never put actual host addresses, private keys, tokens or
 credential-bearing logs in fixtures. Do not enable shell tracing around secrets.
 
-Future agent work must include journal bounds and remote signal arrival, not only
+Agent changes must preserve journal bounds and remote signal arrival, not only
 successful service starts. Update checks must preserve unknown/failed states rather
 than treating unavailable metadata as up-to-date. No automatic component upgrades
 or reboots. See AGENTS.md for coding rules and SECURITY.md for private reporting.

@@ -7,7 +7,7 @@ const install = @import("install.zig");
 const readiness = @import("readiness.zig");
 const verify = @import("verify.zig");
 const probes = @import("probes.zig");
-const read_helper = @embedFile("scrape.py");
+const read_helper = @embedFile("apps/station_model.py") ++ "\n" ++ @embedFile("scrape.py");
 const mutate_helper = read_helper ++ "\n" ++ @embedFile("scrape_mutate.py") ++ "\nsys.exit(mutate_main())\n";
 const reader = read_helper ++ "\nsys.exit(read_main())\n";
 const launcher = "import base64,sys,zlib; source=base64.b64decode(sys.argv.pop(1),validate=True); exec(zlib.decompress(source))";

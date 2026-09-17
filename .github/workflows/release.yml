@@ -1,0 +1,66 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - run: zig fmt --check build.zig src
+      - run: zig build
+      - run: zig build test --summary all
+      - run: python3 tests/cli_smoke.py
+      - run: python3 -I -B tests/release_test.py
+  build:
+    needs: test
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        target: [aarch64-macos, x86_64-macos, aarch64-linux, x86_64-linux]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
+      - name: Package standalone binary
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: python3 tools/package_release.py package --version "$RELEASE_TAG" --target "$RELEASE_TARGET" --binary zig-out/bin/dragontool --output dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Verify complete archive set and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 tools/package_release.py checksums --version "$RELEASE_TAG" --output dist
+          gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG" --generate-notes dist/*.tar.gz dist/SHA256SUMS

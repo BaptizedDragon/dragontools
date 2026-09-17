@@ -222,6 +222,16 @@ class PublicationTests(unittest.TestCase):
         self.n["subprocess"] = types.SimpleNamespace(run=validate, DEVNULL=-3)
         self.config = "# Managed by DragonTools\nglobal:\n  scrape_interval: 30s\nscrape_configs: []\n"
 
+    def test_unmanaged_app_include_refused_before_scrape_mutation(self):
+        def conflict():
+            raise ValueError('Unmanaged application input')
+        self.n['app_all'] = conflict
+        with self.assertRaises(ValueError):
+            self.n['prepare_config'](self.config, 'pin')
+        self.assertFalse(Path(self.n['CONFIG_DIR']).exists())
+        self.assertFalse(Path(self.n['PENDING']).exists())
+        self.assertEqual(self.validations, [])
+
     def test_first_install_reload_finalization_then_noop(self):
         self.assertTrue(self.n["prepare_config"](self.config, "pin"))
         self.assertTrue(Path(self.n["PENDING"]).exists())

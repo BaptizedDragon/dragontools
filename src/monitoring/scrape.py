@@ -161,12 +161,28 @@ def definitions(probes):
     return expected
 
 
+def application_definitions():
+    result = {}
+    for manifest in app_all() if "app_all" in globals() else []:
+        config = manifest["config"]
+        for probe in config["probes"]:
+            job = "dragontools-app-" + config["application"]
+            result[job + "/" + probe["name"]] = {"job": job, "instance": probe["name"], "probe": probe["name"], "target": probe["url"],
+                "managed_by": "dragontools", "application": config["application"], "environment": config["environment"]}
+    return result
+
+
+def target_key(labels):
+    return labels.get("probe") if labels.get("job") == JOB else str(labels.get("job")) + "/" + str(labels.get("probe"))
+
+
 def targets_loaded(expected, require_scraped):
+    expected = dict(expected, **application_definitions())
     # Read every active target, so an additional unexpected job cannot be hidden
     # by a scrapePool filter. The separate self-scraper is not a target here.
     data = json_response("/api/v1/targets?state=active")
     targets = data.get("activeTargets")
-    if not isinstance(targets, list) or len(targets) > 64:
+    if not isinstance(targets, list) or len(targets) > 8256:
         raise ValueError("Invalid scrape target response")
     if len(targets) != len(expected):
         raise NotReady()
@@ -176,11 +192,11 @@ def targets_loaded(expected, require_scraped):
         if not isinstance(target, dict) or not isinstance(target.get("labels"), dict):
             raise ValueError("Invalid scrape target")
         labels = target["labels"]
-        name = labels.get("probe")
+        name = target_key(labels)
         if not isinstance(name, str) or name not in expected or name in seen or labels != expected[name]:
             raise NotReady()
         seen.add(name)
-        if target.get("scrapePool") != JOB or not isinstance(target.get("scrapeUrl"), str):
+        if target.get("scrapePool") != labels["job"] or not isinstance(target.get("scrapeUrl"), str):
             raise NotReady()
         url = urllib.parse.urlsplit(target["scrapeUrl"])
         if url.scheme != "http" or url.netloc != "127.0.0.1:9115" or url.path != "/probe" or url.fragment:
@@ -216,16 +232,35 @@ def loaded_policy(expected):
     config = data.get("yaml")
     if not isinstance(config, str):
         raise ValueError("Invalid loaded scrape configuration")
-    if not expected:
+    applications = application_definitions()
+    jobs = {labels["job"] for labels in applications.values()}
+    if expected:
+        jobs.add(JOB)
+    if not jobs:
         if config != LOADED_GLOBAL:
             raise NotReady()
         return
-    if not config.startswith(LOADED_POLICY):
+    prefix = LOADED_GLOBAL + "scrape_configs:\n"
+    if not config.startswith(prefix):
         raise NotReady()
-    static = config[len(LOADED_POLICY):].splitlines()
-    # Additional jobs, global rules, discovery settings or trailing job options
-    # cannot hide in the target block. Every actual target is checked separately.
-    if not static or any(not (line.startswith("  - targets:") or line.startswith("    ")) for line in static):
+    blocks = re.split(r"(?m)(?=^- job_name: )", config[len(prefix):])
+    blocks = [block for block in blocks if block]
+    seen = set()
+    for block in blocks:
+        first = block.splitlines()[0]
+        job = first.removeprefix("- job_name: ")
+        if job not in jobs or job in seen:
+            raise NotReady()
+        seen.add(job)
+        policy = LOADED_POLICY[len(prefix):].replace("job_name: " + JOB, "job_name: " + job)
+        if job != JOB:
+            policy = policy.replace("    - phase\n", "    - phase\n    - managed_by\n    - application\n    - environment\n")
+        if not block.startswith(policy):
+            raise NotReady()
+        static = block[len(policy):].splitlines()
+        if not static or any(not (line.startswith("  - targets:") or line.startswith("    ")) for line in static):
+            raise NotReady()
+    if seen != jobs:
         raise NotReady()
 
 
@@ -257,7 +292,7 @@ def sample_map(rows, expected, metric="probe_success"):
         metric_name = labels.pop("__name__", metric)
         if metric_name != metric:
             raise ValueError("Unexpected stored probe metric")
-        name = labels.get("probe")
+        name = target_key(labels)
         if not isinstance(name, str):
             raise ValueError("Missing stored probe identity")
         if name not in expected or labels != expected[name]:
@@ -279,13 +314,15 @@ def sample_map(rows, expected, metric="probe_success"):
 def stored_states(expected, check_up=False):
     if not expected:
         return {}
-    selector = 'probe_success{job="dragontools-blackbox"}[90s]'
+    jobs = sorted({labels["job"] for labels in expected.values()})
+    job_filter = 'job=~' + json.dumps('|'.join(re.escape(job) for job in jobs))
+    selector = 'probe_success{' + job_filter + '}[90s]'
     values = sample_map(query("last_over_time(" + selector + ")"), expected)
     stamps = sample_map(query("timestamp(" + selector + ")"), expected)
     up = {}
     up_stamps = {}
     if check_up:
-        up_selector = 'up{job="dragontools-blackbox"}[90s]'
+        up_selector = 'up{' + job_filter + '}[90s]'
         up = sample_map(query("last_over_time(" + up_selector + ")"), expected, "up")
         up_stamps = sample_map(query("timestamp(" + up_selector + ")"), expected, "up")
     now = time.time()

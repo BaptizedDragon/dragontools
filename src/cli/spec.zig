@@ -1,8 +1,8 @@
 //! One small catalog shared by the strict parser and local UX frontends.
 const std = @import("std");
-pub const Command = enum { install, verify, status, notify_test, agents_install, agents_verify, agents_status, firewall, install_oh_my_zsh };
+pub const Command = enum { app_apply, app_verify, app_status, install, verify, status, notify_test, agents_install, agents_verify, agents_status, firewall, install_oh_my_zsh };
 pub const Shell = enum { bash, zsh, fish };
-pub const Node = enum { root, monitoring, install, verify, status, notify_test, agents, agents_install, agents_verify, agents_status, firewall, host, install_oh_my_zsh, completion, completion_bash, completion_zsh, completion_fish, wizard };
+pub const Node = enum { root, monitoring, app_apply, app_verify, app_status, install, verify, status, notify_test, agents, agents_install, agents_verify, agents_status, firewall, host, install_oh_my_zsh, completion, completion_bash, completion_zsh, completion_fish, wizard };
 pub const CommandSpec = struct {
     node: Node,
     parent: ?Node,
@@ -13,14 +13,17 @@ pub const CommandSpec = struct {
 pub const commands = [_]CommandSpec{
     .{ .node = .root, .parent = null, .name = "dragontool", .description = "Opinionated monitoring and small host utilities over SSH" },
     .{ .node = .monitoring, .parent = .root, .name = "monitoring", .description = "Install, verify and inspect monitoring" },
+    .{ .node = .app_apply, .parent = .monitoring, .name = "apply", .description = "Apply application monitoring from ./monitoring.toml", .command = .app_apply },
+    .{ .node = .app_verify, .parent = .monitoring, .name = "app-verify", .description = "Verify application agents, signals, probes and alerts read-only", .command = .app_verify },
+    .{ .node = .app_status, .parent = .monitoring, .name = "app-status", .description = "Show application monitoring state", .command = .app_status },
     .{ .node = .install, .parent = .monitoring, .name = "install", .description = "Install the eight-service storage, Grafana, probe and alerting station", .command = .install },
     .{ .node = .verify, .parent = .monitoring, .name = "verify", .description = "Verify station services, stored probe telemetry and alerting readiness", .command = .verify },
     .{ .node = .status, .parent = .monitoring, .name = "status", .description = "Show monitoring service state", .command = .status },
     .{ .node = .notify_test, .parent = .monitoring, .name = "notify-test", .description = "Send an explicit test alert through configured Alertmanager", .command = .notify_test },
-    .{ .node = .agents, .parent = .monitoring, .name = "agents", .description = "Manage monitored hosts (not yet available)" },
-    .{ .node = .agents_install, .parent = .agents, .name = "install", .description = "Connect a monitored host (not yet available)", .command = .agents_install },
-    .{ .node = .agents_verify, .parent = .agents, .name = "verify", .description = "Verify a monitored host (not yet available)", .command = .agents_verify },
-    .{ .node = .agents_status, .parent = .agents, .name = "status", .description = "Show agent state (not yet available)", .command = .agents_status },
+    .{ .node = .agents, .parent = .monitoring, .name = "agents", .description = "Manage Vector logs/host metrics and optional vmagent application metrics" },
+    .{ .node = .agents_install, .parent = .agents, .name = "install", .description = "Install monitored-host logs and metrics agents", .command = .agents_install },
+    .{ .node = .agents_verify, .parent = .agents, .name = "verify", .description = "Verify monitored-host agents and station signal arrival", .command = .agents_verify },
+    .{ .node = .agents_status, .parent = .agents, .name = "status", .description = "Show monitored-host forwarding state", .command = .agents_status },
     .{ .node = .firewall, .parent = .monitoring, .name = "firewall", .description = "Configure monitoring firewall rules (not yet available)", .command = .firewall },
     .{ .node = .host, .parent = .root, .name = "host", .description = "Small host utilities, separate from monitoring" },
     .{ .node = .install_oh_my_zsh, .parent = .host, .name = "install-oh-my-zsh", .description = "Install missing zsh and Oh My Zsh; opt in to managed config or login-shell changes", .command = .install_oh_my_zsh },
@@ -44,18 +47,19 @@ pub const FlagSpec = struct {
 };
 const all = &[_]Command{ .install, .verify, .status, .notify_test, .agents_install, .agents_verify, .agents_status, .firewall, .install_oh_my_zsh };
 const monitoring = &[_]Command{ .install, .verify, .status, .agents_install, .agents_verify, .agents_status, .firewall };
-const mutations = &[_]Command{ .install, .agents_install, .firewall, .install_oh_my_zsh };
+const mutations = &[_]Command{ .app_apply, .install, .agents_install, .firewall, .install_oh_my_zsh };
 const host = &[_]Command{.install_oh_my_zsh};
-const native_ssh = &[_]Command{ .install, .verify, .status, .notify_test, .install_oh_my_zsh };
+const native_ssh = &[_]Command{ .install, .verify, .status, .notify_test, .agents_install, .agents_verify, .agents_status, .install_oh_my_zsh };
 const station = &[_]Command{.install};
-const configured_station = &[_]Command{ .install, .verify, .status, .notify_test };
+const configured = &[_]Command{ .app_apply, .app_verify, .app_status, .install, .verify, .status, .notify_test };
+const help_commands = &[_]Command{ .app_apply, .app_verify, .app_status } ++ all.*;
 const grafana_credentials = &[_]Command{ .install, .verify };
-const agents = &[_]Command{ .agents_install, .agents_verify };
+const agents = &[_]Command{ .agents_install, .agents_verify, .agents_status };
 const network = &[_]Command{ .install, .firewall };
 pub const flags = [_]FlagSpec{
     .{ .name = "--host", .description = "Direct target host", .metavar = "HOST", .group = "Required", .commands = all },
     .{ .name = "--ssh-host", .description = "OpenSSH host/alias; use normal SSH configuration", .metavar = "ALIAS", .group = "Connection", .commands = native_ssh },
-    .{ .name = "--config", .description = "Explicit monitoring TOML file; CLI options override its values", .metavar = "PATH", .kind = .path, .group = "Configuration", .commands = configured_station },
+    .{ .name = "--config", .description = "Monitoring TOML path; app commands default to ./monitoring.toml", .metavar = "PATH", .kind = .path, .group = "Configuration", .commands = configured },
     .{ .name = "--user", .description = "SSH user (default: root)", .metavar = "USER", .group = "Connection", .commands = all },
     .{ .name = "--port", .description = "SSH port (default: 22)", .metavar = "PORT", .group = "Connection", .commands = all },
     .{ .name = "--ssh-sock", .description = "SSH agent socket, including 1Password agent", .metavar = "PATH", .kind = .path, .group = "Connection", .commands = all },
@@ -67,7 +71,9 @@ pub const flags = [_]FlagSpec{
     .{ .name = "--grafana-user-op", .description = "Grafana administrator username reference; resolve locally with 1Password", .metavar = "REF", .kind = .reference, .group = "Grafana", .commands = grafana_credentials },
     .{ .name = "--grafana-password-op", .description = "Grafana administrator password reference; pair with a username reference", .metavar = "REF", .kind = .reference, .group = "Grafana", .commands = grafana_credentials },
     .{ .name = "--station-ip", .description = "Monitoring station IP address", .metavar = "IP", .group = "Monitoring", .unavailable = true, .commands = agents },
-    .{ .name = "--service", .description = "Selected systemd service (repeatable)", .metavar = "NAME.service", .group = "Monitoring", .repeatable = true, .unavailable = true, .commands = agents },
+    .{ .name = "--station", .description = "Required monitoring station OpenSSH alias; never a Victoria URL", .metavar = "ALIAS", .group = "Agents", .commands = agents },
+    .{ .name = "--service", .description = "Selected journald systemd service (repeatable; required for install)", .metavar = "NAME.service", .group = "Agents", .repeatable = true, .commands = agents },
+    .{ .name = "--metrics-target", .description = "Application metrics endpoint (repeatable; localhost or private literal IP only)", .metavar = "NAME=URL", .group = "Agents", .repeatable = true, .commands = agents },
     .{ .name = "--domain", .description = "Monitoring domain", .metavar = "DOMAIN", .group = "Monitoring", .unavailable = true, .commands = station },
     .{ .name = "--admin-ip", .description = "Admin source IP (repeatable)", .metavar = "IP", .group = "Monitoring", .repeatable = true, .unavailable = true, .commands = network },
     .{ .name = "--agent-ip", .description = "Agent source IP (repeatable)", .metavar = "IP", .group = "Monitoring", .repeatable = true, .unavailable = true, .commands = network },
@@ -76,8 +82,11 @@ pub const flags = [_]FlagSpec{
     .{ .name = "--telegram-bot-token-op", .description = "Legacy flag; use [telegram] secret references in --config", .metavar = "REF", .kind = .reference, .group = "Notifications", .unavailable = true, .commands = station },
     .{ .name = "--telegram-channel-id", .description = "Legacy flag; use [telegram] chat_id secret reference in --config", .metavar = "ID", .group = "Notifications", .unavailable = true, .commands = station },
     .{ .name = "--plan", .description = "Show the existing plan without connecting", .kind = .boolean, .group = "Safety", .commands = mutations },
-    .{ .name = "--help", .description = "Show command help", .kind = .boolean, .group = "Help", .commands = all },
+    .{ .name = "--help", .description = "Show command help", .kind = .boolean, .group = "Help", .commands = help_commands },
 };
+pub fn applicationCommand(command: Command) bool {
+    return command == .app_apply or command == .app_verify or command == .app_status;
+}
 pub fn flagAllowed(item: FlagSpec, command: Command) bool {
     return std.mem.indexOfScalar(Command, item.commands, command) != null;
 }

@@ -7,6 +7,26 @@ configuration and login shell. `wizard` and `completion` are local UX entry poin
 No generic resource DSL, shell hooks or provider framework.
 Read README.md, architecture.md and design.md before changing workflow behavior.
 
+The primary application workflow is `monitoring apply` with strict version-1
+`./monitoring.toml`, or one explicit `--config`. Keep application configuration
+separate from central station configuration and secrets. Application/environment
+identity is explicit, never inferred from repository paths. Logs default disabled;
+host metrics always run; vmagent is conditional. Traces/custom metrics alert
+declarations fail clearly while unsupported. app-verify/app-status are read-only.
+Plan validates locally without SSH. Shared metadata drives CLI/help/completion
+and wizard; wizard apply retains explicit default-No confirmation.
+
+Each application owns only its namespace under `/etc/dragontools/apps/<name>/`.
+Prove exact generated content against its manifest before reconciliation; preserve
+other app files, manual rules, Grafana assets and central secrets. No global
+overwrite/adopt. Names bind environment and machine identity. Preserve recoverable
+publication generations and independent scraper reload / evaluator restart intent.
+Shared-host signal manifests merge into one Vector/vmagent without dropping other
+apps. Probe/alert-only changes never dirty agents. Trusted app/environment/host/
+service labels must override incoming data. Use shared host rules and one default
+or overridden alert per probe. Future dashboards require owned app folders and
+deterministic UIDs; no arbitrary config/DSL injection.
+
 Safe reruns are mandatory for every mutating command. Inspect actual remote state
 on every run; never assume a previous deployment completed. Correct accounts,
 directories, binaries and units are no-ops. Refuse incompatible accounts and
@@ -72,8 +92,9 @@ vmalert-metrics with dedicated accounts and loopback-only listeners on 9115,
 9093, 8880 and 8881. Alertmanager clustering is disabled. The two evaluators share
 one pinned binary but have independent restart intent; replacing that binary must
 mark both before publication. Their alert state uses VictoriaMetrics remote
-read/write and requires no local writable service path. Deploy only the fixed
-LogsQL pack and ServiceProbeFailed rule; host/service metric rules remain deferred.
+read/write and requires no local writable service path. Deploy the fixed
+LogsQL, ServiceProbeFailed and verified Vector host-pressure packs. HostDown and
+systemd service-state metric rules remain deferred.
 
 External probes use the pinned VictoriaMetrics native scraper and a static,
 unprivileged blackbox HTTP module. Keep GET, TLS verification, redirects, the
@@ -101,11 +122,41 @@ success for scaffolds. New components require reviewed pinned checksums, a dedic
 privilege profile, atomic installation, idempotency, and real health/signal checks.
 Do not claim production/VM validation based on renderer or fake-remote tests.
 
-The future agent topology is Vector for journald logs and host metrics, vmagent
-for application Prometheus endpoints, and OTel Collector for application OTLP.
-Host metric names and systemd service-state monitoring remain deferred until the
-agent slice verifies their contracts. Do not invent replacement alert expressions
-or treat provisional host/service rule rendering as deployed alerting.
+The monitored-host workflow installs pinned Vector 0.58.0 for selected journald
+logs and host metrics; vmagent v1.152.0 is installed only for explicit application
+Prometheus targets. OTel Collector/traces remain unavailable. Use required
+application/station OpenSSH connections; the station alias resolves its DNS/IPv4
+endpoint, never a caller-supplied Victoria URL. Validate bounded unique services
+and named local/private credential-free HTTP(S) targets before SSH; disable scrape
+redirects and do not auto-discover ports. Use the committed observed Vector metric
+contract for CPU/memory/filesystem/inode rules; never guess collector names.
+
+Agent ingestion uses the narrow managed mTLS service on IPv4 :9443, dedicated
+`dt-ingest`, fixed write routes and authenticated health only. Keep raw VM/VL and
+all administrative services loopback-only. Require a registered client identity;
+station root owns CA material. Per-host credentials use dedicated protected SSH
+output/opaque wiped memory/protected stdin and service-owned 0400 files, never
+ordinary file primitives or logs. Equal credentials/registration are no-ops.
+Preserve independent ingestion/Vector/vmagent restart intent. The controller and
+host roots are trusted; this is not hard multi-tenant metric-content isolation.
+The ingestion route must enforce authenticated host identity even on forged input.
+Do not broaden firewall rules or imply automatic certificate rotation.
+
+Vector selects only named journal units, overwrites application-provided host and
+service identity, and uses bounded disk buffers with blocking backpressure. Keep
+its API disabled and telemetry on loopback:8686; vmagent management is loopback:8429
+with a bounded 1 GiB remote-write queue. Quiet log stream metadata is bounded,
+info-level and distinctly typed; never synthesize application errors or extra
+installer events on unchanged reruns. Inspect effective journald configuration;
+manage only its dedicated drop-in when necessary, preserve stricter limits and
+reject later conflicting overrides. Direct application file logs are out of scope.
+Require selected services to have an exact canonical Id and empty LogNamespace
+before preregistration; aliases and namespaced journals are unsupported.
+Read-only verification must prove recent host/log/app signal arrival on the station
+after the current agent process start, with bounded readiness retries and
+synchronized host clocks. Missing station signals fail installation and
+retain restart intent. No real Ubuntu/systemd integration claim follows from the
+isolated Linux metric-contract fixture or fake-remote tests.
 
 Run `zig fmt build.zig src`, `zig build`, and `zig build test`. Test failure paths
 and second-run no-op behavior. Document major features with what/example/result/
@@ -135,5 +186,5 @@ End this and every future Codex iteration with these five sections:
 
 When adding a component, report its exact pinned version, checksum provenance,
 and remaining verification limits. Keep deployment useful now without implying
-that dashboards, host/service metric alerts, agents, or remote ingestion are
-already available.
+that dashboards, HostDown/service-state alerts, tracing agents, automatic
+certificate rotation or hard tenant isolation are already available.

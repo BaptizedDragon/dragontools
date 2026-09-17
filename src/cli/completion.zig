@@ -270,6 +270,8 @@ test "shell completion encodes the nested tree and contextual flags" {
         try std.testing.expect(std.mem.indexOf(u8, output, "'install:--tls'") != null);
         try std.testing.expect(std.mem.indexOf(u8, output, "'verify:--tls'") == null);
         try std.testing.expect(std.mem.indexOf(u8, output, "'agents_install:--service'") != null);
+        try std.testing.expect(std.mem.indexOf(u8, output, "'agents_install:--metrics-target'") != null);
+        try std.testing.expect(std.mem.indexOf(u8, output, "'agents_status:--station'") != null);
         try std.testing.expect(std.mem.indexOf(u8, output, "'status:--plan'") == null);
         try std.testing.expect(std.mem.indexOf(u8, output, "ssh -") == null);
         try std.testing.expect(std.mem.indexOf(u8, output, "op read") == null);

@@ -11,6 +11,11 @@ provider abstraction, arbitrary shell hooks, or general plugin framework.
 
 ## Implemented boundary
 
+Application repositories use strict `monitoring.toml` v1 and `monitoring apply`.
+The controller reads only the current directory's file or an explicit `--config`.
+`app-verify` and `app-status` are read-only application commands; station
+`install/verify/status` retain their separate central configuration and secrets.
+
 `cli/parse.zig` merges explicit monitoring configuration and validates all supplied
 inputs before SSH. CLI values override file values; the small version-1 TOML
 schema contains an OpenSSH alias, Grafana/Telegram secret references and bounded HTTP probes. `main.zig` rejects
@@ -99,12 +104,14 @@ HTTP/HTTPS targets <--- blackbox_exporter 0.28.0 [127.0.0.1:9115]
                               |
                          Telegram [optional outbound HTTPS]
 
-PUBLIC INBOUND: SSH :22 from administrator IP only (operator-managed firewall)
+PUBLIC INBOUND: SSH :22 from administrators; agent ingestion :9443 from monitored
+hosts after agent registration (operator-managed firewall, mTLS required).
 ```
 
-Agents, remote ingestion, dashboards, host/service metric alerts, monitoring
-firewall, TLS, and frontend telemetry are unavailable. The controller exits after
-the command; no controller-side state database or resident remote agent is added.
+The separate agent workflow adds the mTLS ingestion and logs/metrics path below.
+OTel traces agents, dashboards, systemd-service state alerts, monitoring firewall,
+public Grafana TLS and frontend telemetry remain unavailable. The controller exits
+after each command and keeps no state database.
 
 The independent host utility has no listener or connection to these services:
 
@@ -212,18 +219,21 @@ CriticalLogEvent; `monitoring/probes.zig` supplies ServiceProbeFailed. It includ
 stable severity/source labels and concise service/count annotations, without log
 payloads, request IDs, or secrets.
 
-Host and service rules are unavailable until real metric contracts exist.
-`renderHosts` returns `HostMetricContractUnavailable`; requested service rendering
-returns `ServiceMetricContractUnavailable`, while an empty service list yields an
-empty rules document. No replacement host expressions are guessed. Vector will
-supply host metrics in the agent slice; the systemd service-state solution is
-deferred. Policy and renderer tests involve no SSH or real evaluator. There is no
-standalone rule-export command or user-supplied rule configuration.
+The fixed host pack uses the Vector 0.58.0 Prometheus metric contract observed in
+an isolated Linux fixture. CPUHigh, MemoryPressure, DiskWarning, DiskCritical and
+InodesCritical select `agent="vector"`; they have no input without matching host
+metrics. Agent install reconciles the metrics evaluator after signal arrival;
+station install also includes the pack. HostDown and systemd service-state rules
+remain deferred. `renderServices` refuses requested service rules with
+`ServiceMetricContractUnavailable`. Application log alerts and probe overrides
+use the bounded application schema; arbitrary expressions and custom metrics
+alerts remain unavailable. Renderer tests do not establish full-host
+operation or notification delivery.
 
 The ordinary install plan describes all eight available components,
 including their private listeners and retention, then explicitly lists unavailable
 integrations. A successful installation means all eight components passed their
-checks; it does not imply application-host agents, host/service metric alerts or dashboards are installed. Unsupported component paths and flags
+checks; it does not install application-host agents or dashboards. Unsupported component paths and flags
 still fail before SSH; generated YAML does not make a component available.
 
 ## Component layout and lifecycle
@@ -313,8 +323,8 @@ reach loopback, so initialize promptly on a trusted host.
 Metrics uses Grafana's built-in Prometheus datasource at `127.0.0.1:8428`;
 Logs uses the signed `victoriametrics-logs-datasource` plugin at `127.0.0.1:9428`;
 Traces uses the built-in Jaeger datasource at `127.0.0.1:10428/select/jaeger`.
-The stores remain independently usable and loopback-only. No public ingress,
-firewall rule, TLS, agent, or application ingestion edge is added.
+The stores remain independently usable and loopback-only. Grafana provisioning adds no public ingress or firewall rule; the separate
+agent workflow manages only its narrowly scoped mTLS ingestion edge.
 
 Grafana changes set only `/var/lib/dragontools/grafana-restart-required` before
 publication. Config/provisioning changes require Grafana restart but do not
@@ -340,7 +350,7 @@ private temporary files, protected home/system/kernel/control groups, restricted
 address families, a single data write path, umask 0027, and TasksMax 512. It does not
 blindly reuse that profile for Vector, which needs journal access. MemoryMax
 is intentionally not imposed without capacity/workload testing. Systemd log rate
-limits reduce service log storms but do not substitute for the future agent journal
+limits reduce service log storms but do not substitute for the managed agent journal
 capacity policy. Settings are renderer-tested; runtime validation on all supported
 Ubuntu/architecture combinations remains an integration gate.
 
@@ -363,9 +373,8 @@ instance; supported Ubuntu/architecture VM runs remain required.
 Black-box monitoring observes configured HTTP/HTTPS endpoints from the station.
 The existing VictoriaMetrics single-node native Prometheus scraper queries local
 blackbox `/probe` and directly stores the result. No extra scraper listener,
-vmagent service or custom polling daemon is introduced. White-box application
-logs/metrics/traces still require future ingestion agents; those network edges
-remain unavailable.
+station vmagent service or custom polling daemon is introduced. Application-host
+logs/metrics use the separate agent workflow; tracing remains deferred.
 
 The narrow TOML has at most 64 unique named probes with normalized, query-free,
 credential-free HTTP/HTTPS URLs. A generated static blackbox module enforces GET,
@@ -403,59 +412,133 @@ Alertmanager's native stdout/stderr are disabled and their effective values are
 verified. Systemd state, health/API/metrics and fixed controller errors remain
 available; native Alertmanager journal diagnostics are not retained.
 
-## Target near-term architecture (not implemented)
+## Application ownership and repository workflow
 
-The storage backends on the right exist today. All application-host collectors,
-network ingestion edges below are targets; the station probe/alert chain is implemented:
+The primary application interface is `monitoring apply`, with read-only
+`app-verify` and `app-status`. The strict application schema is distinct from
+central station configuration; an application file cannot contain Grafana,
+Telegram or other station credentials. Only `./monitoring.toml` is implicit.
+An explicit environment and application identity avoid deriving identity from the
+repository name. Plan parses locally and displays only validated public config.
+
+Each station namespace `/etc/dragontools/apps/<application>/` has an immutable
+application/environment/machine binding, an ownership manifest and generated
+`logs.rules.yml`, `metrics.rules.yml` and `scrape.yml`. Ownership requires exact
+reproduction from the manifest, not only a comment marker. A recorded previous
+generation permits interrupted publication to resume; unrelated files and
+unrecognized content are conflicts. Application updates never re-render another
+application's documents, central secret configuration or manual Grafana assets.
+Removing an alert/probe reconciles only the current application's generated files.
+
+The shared native scraper and two evaluators include narrow app-file globs.
+Their initial integration may change shared generated loader configuration;
+subsequent changes retain independent VM reload / evaluator restart intent.
+Only changed consumers activate, and read-only readiness gates finalization.
+Global station install preserves and validates registered application files.
+Manual rules elsewhere are never adopted, deleted or rewritten by apply.
+
+Each target has independent app signal manifests under
+`/etc/dragontools/agent-apps/`. Only the shared agent configuration is merged from
+these target-local files: selected units, private metrics targets and trusted
+application identities. Other applications' signal selections survive an apply.
+Alert/probe edits do not affect agent desired state. Zero logs/metrics selections
+still collect host metrics. Legacy raw agent registrations and repository app
+registrations cannot silently adopt each other. Operators serialize applies to a
+shared station/target; this is not a distributed transaction or controller database.
+
+Vector/vmagent overwrite application, environment, service and host identity.
+The shared Vector host rules preserve application/environment/host grouping;
+application log rules use exact scoped fields and bounded counts/windows. Each
+probe has one default alert or one explicit override. Native probe telemetry with
+`probe_success=0` is a successful monitoring mechanism, not apply failure.
+No notification tests or synthetic application errors run during apply/verify.
+
+Dashboards remain unimplemented. Future generated dashboards must use folder
+`DragonTools / <application>` and deterministic UIDs, with explicit ownership.
+Manual assets outside that folder/UID are untouched; unmanaged conflicts fail
+until a specific opt-in adoption mechanism exists. Arbitrary Grafana JSON upload
+is not part of the application contract.
+
+## Monitored-host architecture: logs and metrics implemented
 
 ```text
-APPLICATION HOST                        MONITORING HOST
-(all collectors unavailable)            (eight station services installed)
+CONTROLLER                     APPLICATION HOST                 STATION
+OpenSSH aliases ----------->   systemd + selected units          systemd
+                          +-----------------------------------> registration/CA
+                               journald -> Vector 0.58.0 --mTLS---+
+                               host_metrics + internal_metrics -+|
+                               app /metrics -> vmagent v1.152.0 -+|
+                                                                v
+                                            ingestion [0.0.0.0:9443, mTLS]
+                                               /api/v1/write -> VM:8428
+                                               /insert/jsonline -> VL:9428
 
-journald
-   |
- Vector -- logs ----------------------> VictoriaLogs
-   |
-   +------ host metrics --------------> VictoriaMetrics
-
-application /metrics
-   |
- vmagent -----------------------------> VictoriaMetrics
-
-application OTLP
-   |
- OTel Collector ----------------------> VictoriaTraces
-
-
+App-only listeners: Vector telemetry 127.0.0.1:8686; vmagent 127.0.0.1:8429.
+All station backends, Grafana and alert listeners remain loopback-only.
+Unavailable edge: application OTLP -> OTel Collector -> VictoriaTraces.
 ```
 
-These edges require later verified ingestion, network authorization, and collector
-configuration. Host metric names will be established by Vector implementation;
-systemd service-state monitoring is deferred. No frontend telemetry is included.
+`cli/parse.zig` validates required station aliases, bounded unique service names,
+and explicit private application targets before SSH. Remote services must match
+the selected canonical systemd `Id` and have no `LogNamespace`, checked before
+registration. Station aliases resolve via
+native OpenSSH configuration; their effective DNS/IPv4 `HostName` becomes the
+agent-reachable endpoint. The controller contacts both hosts with verified keys.
+The application machine ID supplies stable `dt-<32 hex>` identity. A small
+station registration records services, targets and certificate fingerprint; there
+is no controller state database or discovery system.
 
-Grafana is the normal human-facing UI, with automatically provisioned
-VictoriaMetrics, VictoriaLogs and VictoriaTraces datasources. Both vmalert instances send to
-Alertmanager, which optionally sends grouped Telegram warning/critical/resolved
-notifications. Backend administrative APIs stay private. An ingestion gateway must
-expose only approved write routes; allowlisting a raw VictoriaMetrics port would
-also expose read/admin endpoints and is **not** an acceptable authorization boundary.
+Vector reads only configured journald units and rewrites host/service identity
+from trusted inputs while preserving selected structured application fields. It
+also emits bounded stream metadata every 30 seconds, distinct from application
+logs, to prove quiet-stream arrival without synthetic error events. It gathers
+CPU, memory, filesystem/disk and network metrics with its native host source, and
+forwards internal delivery/buffer telemetry. Its API is disabled; the loopback
+exporter exposes internal telemetry. vmagent exists only for explicit application
+endpoints, scrapes itself for queue/failure telemetry, disables redirect following
+and uses trusted host/app labels. No port/process discovery or node_exporter exists.
 
-Vector is planned for selected journald logs and host metrics. vmagent is planned
-for application Prometheus endpoints; OTel Collector is planned for application
-OTLP. The systemd service-state monitoring solution is deferred. Selected services
-must exist; the reusable service-check primitive rejects missing units.
-Installing Vector alone is insufficient: inspect and bound journald, verify local
-and remote health and signal arrival, monitor updates, alert on stalled pipelines,
-and protect monitoring disk capacity.
+Dedicated accounts and separate restart markers isolate Vector, vmagent and the
+ingestion service. Binary publication is pinned, checksum verified and atomic.
+Unit/config/certificate changes mark only their consumer before publication.
+Actual configuration is checked on each run. Activation, read-only verification
+and finalization remain separate; timeout retains intent. Standalone verify and
+status read saved registration when selections are omitted and never repair it.
+Signal verification queries station storage, requiring host samples younger than
+90 seconds, selected-service log streams within two minutes, and app target
+`up=1` plus a recent real metric. Install/verify additionally require samples after
+the current agent process start; old samples cannot validate a changed scrape URL.
+The hosts need synchronized clocks because Vector supplies agent timestamps.
+These use the ordinary 45-second telemetry
+readiness budget, not fixed sleeps. Missing signals fail installation.
 
-Network authorization is source-IP based in v0.x: admins may reach SSH/Grafana;
-agents may reach only ingestion. Provider firewall is an outer layer. A compromised
-allowlisted host can submit telemetry. Grafana still requires user authentication.
-No per-agent tokens or mTLS are claimed. Current slice avoids that unfinished
-boundary by binding VictoriaMetrics, VictoriaLogs, and VictoriaTraces to 127.0.0.1
-on ports 8428, 9428, and 10428, with Grafana on 127.0.0.1:3000. VictoriaTraces explicitly disables its additional
-gRPC listener with `-otlpGRPCListenAddr=`. No public OTLP or application-host
-ingestion path is installed.
+The station ingestion service runs as `dt-ingest`, requires TLS 1.2+ and a
+registered client certificate, and permits fixed write routes plus authenticated
+health. It never forwards arbitrary methods, paths, URLs or request headers. Logs
+must name a registered service; host identity comes from registration. The metrics
+route supplies the authenticated host label. Raw storage/admin APIs remain on
+loopback, including VictoriaTraces with its extra gRPC listener disabled. Neither
+Grafana nor Alertmanager is exposed. The operator must allow TCP 9443 from
+monitored hosts; DragonTools performs no firewall mutation.
+
+CA/private issuance material stays root-private on the station. Each service
+receives only its client bundle via protected SSH output, opaque wiped controller
+memory and protected stdin; mode-0400 private keys never enter ordinary file
+primitives, arguments or logs. Equal bundles and registrations are no-ops. Existing
+unrecognized paths/credentials are refused. Automatic certificate rotation and
+hard tenant isolation are deferred: the controller/station/app roots and CA are
+trusted, and a compromised registered agent can submit arbitrary metric content
+for its own authenticated host. The station enforces host identity even against a
+forged submitted label, verified with the pinned native backend.
+
+The application journal is bounded by a managed drop-in only when effective
+administrator settings are insufficient. Limits are calculated from filesystem
+capacity: min(1 GiB, 5%) persistent, min(256 MiB, 2%) runtime, seven-day retention.
+Stricter existing limits and unrelated configuration are preserved. Two Vector
+disk sinks each cap at 268435488 bytes and block when full; vmagent's queue caps
+at 1 GiB and may drop oldest blocks. A prolonged outage can lose data as buffers
+or journal retention expire, while disk usage stays bounded. Direct application
+file logs are outside this policy.
 
 ## Secret handling and credentials
 
@@ -487,8 +570,9 @@ by `LoadCredentialEncrypted=`. Plaintext exists only in the service credential
 runtime directory. If host encryption is unavailable, require an explicitly chosen
 root:root 0600 credential source plus `LoadCredential=`; do not silently weaken the
 policy. No plaintext `/etc/environment`, `Environment=`, argv, plans or ordinary
-config. This remains the future TLS policy. Telegram now has an explicit dedicated
-protected-file consumer described below; no generic credential-file mechanism is added.
+config. This remains the future public Grafana TLS policy. Telegram and agent
+mTLS now have separate explicit protected-file consumers; no generic
+credential-file mechanism is added.
 
 ## Maintenance and testing
 
@@ -502,12 +586,16 @@ by policy; automatic reboot is disabled. None of this policy changes hosts yet.
 Unit tests cover parsing, redaction, quoting, units, storage, artifact plans and
 update-state parsing, as well as CLI metadata, completion, contextual help and
 scripted wizard validation/defaults/cancellation/command previews. Monitoring tests
-cover policy constants, explicit unavailable host/service rendering, deterministic
-log/probe rules, thresholds, and stable labels. CLI smoke tests
+cover policy constants, verified host metric names, explicit unavailable service
+rendering, deterministic log/probe/host rules, thresholds, and stable labels. CLI smoke tests
 check non-TTY behavior and the local help/completion boundary. Fake-remote tests
 cover independent first/second runs, drift, failures, and restart recovery for all
 eight installed components;
-these prove sequencing, not actual systemd behavior. Disposable Ubuntu integration
+these prove sequencing, not actual systemd behavior. Separate isolated Linux
+process fixtures verified the pinned host metric contract and real mTLS forwarding
+into VM/VL, including authenticated host-label override. Their journal input was
+a fixture, and they did not exercise SSH, systemd or full installer recovery.
+Disposable Ubuntu integration
 is documented separately and must verify the real runtime profile and no-op rerun.
 The opt-in `tests/integration/victoriatraces.sh` runner checks the three storage services,
 listeners, retention, writable backend storage, stable processes on reruns,

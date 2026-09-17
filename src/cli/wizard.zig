@@ -4,6 +4,7 @@ const spec = @import("spec.zig");
 const remote = @import("../system/remote.zig");
 const policy = @import("../monitoring/policy.zig");
 const vt = @import("../components/victoriatraces.zig");
+const targets = @import("../monitoring/agents/targets.zig");
 
 /// The caller owns input storage and the operation arena. The wizard only reads,
 /// writes, and returns ordinary CLI arguments; it never executes an operation.
@@ -102,6 +103,21 @@ const Input = struct {
                 else => return err,
             };
             if (value.len == 0) return values.toOwnedSlice(self.a);
+            var duplicate = false;
+            if (eq(flag, "--service") or eq(flag, "--metrics-target")) {
+                for (values.items) |previous| {
+                    const same = if (eq(flag, "--service")) eq(previous, value) else eq((try targets.parseOne(previous)).name, (try targets.parseOne(value)).name);
+                    if (same) duplicate = true;
+                }
+                if (duplicate) {
+                    try self.write("Duplicate selection. Use a unique service or target name.\n");
+                    continue;
+                }
+                if (values.items.len >= 64) {
+                    try self.write("At most 64 selections are supported.\n");
+                    return values.toOwnedSlice(self.a);
+                }
+            }
             try values.append(self.a, value);
             if (!try self.yesNo("Add another?", "Enter yes to add another validated value.")) return values.toOwnedSlice(self.a);
         }
@@ -114,10 +130,12 @@ fn eq(a: []const u8, b: []const u8) bool {
 
 fn validationMessage(err: anyerror) []const u8 {
     return switch (err) {
+        error.InvalidSshHost => "Invalid SSH alias. Use a configured OpenSSH host name.\n",
+        error.InvalidMetricsTarget, error.InvalidMetricsTargetName, error.InvalidMetricsTargetUrl => "Invalid metrics target. Use unique-name=http://127.0.0.1:PORT/metrics or another private literal address.\n",
         error.InvalidHost => "Invalid host. Use a hostname or IP address.\n",
         error.InvalidUser => "Invalid SSH user.\n",
         error.InvalidPort => "Invalid port. Use a number from 1 to 65535.\n",
-        error.InvalidPath => "Invalid path. Use an absolute path without whitespace, quotes, backslash, or percent expansions.\n",
+        error.InvalidPath => "Invalid path. Config paths may be relative; SSH socket/identity paths must be absolute without whitespace, quotes, backslash, or percent expansions.\n",
         error.InvalidReference => "Invalid 1Password reference. Use an op:// reference, never a token or private key.\n",
         error.InvalidService => "Invalid service. Use a unit name ending in .service.\n",
         error.InvalidIP => "Invalid IP address.\n",
@@ -133,12 +151,13 @@ const welcome =
     \\Opinionated infrastructure tools for minimalistic architectures.
     \\
     \\  1. Install a monitoring station
-    \\  2. Connect a server to a monitoring station (unavailable)
+    \\  2. Connect a server to a monitoring station
     \\  3. Verify a monitoring station
     \\  4. Check monitoring status
     \\  5. Configure monitoring firewall (unavailable)
     \\  6. Learn what DragonTools will install
     \\  7. Show command-line help
+    \\  8. Apply application monitoring.toml
     \\  0. Exit
     \\
     \\Enter accepts defaults; ? explains a prompt; back goes back; quit exits.
@@ -163,26 +182,23 @@ const overview = std.fmt.comptimePrint(
     \\  Probes and optional Telegram use the CLI --config TOML path; this wizard creates a station without them.
     \\  ServiceProbeFailed evaluates probe_success == 0 for 2m; down targets do not fail installation.
     \\  Access with an explicit SSH tunnel. The official VictoriaLogs plugin is pinned; dashboards remain unavailable.
-    \\  No application-host ingestion is configured.
+    \\  Vector logs/host metrics and optional vmagent app metrics use the agents command.
     \\  SSH installation with strict host-key checks, dedicated service users,
     \\  pinned and checksum-verified binaries, and systemd hardening.
     \\
     \\Roadmap only - not installed or configured in this release
-    \\  Monitoring station: dashboards and host/service-state alert contracts.
+    \\  Monitoring station: dashboards and systemd-service state alerts.
     \\  Monitored server:
-    \\    vmagent               application /metrics scraping
-    \\    Vector                journal logs and host metrics
     \\    OpenTelemetry Collector  traces
     \\    maintenance checker   update and security checks
-    \\  Security: source-IP restrictions, TLS,
-    \\    bounded journald, and dedicated hardening for each new component.
-    \\  Host metric contract waits for Vector; service-state monitoring is deferred.
+    \\  Security: firewall automation and public Grafana TLS.
+    \\  Host alerts use verified Vector metrics; service-state alerts remain deferred.
     \\  Intended defaults: disk warning {d}%, critical {d}%;
     \\    automatic OS security updates; no automatic reboot;
     \\    component updates notification only; Telegram optional.
     \\
     \\Agent installation must inspect and bound journald and verify actual
-    \\signal arrival before it can report success. Agent/firewall commands and
+    \\signal arrival before it can report success. Firewall commands and
     \\roadmap configuration flags currently fail before SSH, including --plan.
     \\This overview contacts no hosts or secret providers.
     \\
@@ -207,7 +223,7 @@ pub fn run(a: std.mem.Allocator, io: IO) !?[]const []const u8 {
 fn menu(input: Input) !?[]const []const u8 {
     while (true) {
         try input.write(welcome);
-        const choice = input.choice("Choice", null, &.{ "0", "1", "2", "3", "4", "5", "6", "7" }, "Choose a workflow, learn about the current release, or show CLI help.") catch |err| switch (err) {
+        const choice = input.choice("Choice", null, &.{ "0", "1", "2", "3", "4", "5", "6", "7", "8" }, "Choose a workflow, learn about the current release, or show CLI help.") catch |err| switch (err) {
             error.Back => continue,
             else => return err,
         };
@@ -217,7 +233,7 @@ fn menu(input: Input) !?[]const []const u8 {
             return null;
         }
         if (eq(choice, "7")) return &.{"--help"};
-        const command: spec.Command = if (eq(choice, "1")) .install else if (eq(choice, "2")) .agents_install else if (eq(choice, "3")) .verify else if (eq(choice, "4")) .status else .firewall;
+        const command: spec.Command = if (eq(choice, "8")) .app_apply else if (eq(choice, "1")) .install else if (eq(choice, "2")) .agents_install else if (eq(choice, "3")) .verify else if (eq(choice, "4")) .status else .firewall;
         return workflow(input, command) catch |err| switch (err) {
             error.Back => continue,
             else => return err,
@@ -225,9 +241,10 @@ fn menu(input: Input) !?[]const []const u8 {
     }
 }
 
-const Step = enum { host, user, port, authentication, credential, extras, domain, tls, cloudflare, admin, agents, telegram, telegram_token, telegram_channel, station, services, firewall_admin, firewall_agents, review };
+const Step = enum { config, host, user, port, authentication, credential, extras, domain, tls, cloudflare, admin, agents, telegram, telegram_token, telegram_channel, station, services, metrics_targets, firewall_admin, firewall_agents, review };
 const Answers = struct {
     command: spec.Command,
+    config_path: []const u8 = "./monitoring.toml",
     host: []const u8 = "",
     user: []const u8 = "root",
     port: []const u8 = "22",
@@ -244,13 +261,22 @@ const Answers = struct {
     telegram_channel: []const u8 = "",
     station: []const u8 = "",
     services: []const []const u8 = &.{},
+    metrics_targets: []const []const u8 = &.{},
 
     fn argv(self: Answers, a: std.mem.Allocator) ![]const []const u8 {
         var args: std.ArrayList([]const u8) = .empty;
         errdefer args.deinit(a);
         try args.appendSlice(a, spec.commandPath(self.command));
-        try args.appendSlice(a, &.{ "--host", self.host, "--user", self.user, "--port", self.port });
-        if (self.authFlag()) |flag| try args.appendSlice(a, &.{ flag, self.credential });
+        if (spec.applicationCommand(self.command)) {
+            try args.appendSlice(a, &.{ "--config", self.config_path });
+            return args.toOwnedSlice(a);
+        }
+        if (self.command == .agents_install) {
+            try args.appendSlice(a, &.{ "--ssh-host", self.host });
+        } else {
+            try args.appendSlice(a, &.{ "--host", self.host, "--user", self.user, "--port", self.port });
+            if (self.authFlag()) |flag| try args.appendSlice(a, &.{ flag, self.credential });
+        }
         if (self.command == .install and self.extras) {
             if (self.domain.len > 0) try args.appendSlice(a, &.{ "--domain", self.domain });
             if (!eq(self.tls, "none")) try args.appendSlice(a, &.{ "--tls", self.tls });
@@ -262,8 +288,9 @@ const Answers = struct {
             for (self.agents) |value| try args.appendSlice(a, &.{ "--agent-ip", value });
         }
         if (self.command == .agents_install) {
-            try args.appendSlice(a, &.{ "--station-ip", self.station });
+            try args.appendSlice(a, &.{ "--station", self.station });
             for (self.services) |value| try args.appendSlice(a, &.{ "--service", value });
+            for (self.metrics_targets) |value| try args.appendSlice(a, &.{ "--metrics-target", value });
         }
         return args.toOwnedSlice(a);
     }
@@ -287,11 +314,11 @@ const Answers = struct {
 
 fn workflow(input: Input, command: spec.Command) !?[]const []const u8 {
     var answers: Answers = .{ .command = command };
-    var step: Step = .host;
+    var step: Step = if (spec.applicationCommand(command)) .config else .host;
     var history: std.ArrayList(Step) = .empty;
     defer history.deinit(input.a);
-    if (command == .install) try input.write(std.fmt.comptimePrint("\nThis release installs eight loopback services: VictoriaMetrics, VictoriaLogs, VictoriaTraces, Grafana, blackbox exporter, Alertmanager and two vmalert instances.\nMetrics retention is {d} days, with a {d}% data filesystem reserve.\nLogs retain as much history as fits, with a {s} logical limit and a {d}%\nfilesystem-capacity partition budget.\nTraces use a {s} logical limit and a {d}% filesystem-capacity partition budget.\nBoth budgets exclude other writers and preserve the newest two partitions.\nCleanup is periodic; adequate capacity/headroom is required. These defaults are fixed.\nApplication-host ingestion remains unavailable. Reruns inspect actual state,\nresume pending activation, and leave healthy unchanged services running.\n", .{ policy.metrics.retention_days, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent, policy.traces.retention, policy.traces.cleanup_usage_percent }));
-    if (command == .agents_install) try input.write("\nAgent installation is unavailable in this release; even --plan is rejected\nbefore SSH. This helper can collect and preview future CLI configuration.\nThe intended install includes Vector, vmagent, OpenTelemetry Collector,\nhost metrics and a maintenance/update checker. It must inspect and bound\njournald and verify signal arrival before reporting installation success.\n");
+    if (command == .install) try input.write(std.fmt.comptimePrint("\nThis release installs eight loopback services: VictoriaMetrics, VictoriaLogs, VictoriaTraces, Grafana, blackbox exporter, Alertmanager and two vmalert instances.\nMetrics retention is {d} days, with a {d}% data filesystem reserve.\nLogs retain as much history as fits, with a {s} logical limit and a {d}%\nfilesystem-capacity partition budget.\nTraces use a {s} logical limit and a {d}% filesystem-capacity partition budget.\nBoth budgets exclude other writers and preserve the newest two partitions.\nCleanup is periodic; adequate capacity/headroom is required. These defaults are fixed.\nConfigure application hosts separately with monitoring agents. Reruns inspect actual state,\nresume pending activation, and leave healthy unchanged services running.\n", .{ policy.metrics.retention_days, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent, policy.traces.retention, policy.traces.cleanup_usage_percent }));
+    if (command == .agents_install) try input.write("\nInstall Vector for selected journald services and host metrics. Optional\nprivate application endpoints enable vmagent. The installer must inspect and bound\njournald and verify station signal arrival before reporting success.\nUse configured OpenSSH aliases for both hosts; no secret is requested here.\nOTel traces agents remain unavailable.\n");
     if (command == .firewall) try input.write("\nFirewall management is unavailable; even --plan is rejected before SSH.\nIntended policy: admin IPs may access SSH and Grafana; agent IPs may submit\ntelemetry only. DragonTools will manage monitoring-related rules only and\nmust preserve unrelated administrator configuration. This helper previews\nfuture configuration; it cannot claim that access restrictions are applied.\n");
     while (true) {
         if (step == .review) {
@@ -352,8 +379,16 @@ fn workflow(input: Input, command: spec.Command) !?[]const []const u8 {
 
 fn answerStep(input: Input, answers: *Answers, step: Step) !Step {
     switch (step) {
+        .config => {
+            answers.config_path = try input.prompt("Application monitoring config", "./monitoring.toml", false, "--config", "One strict application monitoring.toml file. Normal dispatch validates it before SSH. No station secrets belong in this file.");
+            return .review;
+        },
         .host => {
-            answers.host = try input.prompt(if (answers.command == .agents_install) "Application host" else "Monitoring station host", null, false, "--host", "Use a hostname or IP address. Enroll the verified host key in known_hosts first.");
+            if (answers.command == .agents_install) {
+                answers.host = try input.prompt("Application host SSH alias", null, false, "--ssh-host", "Use the application's configured OpenSSH alias. Enroll its verified host key in known_hosts first.");
+                return .station;
+            }
+            answers.host = try input.prompt("Monitoring station host", null, false, "--host", "Use a hostname or IP address. Enroll the verified host key in known_hosts first.");
             return .user;
         },
         .user => {
@@ -422,11 +457,15 @@ fn answerStep(input: Input, answers: *Answers, step: Step) !Step {
             return .review;
         },
         .station => {
-            answers.station = try input.prompt("Monitoring station IP", null, false, "--station-ip", "The current --station-ip validator accepts IP addresses only; station domains are not supported. Agent installation is unavailable.");
+            answers.station = try input.prompt("Monitoring station SSH alias", null, false, "--station", "Use the station connection name in your OpenSSH configuration, not an ingestion URL. DragonTools owns the ports.");
             return .services;
         },
         .services => {
-            answers.services = try input.list("Service", "--service", true, "Use a complete .service unit name. A future installer must also verify the unit exists remotely; this helper only validates syntax.");
+            answers.services = try input.list("Service", "--service", true, "Use a complete .service unit name. Only selected units' journal entries are forwarded.");
+            return .metrics_targets;
+        },
+        .metrics_targets => {
+            answers.metrics_targets = try input.list("Metrics target (optional; Enter finishes)", "--metrics-target", false, "Use name=http://127.0.0.1:PORT/metrics. Only HTTP/HTTPS localhost/private literal endpoints are accepted; vmagent is omitted without targets.");
             return .review;
         },
         .review => unreachable,
@@ -456,20 +495,26 @@ fn commandPreview(input: Input, args: []const []const u8) !void {
 }
 
 fn preview(input: Input, args: []const []const u8, options: parse.Options) !void {
+    if (spec.applicationCommand(options.command)) {
+        try input.write("\nApplication monitoring: ordinary CLI dispatch validates the config before SSH.\nHost metrics are automatic; logs, private metrics, probes and alerts follow the file.\nPlan is local; apply uses the target/station OpenSSH aliases declared in the file.\nNo secret is resolved by this wizard.\n");
+        try commandPreview(input, args);
+        return;
+    }
+
     try commandPreview(input, args);
-    const summary = try std.fmt.allocPrint(input.a, "{s}\nHost: {s}\nSSH user: {s}\nSSH port: {d}\n", .{ switch (options.command) {
+    const summary = if (options.command == .agents_install) try std.fmt.allocPrint(input.a, "Connect monitored server: Vector and optional vmagent\nApplication host SSH alias: {s}\n", .{options.ssh_host.?}) else try std.fmt.allocPrint(input.a, "{s}\nHost: {s}\nSSH user: {s}\nSSH port: {d}\n", .{ switch (options.command) {
         .install => "Monitoring station: VictoriaMetrics, VictoriaLogs, VictoriaTraces and Grafana",
         .verify => "Verify monitoring station (read-only health checks)",
         .status => "Monitoring status (read-only state summary)",
-        .agents_install => "Connect monitored server (unavailable)",
+        .agents_install => "Connect monitored server: Vector and optional vmagent",
         .firewall => "Monitoring firewall (unavailable)",
         else => "Monitoring operation",
-    }, options.host, options.user, options.port });
+    }, options.ssh_host orelse options.host, options.user, options.port });
     try input.write(summary);
     if (options.command == .install) {
-        try input.write(try std.fmt.allocPrint(input.a, "Domain: {s}\nAdmin IPs: {d}\nAgent IPs: {d}\nTLS: {s}\nTelegram: {s}\nStorage: metrics {d} days; {d}% data filesystem reserve.\nLogs: disk-bound retention, logical limit {s}; partition budget {d}% of filesystem capacity (other writers excluded).\nTraces: disk-bound retention, logical limit {s}; partition budget {d}% of filesystem capacity (other writers excluded).\nListeners: loopback:8428 (metrics), loopback:9428 (logs), loopback:{d} (traces), loopback:3000 (Grafana).\nBlackbox: loopback:9115; Alertmanager: loopback:9093; vmalert logs/metrics: loopback:8880/8881.\nProbes and Telegram require the CLI --config path; this wizard does not configure them.\nGrafana local authentication is enabled. Access via SSH forwarding only.\nMetrics, Logs and Traces are provisioned; dashboards are unavailable.\nApplication-host ingestion is unavailable. An unchanged rerun requires no restart.\n", .{ options.domain orelse "none", options.admin_ips.items.len, options.agent_ips.items.len, options.tls orelse "none", if (options.telegram_token_op != null) "requested (unavailable)" else "disabled", policy.metrics.retention_days, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent, policy.traces.retention, policy.traces.cleanup_usage_percent, vt.port }));
+        try input.write(try std.fmt.allocPrint(input.a, "Domain: {s}\nAdmin IPs: {d}\nAgent IPs: {d}\nTLS: {s}\nTelegram: {s}\nStorage: metrics {d} days; {d}% data filesystem reserve.\nLogs: disk-bound retention, logical limit {s}; partition budget {d}% of filesystem capacity (other writers excluded).\nTraces: disk-bound retention, logical limit {s}; partition budget {d}% of filesystem capacity (other writers excluded).\nListeners: loopback:8428 (metrics), loopback:9428 (logs), loopback:{d} (traces), loopback:3000 (Grafana).\nBlackbox: loopback:9115; Alertmanager: loopback:9093; vmalert logs/metrics: loopback:8880/8881.\nProbes and Telegram require the CLI --config path; this wizard does not configure them.\nGrafana local authentication is enabled. Access via SSH forwarding only.\nMetrics, Logs and Traces are provisioned; dashboards are unavailable.\nApplication hosts use monitoring agents separately. An unchanged rerun requires no restart.\n", .{ options.domain orelse "none", options.admin_ips.items.len, options.agent_ips.items.len, options.tls orelse "none", if (options.telegram_token_op != null) "requested (unavailable)" else "disabled", policy.metrics.retention_days, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent, policy.traces.retention, policy.traces.cleanup_usage_percent, vt.port }));
     }
-    if (options.command == .agents_install) try input.write(try std.fmt.allocPrint(input.a, "Station IP: {s}\nServices: {d}\n", .{ options.station_ip orelse "none", options.services.items.len }));
+    if (options.command == .agents_install) try input.write(try std.fmt.allocPrint(input.a, "Station SSH alias: {s}\nServices: {d}\nApplication metrics targets: {d}\nSSH users and authentication come from OpenSSH configuration.\n", .{ options.station orelse "none", options.services.items.len, options.metrics_targets.items.len }));
     if (options.command == .firewall) try input.write(try std.fmt.allocPrint(input.a, "Admin IPs: {d}\nAgent IPs: {d}\nNo firewall rules can be applied in this release.\n", .{ options.admin_ips.items.len, options.agent_ips.items.len }));
     if (options.unsupported()) try input.write("Unavailable configuration: the ordinary CLI will reject this request\nbefore SSH, including --plan. No installation success will be reported.\n");
     try input.write("Printable ASCII secret references are shown literally; other references\nare hidden in this preview. No secrets have been resolved.\n");
@@ -639,18 +684,23 @@ test "wizard hides non-ASCII references in previews without changing CLI argumen
     for (script.output.items) |byte| try std.testing.expect(byte < 128 and byte != 27);
 }
 
-test "wizard agent command validates numeric station IP and every repeated service" {
+test "wizard agent command validates station aliases repeated services and private metrics targets" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var script: Script = .{ .a = a, .lines = &.{ "2", "app.example.com", "", "", "", "monitor.example.com", "203.0.113.5", "bad.service;id", "one.service", "yes", "two.service", "", "1" } };
+    var script: Script = .{ .a = a, .lines = &.{ "2", "app", "http://monitoring", "monitoring", "bad.service;id", "one.service", "yes", "one.service", "two.service", "", "app=http://public.example/metrics", "app=http://127.0.0.1:16000/metrics", "", "1" } };
     var options = try parse.parse(a, (try run(a, script.io())).?);
     defer options.deinit(a);
     try std.testing.expectEqual(spec.Command.agents_install, options.command);
     try std.testing.expectEqual(@as(usize, 2), options.services.items.len);
     try std.testing.expectEqualStrings("two.service", options.services.items[1]);
-    try std.testing.expect(options.unsupported());
-    try std.testing.expect(script.contains("Invalid IP address."));
+    try std.testing.expect(!options.unsupported());
+    try std.testing.expectEqualStrings("monitoring", options.station.?);
+    try std.testing.expectEqualStrings("app", options.ssh_host.?);
+    try std.testing.expectEqual(@as(usize, 1), options.metrics_targets.items.len);
+    try std.testing.expect(script.contains("Invalid SSH alias."));
+    try std.testing.expect(script.contains("Duplicate selection."));
+    try std.testing.expect(script.contains("Invalid metrics target."));
     try std.testing.expect(script.contains("Invalid service."));
     try std.testing.expect(script.contains("inspect and bound\njournald"));
 }
@@ -701,4 +751,24 @@ test "wizard information and CLI help are local and ASCII only" {
     var options = try parse.parse(a, (try run(a, help.io())).?);
     defer options.deinit(a);
     try std.testing.expect(options.help);
+}
+
+test "application wizard previews regular config CLI with local plan and default no mutation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var plan: Script = .{ .a = a, .lines = &.{ "8", "", "1" } };
+    const args = (try run(a, plan.io())).?;
+    try std.testing.expectEqual(@as(usize, 5), args.len);
+    try std.testing.expectEqualStrings("apply", args[1]);
+    try std.testing.expectEqualStrings("./monitoring.toml", args[3]);
+    try std.testing.expectEqualStrings("--plan", args[4]);
+    try std.testing.expect(plan.contains("dragontool 'monitoring' 'apply' '--config' './monitoring.toml'"));
+    var denied: Script = .{ .a = a, .lines = &.{ "8", "examples/doers-monitoring.toml", "2", "" } };
+    try std.testing.expect((try run(a, denied.io())) == null);
+    try std.testing.expect(denied.contains("[y/N]"));
+    var confirmed: Script = .{ .a = a, .lines = &.{ "8", "examples/doers-monitoring.toml", "2", "yes" } };
+    const apply = (try run(a, confirmed.io())).?;
+    try std.testing.expectEqual(@as(usize, 4), apply.len);
+    try std.testing.expectEqualStrings("examples/doers-monitoring.toml", apply[3]);
 }

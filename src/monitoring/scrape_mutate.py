@@ -78,6 +78,9 @@ def inspect_config():
 
 
 def prepare_config(config, binary_hash):
+    # Validate every native include before staging or activating the config.
+    if "app_all" in globals():
+        app_all()
     desired = config.encode()
     if len(desired) > 128 * 1024 or not desired.startswith(b"# Managed by DragonTools\n"):
         raise ValueError("Invalid generated configuration")

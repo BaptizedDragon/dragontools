@@ -1,0 +1,18 @@
+# Observed Vector 0.58.0 Linux/aarch64 Prometheus exporter, 2026-09-17.
+# Isolated non-root Docker Linux fixture; host anonymized, timestamps removed.
+# This verifies emitted names/types/labels, not systemd or remote signal delivery.
+host_cpu_seconds_total{collector="cpu",cpu="0",host="fixture-host",mode="idle"} 137092.24
+host_memory_available_bytes{collector="memory",host="fixture-host"} 5114136000
+host_memory_total_bytes{collector="memory",host="fixture-host"} 5809924000
+host_filesystem_used_ratio{collector="filesystem",device="overlay",filesystem="overlay",host="fixture-host",mountpoint="/"} 0.2516634464263916
+host_filesystem_inodes_used_ratio{collector="filesystem",device="overlay",filesystem="overlay",host="fixture-host",mountpoint="/"} 0.07423114776611328
+host_filesystem_inodes_total{collector="filesystem",device="overlay",filesystem="overlay",host="fixture-host",mountpoint="/"} 2097152
+vector_uptime_seconds{host="fixture-host"} 0
+vector_buffer_size_bytes{buffer_id="out",buffer_type="memory",component_id="out",component_kind="sink",component_type="prometheus_exporter",host="fixture-host",stage="0"} 0
+# Additional capacity/network exporter observations from the same pinned release.
+# TYPE host_filesystem_free_bytes gauge
+host_filesystem_free_bytes{collector="filesystem",device="overlay",filesystem="overlay",host="fixture-host",mountpoint="/"} 23703851008
+# TYPE host_network_receive_bytes_total counter
+host_network_receive_bytes_total{collector="network",device="lo",host="fixture-host"} 100
+# TYPE host_network_transmit_bytes_total counter
+host_network_transmit_bytes_total{collector="network",device="lo",host="fixture-host"} 100

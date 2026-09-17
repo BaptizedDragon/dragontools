@@ -19,6 +19,13 @@ fn print(io: std.Io, message: []const u8) void {
 }
 pub fn main(init: std.process.Init) void {
     run(init) catch |err| {
+        const detail: ?[]const u8 = switch (err) {
+            error.ApplicationTracesUnsupported => "Traces are declared but not supported by this DragonTools build. Nothing changed; SSH was not attempted.\n",
+            error.ApplicationMetricsAlertsUnsupported => "Custom metrics alerts are not supported by this DragonTools build. Nothing changed; SSH was not attempted.\n",
+            error.UnableToReadApplicationConfig => "Unable to read application config. The default is ./monitoring.toml; use --config for an explicit path. Nothing changed; SSH was not attempted.\n",
+            else => null,
+        };
+        if (detail) |message| std.Io.File.stderr().writeStreamingAll(init.io, message) catch {};
         const msg = std.fmt.allocPrint(init.arena.allocator(), "Error: {s}. Argument values and remote stderr are omitted from this error. See --help.\n", .{@errorName(err)}) catch "Error: operation failed.\n";
         std.Io.File.stderr().writeStreamingAll(init.io, msg) catch {};
         std.process.exit(1);
@@ -65,6 +72,14 @@ fn execute(init: std.process.Init, options: cli.Options) !void {
         try personalizeHost(init, options);
         return;
     }
+    if (options.command == .app_apply or options.command == .app_verify or options.command == .app_status) {
+        try @import("monitoring/apps/dispatch.zig").run(init, options);
+        return;
+    }
+    if (options.command == .agents_install or options.command == .agents_verify or options.command == .agents_status) {
+        try @import("monitoring/agents/dispatch.zig").run(init, options);
+        return;
+    }
     if (options.plan) {
         print(init.io, try plan.renderStation(a, options.grafana_user_op != null, options.telegram_bot_token_op != null, options.probes.len));
         return;
@@ -109,7 +124,7 @@ fn execute(init: std.process.Init, options: cli.Options) !void {
             };
             if (options.command == .install and report.changes == 0) print(init.io, "No changes required.\n");
             print(init.io, try std.fmt.allocPrint(a, "VictoriaMetrics: loopback:8428\n  healthy; self-scraped metrics queryable\n  retention: {s}; free-space reserve: {d} bytes ({d}% of filesystem capacity)\nVictoriaLogs: loopback:9428\n  healthy; writable storage\n  retention: disk-bound; logical limit: {s}; native partition budget: {d}% of filesystem capacity\nVictoriaTraces: loopback:{d}\n  healthy; writable storage\n  retention: disk-bound; logical limit: {s}; native partition budget: {d}% of filesystem capacity\n  Logs/traces cleanup is periodic and preserves the newest two partitions; other writers can fill the filesystem earlier.\nGrafana: loopback:3000\n  healthy; local authentication enabled\n  administrator credentials {s}\n  Metrics datasource: provisioning and backend query verified\n  Logs datasource: provisioning and backend query verified\n  Traces datasource: provisioning and backend query verified\n  Logs plugin: {s}\n  Metrics/Traces query-engine and browser UI validation remain manual integration checks\nAccess through an explicit SSH tunnel.{s}\n", .{ policy.metrics.retention, report.reserve_bytes, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent, vt.port, policy.traces.retention, policy.traces.cleanup_usage_percent, if (credentials != null) "verified" else "unmanaged", if (report.logs_query_verified) "health and authenticated query verified" else "authenticated query unchecked; configure administrator references to verify", if (credentials != null) "" else " Change the initial administrator password at first login." }));
-            print(init.io, try std.fmt.allocPrint(a, "Blackbox exporter: loopback:9115\n  healthy; HTTP/HTTPS GET probes; TLS verification enabled\nVictoriaMetrics native scraper: {d} configured probes\n  loaded definitions and fresh stored probe telemetry verified\n  a down target is valid monitoring state\nvmalert-logs: loopback:8880\n  healthy; VictoriaLogs rules evaluated\nvmalert-metrics: loopback:8881\n  healthy; ServiceProbeFailed evaluates probe_success == 0 for 2m\nAlertmanager: loopback:9093\n  healthy; clustering disabled; Telegram {s}\nNo test notification sent.\n", .{ options.probes.len, if (options.telegram_bot_token_op != null) "configured with protected secret files" else "disabled" }));
+            print(init.io, try std.fmt.allocPrint(a, "Blackbox exporter: loopback:9115\n  healthy; HTTP/HTTPS GET probes; TLS verification enabled\nVictoriaMetrics native scraper: {d} configured probes\n  loaded definitions and fresh stored probe telemetry verified\n  a down target is valid monitoring state\nvmalert-logs: loopback:8880\n  healthy; VictoriaLogs rules evaluated\nvmalert-metrics: loopback:8881\n  healthy; ServiceProbeFailed evaluates probe_success == 0 for 2m\n  CPUHigh, MemoryPressure, DiskWarning, DiskCritical and InodesCritical use verified Vector metrics\nAlertmanager: loopback:9093\n  healthy; clustering disabled; Telegram {s}\nNo test notification sent.\n", .{ options.probes.len, if (options.telegram_bot_token_op != null) "configured with protected secret files" else "disabled" }));
         },
         .status => {
             const output = @import("monitoring/status.zig").status(a, r, &report) catch |err| {
@@ -144,6 +159,17 @@ fn personalizeHost(init: std.process.Init, options: cli.Options) !void {
     print(init.io, try output.result(a, report));
 }
 test {
+    _ = @import("monitoring/apps/dispatch.zig");
+    _ = @import("monitoring/agents/apps.zig");
+    _ = @import("monitoring/agents/model.zig");
+    _ = @import("monitoring/agents/tests.zig");
+    _ = @import("monitoring/agents/checks_tests.zig");
+    _ = @import("monitoring/agents/journald.zig");
+    _ = @import("monitoring/agents/journald_tests.zig");
+    _ = @import("monitoring/agents/ingestion.zig");
+    _ = @import("monitoring/agents/config.zig");
+    _ = @import("components/vector.zig");
+    _ = @import("components/vmagent.zig");
     _ = @import("components/blackbox_exporter.zig");
     _ = @import("components/vmalert.zig");
     _ = @import("monitoring/blackbox.zig");
