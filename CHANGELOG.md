@@ -2,6 +2,9 @@
 
 ## 0.1.0-dev — unreleased
 
+- Drain stdin in checksum fixture mocks to avoid scheduling-dependent broken-pipe
+  errors on macOS. Preserve production verification and empty-stderr assertions.
+
 - Install the signed official `victoriametrics-logs-datasource` **0.32.0** from the
   versioned Grafana catalog ZIP. Pin its published SHA-256 and full file catalog;
   preserve its verified signature without enabling unsigned plugins or online

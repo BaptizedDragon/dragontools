@@ -33,7 +33,8 @@ test "VictoriaMetrics actual runtime guard distinguishes startup absence from in
         \\}
         \\id() { printf 200; }
         \\stat() { if test "$scenario" = owner; then printf 0:0; else printf 200:200; fi; }
-        \\sha256sum() { test "$scenario" != checksum; }
+        \\# Consume the checksum pipeline before returning, as the real command does.
+        \\sha256sum() { cat >/dev/null; test "$scenario" != checksum; }
     ;
     const guard = try std.mem.replaceOwned(u8, a, verify.process_script, "/proc/", "$root/proc/");
     const script = try std.fmt.allocPrint(a, "{s}\n{s}\n{s}\nprintf ready", .{ fixture, guard, verify.listener_ready });
@@ -85,7 +86,7 @@ test "VictoriaMetrics deterministic verifier accepts rendered unit policy and re
         \\  esac
         \\}
         \\stat() { if test "$3" = "$root/unit"; then printf 0:0:644; else printf 0:0:755; fi; }
-        \\sha256sum() { return 0; }
+        \\sha256sum() { cat >/dev/null; return 0; }
     ;
     const with_unit = try std.mem.replaceOwned(u8, a, verify.managed_script, "/etc/systemd/system/dragontools-victoriametrics.service", "$root/unit");
     const managed = try std.mem.replaceOwned(u8, a, with_unit, "/opt/dragontools", "$root/opt/dragontools");

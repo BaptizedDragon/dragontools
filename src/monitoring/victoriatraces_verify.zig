@@ -279,7 +279,7 @@ test "VictoriaTraces actual runtime guard distinguishes startup absence from inv
         \\  if test "$scenario" = missing_pid; then printf 0; else printf 123; fi
         \\}
         \\stat() { if test "$scenario" = owner; then printf root:root; else printf dt-victoriatraces:dt-victoriatraces; fi; }
-        \\sha256sum() { test "$scenario" != checksum; }
+        \\sha256sum() { cat >/dev/null; test "$scenario" != checksum; }
     ;
     const guard = try std.mem.replaceOwned(u8, a, runtime_guard, "/proc/", "$root/proc/");
     const script = try std.fmt.allocPrint(a, "{s}\n{s}\n{s}\nprintf ready", .{ fixture, guard, listener_ready });
