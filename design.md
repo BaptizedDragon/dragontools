@@ -376,7 +376,8 @@ unmanaged files and unexpected symlinks are refused.
 The concrete configuration pins `http_addr = 127.0.0.1`, `http_port = 3000`, the data
 and provisioning paths, SQLite, and console logging for journald. Local authentication
 remains enabled; anonymous access, auth proxy and signup are explicitly disabled.
-No third-party plugin is installed automatically and no dashboard is provisioned.
+The signed official VictoriaLogs datasource plugin is installed from a separately
+pinned artifact; no dashboard is provisioned.
 The concrete unit uses `dt-grafana`, empty capabilities, no new privileges, private
 tmp/devices, protected home/system/kernel/control groups, restricted SUID/SGID and
 personality, and a sole persistent write path under the Grafana data directory.
@@ -395,17 +396,18 @@ be trusted and initialized promptly. [Grafana first login](https://grafana.com/d
 
 Provisioned datasource definitions are fixed, deterministic and not UI-editable:
 
-| Name | Built-in type | Local URL | Default |
+| Name | Datasource type | Local URL | Default |
 | --- | --- | --- | --- |
-| Metrics | Prometheus | `http://127.0.0.1:8428` | Yes |
-| Traces | Jaeger | `http://127.0.0.1:10428/select/jaeger` | No |
+| Metrics | Built-in `prometheus` | `http://127.0.0.1:8428` | Yes |
+| Logs | Official `victoriametrics-logs-datasource` | `http://127.0.0.1:9428` | No |
+| Traces | Built-in `jaeger` | `http://127.0.0.1:10428/select/jaeger` | No |
 
 The Jaeger prefix follows both the documented Grafana integration and the pinned
 VictoriaTraces handler. [VictoriaTraces Grafana integration](https://docs.victoriametrics.com/victoriatraces/querying/grafana/),
 [pinned handler](https://github.com/VictoriaMetrics/VictoriaTraces/blob/v0.11.0/app/vtselect/main.go).
-The recommended VictoriaLogs integration requires its dedicated official plugin;
-a reviewed deterministic plugin installation is deferred. No Logs datasource or
-Grafana-to-VictoriaLogs edge is claimed. [VictoriaLogs Grafana integration](https://docs.victoriametrics.com/victorialogs/integrations/grafana/).
+Logs uses the upstream-documented VictoriaLogs base URL with proxy access. No Loki
+compatibility layer, credentials, public URL or additional path prefix is used.
+The datasource has fixed UID `dragontools-logs`. [VictoriaLogs Grafana integration](https://docs.victoriametrics.com/victorialogs/integrations/grafana/).
 
 Grafana's verifier remains read-only. Its base checks need no administrator
 credential. It checks active/persistently-enabled systemd state, loaded and managed unit identity,
@@ -414,22 +416,28 @@ managed path metadata, the process-owned loopback listener, and Grafana HTTP ide
 It refuses `GF_*` overrides in the actual process environment, including inherited
 systemd manager settings, without printing or retaining their values.
 It compares exact generated config/provisioning, then reads only the non-secret
-Metrics and Traces datasource fields from SQLite through read-only mode as
-`dt-grafana`. It issues a Metrics query and Jaeger service query as that same UID
-against the provisioned backend URLs and validates their response contracts.
+Metrics, Logs and Traces datasource fields from SQLite through read-only mode as
+`dt-grafana`. It issues a Metrics query, a bounded read-only LogsQL query and a
+Jaeger service query as that same UID against the provisioned backend URLs and
+validates their response contracts.
 Read-only SQLite access depends on the pinned schema and explicitly disabled WAL;
 Python 3's standard SQLite module is a checked prerequisite. [Pinned datasource schema](https://github.com/grafana/grafana/blob/v13.2.2/pkg/services/sqlstore/migrations/datasource_mig.go).
 
-This establishes the provisioned records and backend reachability after password
-changes, without weakening authentication or retaining credentials. When secret
-references are configured, a read-only authenticated Grafana API check also verifies
-the administrator identity. It does not test a Grafana datasource-proxy/query-engine
-request. The authenticated UI's
-Save & test and Explore must still be exercised on a disposable supported host;
-local renderer/fake-remote tests do not establish that runtime boundary. Empty
-Jaeger services are valid before trace ingestion. No synthetic telemetry is injected.
+This establishes provisioned records and backend reachability after password
+changes without weakening authentication or retaining credentials. Configured
+secret references also verify administrator identity, Logs plugin health and the
+Grafana-to-plugin-to-VictoriaLogs query path through authenticated API calls. These
+are read-only checks even where HTTP POST is the supported query method; neither
+logs nor configuration are written. Empty valid Logs results and empty Jaeger
+services are accepted before application ingestion. No synthetic telemetry is injected.
 
-Grafana's binary/current link, unit, configuration, and datasource content changes
+Without references the authenticated Logs query is explicitly unchecked, while
+the remaining integrity, provisioning and direct-backend checks still run.
+Metrics/Traces requests through Grafana's query engine and browser Save & test/Explore
+remain separate integration gates. Local fixture tests establish orchestration
+and response validation, not real Grafana/plugin/systemd runtime behavior.
+
+Grafana's binary/current link, plugin selection/content, unit, configuration, and datasource content changes
 record `/var/lib/dragontools/grafana-restart-required` before publication. Only
 Grafana restarts; a config-only change does not require daemon-reload unless unit
 state needs it independently. Verification failure retains that marker, while a
@@ -448,6 +456,122 @@ Immediate access is `ssh -L 127.0.0.1:3000:127.0.0.1:3000 monitoring`, then
 `http://127.0.0.1:3000` on the administrator's laptop. No firewall, Cloudflare, DNS,
 or TLS configuration changes. Public inbound remains administrator-restricted SSH
 only. A later HTTPS frontend for `monitoring.baptizeddragon.com` is not installed.
+
+## Official VictoriaLogs datasource plugin
+
+`src/components/grafana_victorialogs_plugin.zig` pins the official plugin separately
+from the Grafana server release:
+
+| Pin | Value |
+| --- | --- |
+| Plugin ID | `victoriametrics-logs-datasource` |
+| Version | `0.32.0` |
+| Archive SHA-256 | `8204d097b17f53b1c3a71761047734b7980bd983710c6cfcef8d938abe5eeef0` |
+| Full file-catalog SHA-256 | `b251e3c695e333e4a22d4b8f1aeaee9893ff0e14e3a6170d356a74de2f97cadd` |
+| Artifact | `https://grafana.com/api/plugins/victoriametrics-logs-datasource/versions/0.32.0/download` |
+| Checksum provenance | Official version metadata, `packages.any.sha256` |
+
+The downloaded ZIP hash was checked against [official version metadata](https://grafana.com/api/plugins/victoriametrics-logs-datasource/versions/0.32.0).
+The [official catalog](https://grafana.com/grafana/plugins/victoriametrics-logs-datasource/)
+and [upstream integration documentation](https://docs.victoriametrics.com/victorialogs/integrations/grafana/)
+identify this plugin; its [tagged source](https://github.com/VictoriaMetrics/victorialogs-datasource/tree/v0.32.0)
+provides the reviewed endpoint and query contracts. No online plugin installer,
+mutable version selection or Loki substitution is used.
+
+The single ZIP is a multi-platform bundle, **not architecture-independent backend
+code**. It includes native executables; DragonTools supports only its existing
+Linux amd64 and arm64 targets. The package contains 36 regular files and two
+directories, with no symlinks. It is 78,122,569 compressed bytes and 222,316,035
+uncompressed bytes. All signed contents, including unused platform binaries, stay
+intact. A canonical catalog pins expected paths, normalized modes and each file's
+SHA-256, and is checked against a source pin before live-tree verification.
+
+`MANIFEST.txt` is preserved unchanged. The reviewed manifest has the commercial
+signature type, publisher `victoriametrics`, and key ID `7e4d0c6a708866e7`. A local
+GPG audit verified its signature using the static public key from pinned Grafana
+13.2.2: fingerprint `F33B25B691074E84636570F37E4D0C6A708866E7`.
+[Grafana's pinned static key](https://github.com/grafana/grafana/blob/v13.2.2/pkg/plugins/manager/signature/statickey/static_retriever.go)
+and [key selection](https://github.com/grafana/grafana/blob/v13.2.2/pkg/services/pluginsintegration/keyretriever/retriever.go)
+confirm that `public_key_retrieval_disabled = true` still uses this trusted embedded
+key. Signature checking remains enabled and no `allow_loading_unsigned_plugins`
+setting is added. The archive/catalog pins trust the reviewed official publisher;
+they do not make a malicious publisher harmless. GPG is a review tool, not a target
+prerequisite, and the audit did not execute downloaded plugin code.
+
+Persistent storage is separate from Grafana server binaries:
+
+```text
+/var/lib/dragontools/grafana/
+  plugins/
+    victoriametrics-logs-datasource
+      -> ../plugins-versions/victoriametrics-logs-datasource/0.32.0/content
+  plugins-versions/
+    victoriametrics-logs-datasource/
+      0.32.0/
+        .dragontools-plugin-catalog.json
+        content/                 # intact signed plugin package
+```
+
+Plugin directories, catalog and content are root-owned, readable by `dt-grafana`;
+executables/directories use 0755 and regular non-executables 0644. Grafana's data
+parent remains service-owned for SQLite. Because a writable parent could otherwise
+permit replacing root-owned children, the unit additionally mounts both plugin
+roots read-only with `ReadOnlyPaths`. The service cannot install or edit its plugin
+code. Grafana's configured plugin path is the active `plugins` directory. Pinned
+Grafana discovery follows directory symlinks and roots the plugin filesystem at
+the resolved content directory, excluding the sibling DragonTools catalog.
+[Discovery implementation](https://github.com/grafana/grafana/blob/v13.2.2/pkg/plugins/manager/sources/source_local_disk.go),
+[symlink walker](https://github.com/grafana/grafana/blob/v13.2.2/pkg/plugins/filepath.go).
+
+Downloads use HTTPS and the committed archive checksum before extraction. Private
+staging accepts only the expected plugin root/catalog entries and rejects traversal,
+duplicates, symlinks, hardlinks, special files and unexpected content. Publication
+uses an atomic version-directory operation and atomic active-symlink replacement.
+The existing catalog must match a reviewed pin before replacement or repair of
+known files; unexpected paths are refused. A future reviewed pin stages alongside older known
+releases. A same-version repair retains the previous tree under a managed
+`.previous.0.32.0.*` name. Prior state remains available for operator recovery;
+there is no automatic rollback or automatic upgrade check.
+
+Managed `grafana.ini` is established before plugin staging, so a failed fresh
+download or interrupted publication can pass preflight and resume on rerun.
+Plugin publication sets only Grafana's restart marker. After activation all normal
+Grafana checks and configured Logs API checks must succeed before finalization can
+clear it. A failed checksum/extraction never activates the staged plugin; a failed
+readiness/query check keeps restart intent and leaves VM/VL/VT untouched. A correct
+rerun hashes the installed tree but performs no plugin download, provisioning
+rewrite or Grafana restart. Run one installer per target at a time.
+
+The plugin is a Grafana child process using a Unix-domain socket on supported Linux
+hosts, not another TCP service. Pinned plugin source calls the SDK's `backend.Manage`;
+its pinned `hashicorp/go-plugin` 1.8.0 selects Unix sockets on non-Windows systems.
+The existing AF_UNIX allowance and private temporary directory support that transport.
+[Plugin entry point](https://github.com/VictoriaMetrics/victorialogs-datasource/blob/v0.32.0/pkg/main.go),
+[plugin dependencies](https://github.com/VictoriaMetrics/victorialogs-datasource/blob/v0.32.0/go.mod),
+[transport implementation](https://github.com/hashicorp/go-plugin/blob/v1.8.0/server.go).
+Actual systemd sandbox compatibility, signature loading and browser behavior remain
+explicit disposable-host integration checks.
+
+### Authenticated Logs query contract
+
+After the desired administrator login has been verified or reconciled, the existing
+protected-stdin helper performs `GET /api/plugins/victoriametrics-logs-datasource/settings`
+and requires the exact plugin ID, datasource type, pinned version and valid signature.
+It then calls `GET /api/datasources/uid/dragontools-logs/health` and
+`POST /api/ds/query` with organization 1. The single query uses UID `dragontools-logs`,
+refId `A`, `queryType: instant`, a five-minute window and `* | fields _time`, with
+`maxLines: 1`, `maxDataPoints: 1`, and `intervalMs: 1000`. This proves a valid query
+path while avoiding retrieval of log messages. The response must contain the
+expected valid logs frame; an empty frame is allowed, missing/malformed results are
+not. Responses stay inside the remote helper and are never printed by DragonTools.
+
+Plugin identity/signature failures and invalid credentials fail immediately.
+Runtime health and query readiness each have a 45-second deadline with an immediate
+probe, a 500 ms first retry and then 1-second retries. Timeout fails verification
+and retains Grafana's pending restart intent. There is no fixed blind sleep and no
+credential reset on this read-only path. Unconfigured compatibility mode instead
+verifies the direct VictoriaLogs backend and reports the authenticated query as
+unchecked; plans and status never resolve secrets or execute these API requests.
 
 ## Monitoring configuration and Grafana credentials
 
@@ -544,8 +668,10 @@ Credential reconciliation is scoped to Grafana. VictoriaMetrics, VictoriaLogs an
 VictoriaTraces keep their independent installation, readiness and restart markers.
 Local fake resolver, transport and Grafana fixtures establish sequencing and
 redaction, not live 1Password access or real Grafana/systemd runtime behavior.
-Authenticated datasource query-engine and browser UI validation remain separate
-integration checks even when the read-only administrator API check succeeds.
+Logs plugin health/query checks reuse the protected credential payload after the
+identity check; no new provider or credential store is added. Authenticated
+Metrics/Traces query-engine and browser UI validation remain separate integration
+checks even when the administrator and Logs API checks succeed.
 
 ## Semantic monitoring progress
 
@@ -735,9 +861,10 @@ installing or claiming any pack is active.
 
 ## Dashboards, alert deployment and Telegram: roadmap
 
-Add the reviewed VictoriaLogs plugin/datasource and dashboards: Host Overview,
-Monitoring Station, Service Health, Storage, Updates / Security. Metrics and Traces
-are provisioned now; authenticated Grafana queries remain a runtime integration gate.
+Add dashboards: Host Overview,
+Monitoring Station, Service Health, Storage, Updates / Security. Metrics, Logs and
+Traces are provisioned now. Configured credentials exercise the Logs query path;
+Metrics/Traces query-engine checks and browser UI validation remain integration gates.
 
 No generated rules are deployed or evaluated by the current installation.
 vmalert, Alertmanager, Vector, vmagent, and OTel Collector installation

@@ -135,7 +135,8 @@ sudo apt-get install -y openssh-server curl ca-certificates tar coreutils util-l
 ```
 
 Verify the VM SSH fingerprint through its console and enroll it in known_hosts.
-Allow outbound HTTPS to official GitHub release assets and `dl.grafana.com`. Never
+Allow outbound HTTPS to official GitHub release assets, `dl.grafana.com`, and
+`grafana.com` for the pinned plugin catalog artifact. Never
 use a production host: the monitoring installer now installs four persistent
 services and writes actual metrics/data. The older Victoria runners below retain
 their backend-specific checks; use the Grafana checklist too for the fourth component.
@@ -300,8 +301,8 @@ changed password reconciled from the configured references. Repeat with the
 already-correct credentials and require `No changes required.`, no password reset,
 no restart, and stable identities for all four services. Configured standalone
 verify must authenticate read-only; mismatched credentials must fail without
-reconciliation. Exercise failure/retry and inspect protected temporary-secret
-cleanup without printing contents. Ensure no plaintext value appears in unit,
+reconciliation. Exercise failure/retry and confirm no secret files or retained plaintext
+are created, without printing resolved contents. Ensure no plaintext value appears in unit,
 ordinary config, process arguments or DragonTools output. Live 1Password access and
 these remote behaviors are separate integration gates, not fixture-test claims.
 
@@ -313,19 +314,45 @@ In the authenticated UI:
    `/select/jaeger` base path; run **Save & test** and Explore its services.
    An empty list is expected before application trace ingestion. Do not claim
    trace arrival solely from this response.
-3. Confirm **Logs** datasource and default dashboards are absent: the official
-   VictoriaLogs plugin is deferred. If implemented in a later iteration, add its
-   pinned-plugin and authenticated health/query checks before claiming integration.
+3. Confirm **Logs** uses `victoriametrics-logs-datasource` **0.32.0**, the fixed
+   UID `dragontools-logs`, and `http://127.0.0.1:9428`. Require Grafana's plugin page
+   to show a valid signature. Run **Save & test**, then Explore in Raw Logs mode
+   with `*` over the last five minutes. A valid zero-row response is success;
+   do not inject synthetic logs just for this test.
+4. Confirm no default dashboards, agents, alerts or public listeners were added.
 
-The automated verifier checks read-only provisioned datasource records and backend
-queries under the Grafana UID, plus a read-only authenticated administrator API
-check when credential references are configured. The UI steps above exercise Grafana's authenticated
-proxy/query engine, which local fake-remote or renderer tests do not validate.
+The automated verifier checks plugin integrity, read-only records for all three
+datasources and direct backend queries under the Grafana UID. Configured references
+also check administrator identity, signed plugin identity, Logs plugin health and a
+read-only LogsQL query through Grafana. Confirm those checks work with the real
+plugin and configured references. Without references, require the explicit
+`Logs plugin query unchecked; configure administrator references to verify` message;
+there must be no implicit default-password login or anonymous-access change.
+The UI steps above and real Metrics/Traces requests through Grafana remain separate
+integration evidence. Local fake-remote or renderer tests do not establish it.
 
 On this disposable target only, test recovery and component isolation:
 
+- On a pre-plugin DragonTools installation, rerun with the same configured
+  references. Expect one pinned plugin download, Logs provisioning and one Grafana
+  restart. Record all four PIDs/start times; VM/VL/VT must remain unchanged. Require
+  configured verification and UI queries to succeed, then an unchanged no-op.
+- Inspect the active plugin symlink, versioned content and per-file catalog. Require
+  root ownership, executable/readable modes, intact `MANIFEST.txt`, and both plugin
+  roots in effective `ReadOnlyPaths`. Confirm the `dt-grafana` service cannot alter
+  its plugin code. Check that native plugin transport uses a private Unix socket,
+  with no added TCP listener.
 - Change one managed Grafana config/provisioning file, then reinstall. Only Grafana
   may restart; retain all VM/VL/VT PIDs/start times. Follow with an unchanged no-op.
+- On a disposable fixture, corrupt one recognized plugin file and rerun. Require
+  checksum-verified repair, atomic selection, retained prior content and only a
+  Grafana restart. Unknown extra files/symlinks must fail safely. Test an explicitly
+  reviewed future pin in the same way before accepting a plugin version update.
+- Interrupt plugin download, extraction and publication. A bad checksum or unsafe
+  ZIP must never replace the active working version. A failed health or Logs query
+  after activation must preserve Grafana restart intent and prior recoverable plugin
+  state. After correcting the cause, rerun, verify, then require a no-op. Confirm
+  VictoriaLogs itself was neither restarted nor modified by these failures.
 - Exercise Grafana unit drift and recognized binary/tree corruption independently.
   Each repair restarts only Grafana; unknown extra paths and symlinks must refuse
   safely instead of destroying administrator data. Confirm upstream package paths
@@ -342,7 +369,7 @@ On this disposable target only, test recovery and component isolation:
   properties, and journal output. Exercise SQLite persistence across restart.
   Recheck loopback-only binding and no added public listener/firewall rule.
 
-Record exact OS, architecture, Grafana build and checksum provenance, commands,
+Record exact OS, architecture, Grafana build, plugin version and checksum provenance, commands,
 service identities, authenticated UI checks and outcomes without credentials.
 Destroy the disposable host after testing. **Disposable-host integration not run.**
 
@@ -360,3 +387,21 @@ checks committed archive, server-binary and full catalog pins, regular-file/dire
 counts and safe archive paths. It does not extract or execute the release and is
 separate from the systemd/UI integration gate. Each no-op installation also hashes
 the full live release tree; expect read I/O even though no resources are rewritten.
+
+
+Review the pinned plugin ZIP without extracting or executing it:
+
+```bash
+python3 -I -B tests/integration/grafana_victorialogs_archive.py /tmp/dragontools-vl-plugin-0.32.0.zip
+```
+
+Use the already-downloaded official artifact and replace its local path as needed.
+The helper verifies the committed archive SHA-256, full catalog, safe ZIP entries
+and signed manifest's file hashes. This helper does not independently verify PGP;
+Grafana verifies the preserved signature at runtime. A separate local GPG review
+of this exact ZIP passed against the embedded public key from pinned Grafana 13.2.2,
+fingerprint `F33B25B691074E84636570F37E4D0C6A708866E7`. That review used an isolated
+temporary public keyring, disabled network key retrieval and executed no plugin
+code. Exact artifact URL, digest and upstream key/source links are in
+[the plugin design](../../design.md#official-victorialogs-datasource-plugin).
+None of these archive checks is a systemd, Grafana plugin-loading or UI test.

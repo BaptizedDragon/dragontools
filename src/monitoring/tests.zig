@@ -25,6 +25,7 @@ const ComponentState = struct {
     enables: usize = 0,
     reloads: usize = 0,
     downloads: usize = 0,
+    plugin_downloads: usize = 0,
     dirty: bool = false,
     stale_unit: bool = false,
     loaded: bool = false,
@@ -68,6 +69,8 @@ const Fake = struct {
     credential_checks: usize = 0,
     credential_failure: bool = false,
     credential_fail_after_reset: bool = false,
+    logs_query_failure: bool = false,
+    logs_queries: usize = 0,
 
     fn state(self: *Fake, component: install.Component) *ComponentState {
         return switch (component) {
@@ -88,6 +91,11 @@ const Fake = struct {
         try std.testing.expect(std.mem.indexOf(u8, command, "credential-password-sentinel") == null);
         try std.testing.expect(std.mem.indexOf(u8, payload.protectedBytes(), "credential-password-sentinel") != null);
         self.gf.calls[@intFromEnum(op)] += 1;
+        if (std.mem.endsWith(u8, command, "'logs_verify'")) {
+            self.logs_queries += 1;
+            try std.testing.expect(!self.gf.inactive and self.credentials_valid);
+            return .{ .code = if (self.logs_query_failure) 86 else 0, .output = "unchanged" };
+        }
         if (std.mem.endsWith(u8, command, "'bootstrap'")) {
             if (self.credentials_initialized) return .{ .code = 0, .output = "unchanged" };
             try std.testing.expect(self.gf.inactive);
@@ -155,6 +163,7 @@ const Fake = struct {
             return error.MissingComponentContext;
         const current = self.state(component);
         current.calls[@intFromEnum(op)] += 1;
+        if (op == .plugin) try std.testing.expect(current.present[@intFromEnum(remote.Operation.config)]);
         if (current.fail == op) return .{ .code = current.failure_code };
         var changed = false;
         switch (op) {
@@ -234,6 +243,11 @@ const Fake = struct {
                     if (op == .binary) {
                         current.dirty = true;
                         current.downloads += 1;
+                    }
+                    if (op == .plugin) {
+                        try std.testing.expectEqual(install.Component.grafana, component);
+                        current.dirty = true;
+                        current.plugin_downloads += 1;
                     }
                     if (op == .config or op == .provisioning) current.dirty = true;
                     if (op == .unit) {
@@ -1085,4 +1099,126 @@ test "standalone configured credential verification cannot mutate credentials or
     try std.testing.expectEqual(finalized, fake.gf.called(.finalize));
     try std.testing.expect(fake.gf.dirty);
     try expectRestarts(&fake, null, 1);
+}
+
+test "fresh plugin failure can resume with managed config and finalize before unchanged rerun" {
+    for ([_]bool{ false, true }) |after_publication| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var fake: Fake = .{};
+        if (after_publication) fake.gf.fail_after = .plugin else fake.gf.fail = .plugin;
+        var failed: install.Report = .{};
+        try std.testing.expectError(error.RemoteOperationFailed, install.install(a, fake.asRemote(), &failed));
+        try std.testing.expectEqual(remote.Operation.plugin, failed.phase);
+        try std.testing.expect(fake.gf.present[@intFromEnum(remote.Operation.config)]);
+        try std.testing.expect(fake.gf.dirty);
+        try std.testing.expectEqual(@as(usize, 0), fake.gf.called(.activate));
+        try std.testing.expectEqual(@as(usize, 0), fake.gf.called(.finalize));
+        fake.gf.fail = null;
+        fake.gf.fail_after = null;
+        var recovered: install.Report = .{};
+        try install.install(a, fake.asRemote(), &recovered);
+        try std.testing.expect(!fake.gf.dirty);
+        try std.testing.expectEqual(@as(usize, 1), fake.gf.plugin_downloads);
+        try std.testing.expectEqual(@as(usize, 1), fake.gf.writes[@intFromEnum(remote.Operation.config)]);
+        try expectRestarts(&fake, null, 1);
+        var unchanged: install.Report = .{};
+        try install.install(a, fake.asRemote(), &unchanged);
+        try std.testing.expectEqual(@as(usize, 0), unchanged.changes);
+        try std.testing.expectEqual(@as(usize, 1), fake.gf.plugin_downloads);
+        try expectRestarts(&fake, null, 1);
+    }
+}
+
+test "Logs plugin and provisioning changes restart only Grafana then remain a no-op" {
+    for ([_]remote.Operation{ .plugin, .provisioning }) |changed| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var fake: Fake = .{};
+        try initialInstall(a, &fake);
+        try std.testing.expectEqual(@as(usize, 1), fake.gf.plugin_downloads);
+        fake.gf.present[@intFromEnum(changed)] = false;
+        var updated: install.Report = .{};
+        try install.install(a, fake.asRemote(), &updated);
+        try expectRestarts(&fake, .grafana, 2);
+        try std.testing.expectEqual(@as(usize, 1), fake.gf.reloads);
+        try std.testing.expectEqual(@as(usize, if (changed == .plugin) 2 else 1), fake.gf.plugin_downloads);
+        var unchanged: install.Report = .{};
+        try install.install(a, fake.asRemote(), &unchanged);
+        try std.testing.expectEqual(@as(usize, 0), unchanged.changes);
+        try expectRestarts(&fake, .grafana, 2);
+        try std.testing.expectEqual(@as(usize, 0), fake.logs_queries);
+        try std.testing.expect(!unchanged.logs_query_verified);
+    }
+}
+
+test "Logs plugin query failure preserves Grafana intent and recovery finalizes before a no-op" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var fake: Fake = .{ .logs_query_failure = true };
+    const payload = try Secret.init(std.testing.allocator, credential_fixture);
+    defer payload.deinit();
+    var failed: install.Report = .{ .grafana_credentials = payload };
+    try std.testing.expectError(error.GrafanaLogsQueryFailed, install.install(a, fake.asRemote(), &failed));
+    try std.testing.expectEqual(install.Component.grafana, failed.component.?);
+    try std.testing.expectEqual(readiness.Check.logs_datasource_ready, failed.check.?);
+    try std.testing.expect(fake.gf.dirty and !failed.logs_query_verified);
+    try std.testing.expectEqual(@as(usize, 0), fake.gf.called(.finalize));
+    try std.testing.expectEqual(@as(usize, 1), fake.logs_queries);
+    try expectRestarts(&fake, null, 1);
+    fake.logs_query_failure = false;
+    var recovered: install.Report = .{ .grafana_credentials = payload };
+    try install.install(a, fake.asRemote(), &recovered);
+    try std.testing.expect(recovered.logs_query_verified and !fake.gf.dirty);
+    try expectRestarts(&fake, .grafana, 2);
+    try std.testing.expectEqual(@as(usize, 1), fake.gf.plugin_downloads);
+    var unchanged: install.Report = .{ .grafana_credentials = payload };
+    try install.install(a, fake.asRemote(), &unchanged);
+    try std.testing.expect(unchanged.logs_query_verified);
+    try std.testing.expectEqual(@as(usize, 0), unchanged.changes);
+    try expectRestarts(&fake, .grafana, 2);
+    const finalizations = fake.gf.called(.finalize);
+    fake.logs_query_failure = true;
+    var checked: install.Report = .{ .grafana_credentials = payload };
+    try std.testing.expectError(error.GrafanaLogsQueryFailed, verify.verify(a, fake.asRemote(), &checked));
+    try std.testing.expectEqual(finalizations, fake.gf.called(.finalize));
+    try std.testing.expectEqual(@as(usize, 0), checked.changes);
+    try expectRestarts(&fake, .grafana, 2);
+}
+
+test "plugin integrity drift is deterministic and never retries or finalizes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var fake: Fake = .{};
+    fake.gf.fail_check = .plugin_integrity;
+    var failed: install.Report = .{};
+    try std.testing.expectError(error.RemoteOperationFailed, install.install(arena.allocator(), fake.asRemote(), &failed));
+    try std.testing.expectEqual(readiness.Check.plugin_integrity, failed.check.?);
+    try std.testing.expectEqual(@as(usize, 1), fake.gf.checked(.plugin_integrity));
+    try std.testing.expectEqual(@as(usize, 0), fake.sleep_count);
+    try std.testing.expectEqual(@as(usize, 0), fake.gf.called(.finalize));
+    try std.testing.expect(fake.gf.dirty);
+    try std.testing.expect(!fake.vl.dirty and !fake.vm.dirty and !fake.vt.dirty);
+}
+
+test "direct LogsQL readiness retries safely and timeout retains Grafana restart intent" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var fake: Fake = .{};
+    fake.gf.not_ready[@intFromEnum(readiness.Check.logs_backend_ready)] = 2;
+    try initialInstall(a, &fake);
+    try std.testing.expectEqual(@as(usize, 3), fake.gf.checked(.logs_backend_ready));
+    try std.testing.expectEqualSlices(u32, &.{ 500, 1000 }, fake.sleeps[0..fake.sleep_count]);
+    fake.gf.present[@intFromEnum(remote.Operation.plugin)] = false;
+    fake.gf.not_ready[@intFromEnum(readiness.Check.logs_backend_ready)] = std.math.maxInt(usize);
+    var failed: install.Report = .{};
+    try std.testing.expectError(error.ReadinessTimedOut, install.install(a, fake.asRemote(), &failed));
+    try std.testing.expectEqual(readiness.Check.logs_backend_ready, failed.check.?);
+    try std.testing.expectEqual(@as(usize, 1), fake.gf.called(.finalize));
+    try std.testing.expect(fake.gf.dirty);
+    try expectRestarts(&fake, .grafana, 2);
 }

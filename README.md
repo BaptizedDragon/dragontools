@@ -4,12 +4,12 @@ DragonTools is an opinionated Zig tool for minimalistic architecture enthusiasts
 
 The current milestone installs **VictoriaMetrics, VictoriaLogs, VictoriaTraces, and
 Grafana OSS**. Each has a dedicated Unix account, pinned versioned artifacts,
-a hardened systemd service, and a loopback-only listener. Grafana provisions Metrics
-and Traces datasources and provides a visual UI through SSH forwarding.
+a hardened systemd service, and a loopback-only listener. Grafana provisions Metrics,
+Logs and Traces datasources and provides a visual UI through SSH forwarding.
 VictoriaMetrics keeps 90-day metrics with a disk reserve; VictoriaLogs and
 VictoriaTraces keep disk-bound history with native cleanup. Healthy unchanged
-processes remain running on reruns. Agents, alerts, dashboards, the Grafana Logs
-datasource, and remote application ingestion remain unavailable.
+processes remain running on reruns. Agents, alerts, dashboards and remote application
+ingestion remain unavailable.
 
 A separate `host install-oh-my-zsh` convenience command installs missing shell
 tooling for an existing user. It does not change the monitoring stack.
@@ -156,16 +156,31 @@ metadata; its own operational/audit logs can include the administrator username.
 The helper never prints the password. This native Grafana logging boundary has
 been reviewed in pinned source, not validated on a disposable host.
 
-In Grafana, **Metrics** is the default Prometheus datasource at
-`http://127.0.0.1:8428`. **Traces** uses the built-in Jaeger datasource at
-`http://127.0.0.1:10428/select/jaeger`. Both are provisioned automatically and are
-not editable in the UI. Use each datasource's **Save & test** and Explore through
-the tunnel. Logs UI integration requires the separate official VictoriaLogs
-plugin and is deliberately deferred; the installed VictoriaLogs backend remains
-usable through its private API. No third-party plugin or default dashboard is
-installed. With no application ingestion, Traces can legitimately contain no
-services or traces yet. [VictoriaTraces integration](https://docs.victoriametrics.com/victoriatraces/querying/grafana/),
-[VictoriaLogs plugin requirement](https://docs.victoriametrics.com/victorialogs/integrations/grafana/).
+## Grafana: Metrics, Logs and Traces
+
+All three datasources are provisioned automatically and are not editable in the UI:
+
+| Name | Datasource | Local backend URL |
+| --- | --- | --- |
+| Metrics (default) | Built-in Prometheus | `http://127.0.0.1:8428` |
+| Logs | Official `victoriametrics-logs-datasource` plugin | `http://127.0.0.1:9428` |
+| Traces | Built-in Jaeger | `http://127.0.0.1:10428/select/jaeger` |
+
+The signed official VictoriaLogs plugin is pinned at **0.32.0**. DragonTools verifies
+the exact archive and installed file catalog; it does not call an online plugin
+installer or fetch `latest`. Plugin storage is persistent, outside the versioned
+Grafana server tree. Signature verification stays enabled; unsigned plugins are not
+allowed. See [exact pins and installation design](design.md#official-victorialogs-datasource-plugin).
+The plugin uses the VictoriaLogs base URL documented by upstream, without Loki
+compatibility or a guessed path prefix. [Official VictoriaLogs integration](https://docs.victoriametrics.com/victorialogs/integrations/grafana/),
+[official Grafana plugin catalog](https://grafana.com/grafana/plugins/victoriametrics-logs-datasource/).
+
+Run install/verify with the example configuration above, keep the SSH tunnel open,
+then visit **http://127.0.0.1:3000**. In Explore select **Logs**, use Raw Logs mode,
+and execute the harmless LogsQL query `*`. A successful empty response is valid
+before application ingestion; verification never injects logs. Metrics and Traces
+remain available through their own Explore views. Traces may have no services yet.
+No dashboard is provisioned and no public port is opened.
 
 Expected listeners **on the server**:
 
@@ -201,8 +216,12 @@ inspection, change and verification progress. A configured unchanged rerun inclu
       healthy; no changes
 [4/4] Grafana
       inspecting...
+      checking VictoriaLogs datasource plugin...
+      plugin current
+      datasources current
       verifying...
       administrator credentials verified
+      Logs datasource health and query verified
       healthy; no changes
 No changes required.
 ```
@@ -218,14 +237,23 @@ listeners, HTTP health, VictoriaMetrics self-scraped metrics, and logs/traces wr
 storage metrics. Grafana checks service state, loopback listener ownership,
 application identity, pinned installation, deterministic configuration, and
 non-secret provisioned datasource records through a read-only SQLite connection.
-It also queries Metrics and Jaeger endpoints as the Grafana service account.
-With credentials configured, verification also makes a read-only authenticated
-Grafana API request and confirms the administrator identity. These checks establish
-provisioning, backend reachability and configured authentication, **not a datasource
-request through Grafana's proxy/query engine or full browser validation**. Save & test/Explore
-in the authenticated UI remains a disposable-host integration gate. No synthetic
-logs/traces are injected and application telemetry arrival is not claimed.
-`status` reports all four service states; use `verify` for health.
+It also queries Metrics, VictoriaLogs and Jaeger endpoints as the Grafana service
+account. With credentials configured, verification authenticates the administrator,
+checks the Logs plugin health endpoint, and sends a bounded read-only LogsQL query
+through Grafana's query engine. A valid empty result succeeds. No application log
+contents are printed and no synthetic logs/traces are injected.
+
+Without references, installation and verification preserve the existing unmanaged
+credential workflow: plugin integrity, provisioning records and direct backend
+queries are checked, but the authenticated Logs plugin query is explicitly reported
+as unchecked. Supply the existing Grafana secret-reference options to exercise it;
+DragonTools never assumes a default password or enables anonymous access. Metrics
+and Traces checks establish backend reachability, not queries through Grafana's
+query engine. Save & test/Explore in the browser remains a disposable-host gate.
+
+`status` reports all four service states and the expected three datasource mappings.
+It does not resolve credentials, inspect datasource records or perform query checks;
+use `verify` for health.
 
 Verification separates fixed configuration checks from startup readiness. Unit,
 checksum, symlink, service-user, hardening and process-argument mismatches, and
@@ -408,6 +436,7 @@ restarting healthy services. There is no controller-side state database.
 | Account | Correct account is a no-op; an incompatible account fails explicitly |
 | Directory | Matching type, owner, group, and mode are a no-op; only supported metadata repairs are made |
 | Binary | Valid pinned binary is reused; a missing/changed binary is verified and installed atomically |
+| Grafana Logs plugin | Matching pinned file catalog is reused without download; verified replacements switch atomically and set only Grafana restart intent |
 | Grafana config/provisioning | Deterministic managed files are reused unchanged; content changes record only Grafana restart intent |
 | Grafana credentials | Configured credentials authenticate before mutation; correct credentials skip reset and restart; omitted references leave credentials unmanaged |
 | Unit | Identical content is reused; changed content is replaced atomically; metadata-only repair does not restart |
@@ -540,8 +569,8 @@ Expected: all three HTTP health checks succeed, the metrics query returns stored
 and both storage read-only metrics are `0`. The tunnel exposes raw APIs on your
 workstation's loopback; close it when finished. No application logs or traces are
 ingested by this installation, and verification never injects synthetic telemetry.
-Grafana is the normal human-facing UI for Metrics and Traces; use its separate
-port-3000 tunnel from Quick Start. Logs UI integration remains deferred.
+Grafana is the normal human-facing UI for Metrics, Logs and Traces; use its
+port-3000 tunnel from Quick Start.
 
 ## Command availability
 
@@ -562,8 +591,9 @@ port-3000 tunnel from Quick Start. Logs UI integration remains deferred.
 | VictoriaLogs | Implemented; loopback only, without application-host ingestion |
 | VictoriaTraces | Implemented; loopback only, without remote application OTLP ingestion |
 | vmalert / Alertmanager | Unavailable; rules are only rendered locally |
-| Grafana OSS | Implemented; loopback:3000, local authentication, Metrics/Traces datasources |
-| Grafana Logs datasource / dashboards | Unavailable |
+| Grafana OSS | Implemented; loopback:3000, local authentication, Metrics/Logs/Traces datasources |
+| Grafana Logs datasource | Official plugin 0.32.0; authenticated health/query checks with configured references |
+| Dashboards | Unavailable |
 | Telegram | Unavailable |
 | Vector / vmagent / OTel Collector / monitoring agents | Unavailable |
 | Monitoring firewall / TLS | Unavailable |
@@ -633,7 +663,9 @@ Paths:
 - `/var/lib/dragontools/victoriatraces/` (owned by `dt-victoriatraces`, mode 0750)
 - `/etc/systemd/system/dragontools-victoriatraces.service`
 - `/opt/dragontools/components/grafana/13.2.2/` and `current` symlink
-- `/var/lib/dragontools/grafana/` (SQLite and plugins; owned by `dt-grafana`, mode 0750)
+- `/var/lib/dragontools/grafana/` (SQLite data; owned by `dt-grafana`, mode 0750)
+- `/var/lib/dragontools/grafana/plugins-versions/victoriametrics-logs-datasource/0.32.0/` (root-owned signed plugin and catalog)
+- `/var/lib/dragontools/grafana/plugins/victoriametrics-logs-datasource` (atomic active link; both plugin roots read-only to the service)
 - `/etc/dragontools/grafana/grafana.ini` and `provisioning/datasources/dragontools.yaml`
 - `/etc/systemd/system/dragontools-grafana.service`
 
@@ -644,7 +676,9 @@ the target. Fix the cause, inspect `journalctl -u dragontools-victoriametrics`
 `journalctl -u dragontools-victoriatraces`, or `journalctl -u dragontools-grafana`, then rerun. Each component retains its
 own restart marker until verification succeeds. A later component failure
 does not roll back components already verified in that run. No automatic rollback
-or component upgrades are implemented. Run one install
+or generic component-upgrade command is implemented. A reviewed future plugin pin
+can be staged alongside the prior release and atomically selected; old plugin
+releases remain available for operator recovery. Run one install
 per target at a time. Do not replace managed paths with symlinks or locally edit the
 managed unit; its content is reconciled. Unmanaged unit files and systemd drop-ins for the managed service are refused.
 For `SshConnectionFailed`, check the host fingerprint, authentication and reachability
@@ -686,7 +720,7 @@ not establish runtime or production compatibility.
 
 ## Next milestones
 
-Grafana Logs datasource and dashboards, authenticated datasource integration checks, vmalert,
+Dashboards, authenticated Metrics/Traces datasource query checks, vmalert,
 Alertmanager/Telegram; Vector for journald logs and host metrics, vmagent for
 application `/metrics`, and OTel Collector for application OTLP;
 bounded journald; restricted ingestion; safe monitoring firewall; DNS-01 TLS;
@@ -701,6 +735,6 @@ oneshot maintenance; update/security checks and alerts.
 No Kubernetes, Docker orchestration, generic configuration management, Windows,
 non-systemd monitoring hosts, generic Linux distribution support, multi-node Victoria clusters,
 HA monitoring, dynamic service discovery, generic cloud-provider management,
-multiple alert providers, generic firewall management, plugins, public resource DSL,
+multiple alert providers, generic firewall management, a general plugin framework, public resource DSL,
 multi-tenant authentication, per-agent API tokens, mTLS, automatic monitoring-component
 upgrades, automatic reboots, or arbitrary shell hooks.

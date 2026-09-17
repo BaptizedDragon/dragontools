@@ -38,10 +38,26 @@ Explicit references opt in to reconciliation and read-only authenticated identit
 verification. Authentication is checked before mutation so correct credentials do
 not trigger a reset or restart. Anonymous access, auth proxy and user signup remain
 disabled. Target-local users can reach loopback and the target OS/administrators
-remain trusted. No firewall ports, TLS, third-party plugin or ingestion is added.
-Grafana verification reads non-secret datasource fields from SQLite, queries local
-backends as its service account, and uses a read-only authenticated administrator
-API check when configured. It does not claim datasource-proxy or browser validation.
+remain trusted. No firewall ports, TLS or ingestion is added.
+Grafana verification reads non-secret datasource fields from SQLite and queries local
+backends as its service account. Configured credentials additionally check the
+administrator identity and the official Logs plugin health/query path through
+Grafana. These API checks are read-only, including the query POST; they neither
+write log data nor modify datasource configuration. Unconfigured verification
+reports the authenticated Logs query as unchecked. Browser validation remains a
+separate disposable-host gate.
+
+The official VictoriaLogs datasource plugin is executable third-party code within
+Grafana's existing `dt-grafana` service boundary. Its exact versioned HTTPS archive,
+per-file catalog and preserved signed manifest are checked; arbitrary unsigned
+plugins are not allowed. Plugin trees and their active selection are root-owned,
+with both persistent plugin roots mounted read-only in the service namespace.
+Private staging rejects unsafe archive entries and unrecognized existing trees.
+Atomic publication preserves the previous release for operator recovery and keeps
+Grafana restart intent through failed verification. No plugin TCP listener or
+public backend access is added on supported Linux targets. The checksum and
+signature trust the reviewed publisher; this is not a third-party-code security
+audit. See [the exact pins and source review](design.md#official-victorialogs-datasource-plugin).
 
 ## Secrets and privileges
 

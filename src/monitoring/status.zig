@@ -39,7 +39,7 @@ pub fn status(a: std.mem.Allocator, r: remote.Remote, report: *install.Report) !
     const vt = try report.call(r, .status, "systemctl show dragontools-victoriatraces.service --property=LoadState,ActiveState,SubState,UnitFileState --no-pager");
     report.component = .grafana;
     const grafana = try report.call(r, .status, "systemctl show dragontools-grafana.service --property=LoadState,ActiveState,SubState,UnitFileState --no-pager");
-    return std.fmt.allocPrint(a, "VictoriaMetrics: loopback:8428\n  state: {s}\n  enabled: {s}\nVictoriaLogs: loopback:9428\n  state: {s}\n  enabled: {s}\nVictoriaTraces: loopback:{d}\n  state: {s}\n  enabled: {s}\nGrafana: loopback:3000\n  state: {s}\n  enabled: {s}\nListeners above are the managed policy. Run monitoring verify to check effective policy, health, identity and storage.\n", .{ state(vm), enabled(vm), state(vl), enabled(vl), traces.port, state(vt), enabled(vt), state(grafana), enabled(grafana) });
+    return std.fmt.allocPrint(a, "VictoriaMetrics: loopback:8428\n  state: {s}\n  enabled: {s}\nVictoriaLogs: loopback:9428\n  state: {s}\n  enabled: {s}\nVictoriaTraces: loopback:{d}\n  state: {s}\n  enabled: {s}\nGrafana: loopback:3000\n  state: {s}\n  enabled: {s}\n  datasources (expected policy; not queried):\n    Metrics -> VictoriaMetrics\n    Logs -> VictoriaLogs\n    Traces -> VictoriaTraces\nListeners and datasources above are the managed policy. Run monitoring verify to check effective policy, health, identity and storage.\n", .{ state(vm), enabled(vm), state(vl), enabled(vl), traces.port, state(vt), enabled(vt), state(grafana), enabled(grafana) });
 }
 
 test "status recognizes exact properties without exposing remote text" {
@@ -64,5 +64,6 @@ test "status reports all four components and enablement independently" {
     try std.testing.expect(std.mem.indexOf(u8, output, "VictoriaLogs: loopback:9428\n  state: inactive or unhealthy\n  enabled: no") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "VictoriaTraces: loopback:10428\n  state: not installed\n  enabled: not installed") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "Grafana: loopback:3000\n  state: active\n  enabled: yes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "datasources (expected policy; not queried):\n    Metrics -> VictoriaMetrics\n    Logs -> VictoriaLogs\n    Traces -> VictoriaTraces") != null);
     try std.testing.expectEqual(@as(usize, 4), report.completed);
 }

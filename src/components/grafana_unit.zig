@@ -38,6 +38,7 @@ pub fn render(a: std.mem.Allocator) ![]const u8 {
         \\AmbientCapabilities=
         \\RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
         \\ReadWritePaths=/var/lib/dragontools/grafana
+        \\ReadOnlyPaths=/var/lib/dragontools/grafana/plugins /var/lib/dragontools/grafana/plugins-versions
         \\TasksMax=512
         \\UMask=0027
         \\StandardOutput=journal
@@ -59,14 +60,14 @@ test "Grafana unit has a dedicated account pinned home and one persistent write 
     defer a.free(second);
     try std.testing.expectEqualStrings(first, second);
     for ([_][]const u8{
-        "User=dt-grafana\n",           "Group=dt-grafana\n",                                 "ExecStart=" ++ executable ++ " server ",
-        "--homepath=" ++ homepath,     "--config=/etc/dragontools/grafana/grafana.ini\n",    "Restart=on-failure\n",
-        "RestartSec=5s\n",             "NoNewPrivileges=yes\n",                              "PrivateTmp=yes\n",
-        "PrivateDevices=yes\n",        "ProtectHome=yes\n",                                  "ProtectSystem=strict\n",
-        "ProtectKernelTunables=yes\n", "ProtectKernelModules=yes\n",                         "ProtectControlGroups=yes\n",
-        "RestrictSUIDSGID=yes\n",      "LockPersonality=yes\n",                              "CapabilityBoundingSet=\n",
-        "AmbientCapabilities=\n",      "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX\n", "ReadWritePaths=/var/lib/dragontools/grafana\n",
-        "UMask=0027\n",                "StandardOutput=journal\n",
+        "User=dt-grafana\n",                                                                                  "Group=dt-grafana\n",                                 "ExecStart=" ++ executable ++ " server ",
+        "--homepath=" ++ homepath,                                                                            "--config=/etc/dragontools/grafana/grafana.ini\n",    "Restart=on-failure\n",
+        "RestartSec=5s\n",                                                                                    "NoNewPrivileges=yes\n",                              "PrivateTmp=yes\n",
+        "PrivateDevices=yes\n",                                                                               "ProtectHome=yes\n",                                  "ProtectSystem=strict\n",
+        "ProtectKernelTunables=yes\n",                                                                        "ProtectKernelModules=yes\n",                         "ProtectControlGroups=yes\n",
+        "RestrictSUIDSGID=yes\n",                                                                             "LockPersonality=yes\n",                              "CapabilityBoundingSet=\n",
+        "AmbientCapabilities=\n",                                                                             "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX\n", "ReadWritePaths=/var/lib/dragontools/grafana\n",
+        "ReadOnlyPaths=/var/lib/dragontools/grafana/plugins /var/lib/dragontools/grafana/plugins-versions\n", "UMask=0027\n",                                       "StandardOutput=journal\n",
     }) |needle| try std.testing.expect(std.mem.indexOf(u8, first, needle) != null);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, first, "ReadWritePaths="));
     try std.testing.expect(std.mem.indexOf(u8, first, "CAP_") == null);

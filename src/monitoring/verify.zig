@@ -116,6 +116,8 @@ pub fn verify(a: std.mem.Allocator, r: remote.Remote, report: *install.Report) !
     report.beginComponent(.grafana);
     try @import("grafana_verify.zig").health(a, r, report, machine.arch);
     try @import("grafana_credentials.zig").verify(a, r, report);
+    try @import("grafana_credentials.zig").verifyLogs(a, r, report);
+    report.emit(if (report.logs_query_verified) .logs_query_verified else .logs_query_unchecked);
     report.endComponent();
 }
 

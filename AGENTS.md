@@ -48,7 +48,7 @@ requested with `--set-default-shell`, after validating the discovered zsh path i
 Oh My Zsh source, use private staging and safe publication, and refuse conflicting
 paths. Do not add generic package/dotfile management or arbitrary shell hooks.
 
-Grafana uses loopback:3000 with local authentication enabled and provisioned Metrics/Traces.
+Grafana uses loopback:3000 with local authentication enabled and provisioned Metrics/Logs/Traces.
 Preserve its independent restart intent for binary, unit and configuration changes.
 Resolve configured administrator secret references locally before SSH; plans and
 status never resolve them. Keep both resolved username and password opaque and
@@ -57,11 +57,15 @@ Check desired authentication before credential mutation; unchanged credentials
 must never trigger a reset or restart. Use supported Grafana interfaces, never
 write its credential database directly. Standalone verify remains read-only.
 Do not retain administrator plaintext after reconciliation. Distinguish the
-read-only authenticated identity check and provisioning/backend checks from
-Grafana datasource query/UI validation. Monitoring configuration stays explicit
+read-only authenticated identity and Logs plugin health/query checks from
+Metrics/Traces backend checks and browser UI validation. Monitoring configuration stays explicit
 and narrow; CLI overrides file values. Progress carries fixed semantic events,
 never arbitrary strings, commands or secret values.
-The Logs datasource plugin and dashboards remain deferred.
+The official VictoriaLogs datasource plugin is pinned, integrity-checked and stored
+outside Grafana release binaries. Preserve its signature verification and independent
+Grafana restart intent; plugin/provisioning changes never restart VM/VL/VT. Without
+configured credentials, report that the authenticated Logs plugin query was not checked.
+Dashboards remain deferred.
 
 Keep unsupported components explicitly unavailable. Never return installation
 success for scaffolds. New components require reviewed pinned checksums, a dedicated
@@ -102,5 +106,5 @@ End this and every future Codex iteration with these five sections:
 
 When adding a component, report its exact pinned version, checksum provenance,
 and remaining verification limits. Keep deployment useful now without implying
-that the Grafana Logs datasource, dashboards, alerting, agents, or remote ingestion
+that dashboards, alerting, agents, or remote ingestion
 are already available.

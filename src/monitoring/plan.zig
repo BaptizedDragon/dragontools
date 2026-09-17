@@ -5,8 +5,9 @@ const vm = @import("../components/victoriametrics.zig");
 const vl = @import("../components/victorialogs.zig");
 const vt = @import("../components/victoriatraces.zig");
 const grafana = @import("../components/grafana.zig");
+const logs_plugin = @import("../components/grafana_victorialogs_plugin.zig");
 
-pub const unavailable = "Not yet available: Grafana Logs datasource, dashboards, vmalert, Alertmanager, Telegram, Vector, vmagent, OTel Collector, monitoring agents, firewall, TLS, update monitoring and maintenance.\n";
+pub const unavailable = "Not yet available: dashboards, vmalert, Alertmanager, Telegram, Vector, vmagent, OTel Collector, monitoring agents, firewall, TLS, update monitoring and maintenance.\n";
 
 pub fn render(a: std.mem.Allocator) ![]const u8 {
     return renderWithCredentials(a, false);
@@ -34,11 +35,14 @@ pub fn renderWithCredentials(a: std.mem.Allocator, configured: bool) ![]const u8
         "  install pinned OSS release {s} with a dedicated account and SQLite data\n" ++
         "  local authentication enabled\n" ++
         "  administrator credentials: {s}\n" ++
+        "  official VictoriaLogs datasource plugin {s} {s}; signed, SHA256-pinned, persistent versioned storage\n" ++
         "  Metrics datasource -> VictoriaMetrics http://127.0.0.1:8428\n" ++
+        "  Logs datasource -> VictoriaLogs http://127.0.0.1:9428\n" ++
         "  Traces datasource -> VictoriaTraces http://127.0.0.1:10428/select/jaeger\n" ++
         "  verify application identity, effective configuration, provisioned records and backend queries\n" ++
         "  {s}\n" ++
-        "  authenticated datasource queries and browser UI checks require manual verification through the tunnel\n\n" ++
+        "  {s}\n" ++
+        "  Metrics/Traces query-engine and browser UI checks require manual verification through the tunnel\n\n" ++
         "Access: SSH port forwarding only; public HTTPS, TLS and firewall management are unavailable.\n\n" ++
         "Safe rerun: inspect actual state, resume pending activation, and verify before finalization. Healthy unchanged services are not restarted; unchanged valid binaries are not downloaded. No controller state database.\n" ++
         "Alert policy is defined; rendering is partial/provisional. Host/service expressions await verified metric contracts. No rule deployment or alert evaluation/delivery.\n" ++
@@ -56,7 +60,10 @@ pub fn renderWithCredentials(a: std.mem.Allocator, configured: bool) ![]const u8
         policy.traces.cleanup_usage_percent,
         grafana.version,
         if (configured) "configured via secret references" else "unmanaged; change the initial admin password at first login",
+        logs_plugin.id,
+        logs_plugin.version,
         if (configured) "resolve credentials locally for install/verify; authenticate, reconcile during install only, then verify" else "credential authentication is not checked without explicit references",
+        if (configured) "verify Logs plugin health and a bounded read-only LogsQL query through Grafana" else "Logs plugin query requires administrator references; direct backend query and provisioning are checked",
     });
 }
 

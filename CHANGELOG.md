@@ -2,6 +2,24 @@
 
 ## 0.1.0-dev — unreleased
 
+- Install the signed official `victoriametrics-logs-datasource` **0.32.0** from the
+  versioned Grafana catalog ZIP. Pin its published SHA-256 and full file catalog;
+  preserve its verified signature without enabling unsigned plugins or online
+  installation. Keep root-owned persistent plugin versions outside Grafana server
+  binaries, with atomic selection and service read-only mounts.
+- Provision **Logs** at `http://127.0.0.1:9428` alongside Metrics and Traces. Verify
+  plugin integrity, deterministic provisioning, datasource records and direct
+  read-only LogsQL reachability. Configured Grafana references also verify plugin
+  health and a read-only query through Grafana; unconfigured runs explicitly report
+  that authenticated query as unchecked. Empty valid responses are accepted.
+- Plugin/provisioning changes restart only Grafana and retain its restart intent
+  through verification failures. Healthy unchanged reruns download nothing, rewrite
+  nothing and restart nothing. Preserve prior plugin state for operator recovery,
+  and let interrupted first-time plugin installations resume on rerun.
+- Show all three datasource mappings in plans/status and calm plugin/provisioning
+  progress. Status remains a lightweight service-state view, not query verification.
+  Document SSH tunnel access and the still-unrun real-host/browser checklist.
+
 - Add explicit version-1 monitoring TOML configuration for an OpenSSH alias and
   Grafana administrator secret references. CLI values override file values;
   local plans and status never resolve secrets. Literal passwords are rejected.
@@ -33,10 +51,10 @@
 - Provision immutable Metrics (Prometheus) and Traces (Jaeger `/select/jaeger`)
   datasources. Keep local authentication enabled and document the upstream first-login
   password change. No administrator credential is embedded or retained by DragonTools.
-  Defer the official VictoriaLogs plugin and dashboards explicitly.
+  The initial slice deferred the VictoriaLogs plugin (implemented above); dashboards remain deferred.
 - Verify Grafana identity, configuration, non-secret provisioned datasource database
   records and backend queries as the service UID without administrator credentials.
-  Authenticated Grafana proxy/query-engine checks remain a documented real-host gate.
+  Metrics/Traces query-engine and browser validation remain documented real-host gates.
 - Preserve per-component restart intent for Grafana binary/unit/config/provisioning
   changes and failures; unchanged installs reuse resources without downloads, rewrites
   or service restarts. VM/VL/VT keep their existing independent behavior.

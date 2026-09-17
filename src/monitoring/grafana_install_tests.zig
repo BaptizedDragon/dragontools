@@ -44,6 +44,14 @@ test "Grafana preflight preserves foreign configuration data and symlinks before
         \\printf '# Managed by DragonTools\n' > "$base/grafana.ini"
         \\printf '# Managed by DragonTools\n' > "$base/provisioning/datasources/dragontools.yaml"
         \\check 0
+        \\# A failed first plugin download/publication leaves managed plugin state.
+        \\# The ini must already exist so the next preflight can resume safely.
+        \\mkdir -p "$data/plugins" "$data/plugins-versions/victoriametrics-logs-datasource"
+        \\check 0
+        \\mv "$base/grafana.ini" "$DT_ROOT/managed.ini"
+        \\check 40
+        \\mv "$DT_ROOT/managed.ini" "$base/grafana.ini"
+        \\check 0
         \\printf 'unmanaged provisioning\n' > "$base/provisioning/datasources/other.yaml"
         \\check 40
         \\test "$(cat "$base/provisioning/datasources/other.yaml")" = 'unmanaged provisioning'

@@ -1,6 +1,6 @@
 const std = @import("std");
 const Secret = @import("../secrets/secret.zig").Secret;
-pub const Operation = enum { detect, user, directories, capacity, binary, config, provisioning, unit, activate, health, credentials, finalize, status, service_exists, host_inspect, host_packages, host_source, host_zshrc, host_verify, host_shell };
+pub const Operation = enum { detect, user, directories, capacity, binary, plugin, config, provisioning, unit, activate, health, credentials, finalize, status, service_exists, host_inspect, host_packages, host_source, host_zshrc, host_verify, host_shell };
 pub const Result = struct { code: u8, output: []const u8 = "" };
 /// Monotonic readiness timing, injectable without real waiting in tests.
 pub const Clock = struct {

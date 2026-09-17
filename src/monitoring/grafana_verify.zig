@@ -7,6 +7,8 @@ const grafana = @import("../components/grafana.zig");
 const config = @import("../components/grafana_config.zig");
 const unit = @import("../components/grafana_unit.zig");
 const readiness = @import("readiness.zig");
+const plugin = @import("../components/grafana_victorialogs_plugin.zig");
+pub const logs_backend_check = @embedFile("grafana_logs_backend.py");
 
 // This only queries non-secret datasource metadata. No user/password/token or
 // secure_json_data column is selected. Pinning the schema is intentional:
@@ -18,7 +20,7 @@ const readiness = @import("readiness.zig");
 // sqlstore.go creates the database with 0640; database_config.go explicitly sets
 // _journal_mode=DELETE when wal=false in this pinned version.
 pub const database_check =
-    \\import os, sqlite3, stat, sys, urllib.parse
+    \\import json, os, sqlite3, stat, sys, urllib.parse
     \\path = sys.argv[1]
     \\def require(ok):
     \\    if not ok:
@@ -45,14 +47,22 @@ pub const database_check =
     \\            return sqlite3.SQLITE_OK
     \\        return sqlite3.SQLITE_DENY
     \\    db.set_authorizer(authorize)
-    \\    rows = db.execute("SELECT org_id, uid, name, type, access, url, is_default, read_only, basic_auth, with_credentials, json_extract(json_data, '$.httpMethod'), json_extract(json_data, '$.prometheusType'), json_extract(json_data, '$.prometheusVersion') FROM data_source WHERE uid IN ('dragontools-metrics', 'dragontools-traces') ORDER BY uid").fetchall()
+    \\    rows = db.execute("SELECT org_id, uid, name, type, access, url, is_default, read_only, basic_auth, with_credentials, json_extract(json_data, '$.httpMethod'), json_extract(json_data, '$.prometheusType'), json_extract(json_data, '$.prometheusVersion') FROM data_source WHERE uid IN ('dragontools-metrics', 'dragontools-logs', 'dragontools-traces') ORDER BY uid").fetchall()
     \\    expected = [
+    \\        (1, "dragontools-logs", "Logs", "victoriametrics-logs-datasource", "proxy", "http://127.0.0.1:9428", 0, 1, 0, 0, None, None, None),
     \\        (1, "dragontools-metrics", "Metrics", "prometheus", "proxy", "http://127.0.0.1:8428", 1, 1, 0, 0, "POST", "Prometheus", "2.24.0"),
     \\        (1, "dragontools-traces", "Traces", "jaeger", "proxy", "http://127.0.0.1:10428/select/jaeger", 0, 1, 0, 0, None, None, None),
     \\    ]
     \\    # Missing rows are normal while first-start provisioning is in progress.
     \\    # An existing incompatible or duplicate row is policy drift, not readiness.
     \\    require(all(row in expected for row in rows) and len(set(rows)) == len(rows))
+    \\    # v13.2.2 provisioning createInsertCommand/createUpdateCommand build an
+    \\    # empty simplejson object when jsonData is omitted. Require that complete
+    \\    # Logs policy, not just absence of the three built-in datasource keys.
+    \\    # This excludes custom headers, tenant overrides, OAuth forwarding and
+    \\    # custom query parameters without selecting any secret storage column.
+    \\    for (raw,) in db.execute("SELECT json_data FROM data_source WHERE uid = 'dragontools-logs'").fetchall():
+    \\        require(isinstance(raw, str) and json.loads(raw) == {})
     \\    if rows != expected:
     \\        sys.exit(75)
     \\    db.close()
@@ -91,6 +101,7 @@ pub const managed_script =
     \\check_property CapabilityBoundingSet ""
     \\check_property AmbientCapabilities ""
     \\check_property ReadWritePaths /var/lib/dragontools/grafana
+    \\check_property ReadOnlyPaths '/var/lib/dragontools/grafana/plugins /var/lib/dragontools/grafana/plugins-versions'
     \\check_property WorkingDirectory /opt/dragontools/components/grafana/current
     \\for dir in /opt/dragontools /opt/dragontools/components /opt/dragontools/components/grafana /var/lib/dragontools /etc/dragontools /etc/dragontools/grafana /etc/dragontools/grafana/provisioning /etc/dragontools/grafana/provisioning/datasources /etc/dragontools/grafana/provisioning/dashboards; do
     \\  test ! -L "$dir" && test -d "$dir"
@@ -163,6 +174,11 @@ pub const backend_script = runtime_guard ++ "\n" ++
     \\check_listeners
     \\printf '{"metrics":%s,"traces":%s}' "$metrics" "$traces"
 ;
+pub const logs_backend_script = runtime_guard ++ "\n" ++
+    \\check_runtime listener
+    \\runuser --user dt-grafana -- python3 -I -B -c "$2"
+    \\check_listeners
+;
 
 pub fn health(a: std.mem.Allocator, r: remote.Remote, report: *install.Report, arch: host.Arch) !void {
     const preflight = try remote.shell(a, &.{ "sh", "-eu", "-c", @import("grafana_install.zig").preflight, "dragontools-grafana-preflight" });
@@ -178,6 +194,11 @@ pub fn health(a: std.mem.Allocator, r: remote.Remote, report: *install.Report, a
     const managed = try remote.shell(a, &.{ "sh", "-eu", "-c", script, "dragontools-grafana-managed_state" });
     defer a.free(managed);
     _ = try readiness.deterministic(a, r, report, .managed_state, managed);
+    const plugin_probe = try plugin.verifyCommand(a);
+    defer a.free(plugin_probe);
+    const plugin_integrity = try remote.shell(a, &.{ "sh", "-eu", "-c", plugin_probe, "dragontools-grafana-plugin_integrity" });
+    defer a.free(plugin_integrity);
+    _ = try readiness.deterministic(a, r, report, .plugin_integrity, plugin_integrity);
 
     const binary_hash = grafana.artifact(arch).binary_sha256;
     const active = try remote.shell(a, &.{ "sh", "-eu", "-c", active_script, "dragontools-grafana-service_active", binary_hash });
@@ -192,6 +213,9 @@ pub fn health(a: std.mem.Allocator, r: remote.Remote, report: *install.Report, a
     const backend = try remote.shell(a, &.{ "sh", "-eu", "-c", backend_script, "dragontools-grafana-backend_ready", binary_hash });
     defer a.free(backend);
     try readiness.poll(a, r, report, .backend_ready, readiness.telemetry_ms, backend, validateBackend);
+    const logs_backend = try remote.shell(a, &.{ "sh", "-eu", "-c", logs_backend_script, "dragontools-grafana-logs_backend_ready", binary_hash, logs_backend_check });
+    defer a.free(logs_backend);
+    try readiness.poll(a, r, report, .logs_backend_ready, readiness.telemetry_ms, logs_backend, readiness.ready);
 }
 
 fn member(value: std.json.Value, name: []const u8) !std.json.Value {

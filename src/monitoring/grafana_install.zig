@@ -102,13 +102,21 @@ pub fn install(a: std.mem.Allocator, r: remote.Remote, report: *workflow.Report,
     _ = try report.call(r, .user, preflight ++ "\n" ++ account);
     _ = try report.call(r, .directories, directories);
     _ = try report.call(r, .binary, try grafana.binaryCommand(a, arch));
+    // Establish managed configuration before creating plugin state in the data
+    // directory, so a failed download/publication can pass preflight on retry.
     _ = try report.call(r, .config, try files.writeCommand(a, config.ini_path, config.ini, grafana.pending));
-    _ = try report.call(r, .provisioning, try files.writeCommand(a, config.datasources_path, config.datasources, grafana.pending));
+    report.emit(.plugin_inspecting);
+    const plugin_result = try report.call(r, .plugin, try @import("../components/grafana_victorialogs_plugin.zig").installCommand(a));
+    report.emit(if (std.mem.eql(u8, plugin_result, "changed")) .plugin_installed else .plugin_current);
+    const provisioning_result = try report.call(r, .provisioning, try files.writeCommand(a, config.datasources_path, config.datasources, grafana.pending));
+    report.emit(if (std.mem.eql(u8, provisioning_result, "changed")) .datasources_updated else .datasources_current);
     _ = try report.call(r, .unit, try files.writeCommand(a, unit.unit_path, try unit.render(a), grafana.pending));
     try @import("grafana_credentials.zig").bootstrap(a, r, report);
     _ = try report.call(r, .activate, workflow.activate_grafana);
     try @import("grafana_verify.zig").health(a, r, report, arch);
     try @import("grafana_credentials.zig").reconcile(a, r, report);
+    try @import("grafana_credentials.zig").verifyLogs(a, r, report);
+    report.emit(if (report.logs_query_verified) .logs_query_verified else .logs_query_unchecked);
     _ = try report.call(r, .finalize, "rm -f /var/lib/dragontools/grafana-restart-required");
 }
 

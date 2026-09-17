@@ -19,6 +19,7 @@ pub const Report = struct {
     completed: usize = 0,
     progress: ?progress.Sink = null,
     grafana_credentials: ?*const @import("../secrets/secret.zig").Secret = null,
+    logs_query_verified: bool = false,
     component_changes_before: usize = 0,
     convergence_reported: bool = false,
     verification_reported: bool = false,

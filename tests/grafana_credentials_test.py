@@ -26,6 +26,24 @@ def profile(login=USER):
             "email": "operator@example.invalid", "name": "Preserved Name", "theme": "dark"}
 
 
+def logs_frame(rows=0):
+    # v0.32.0 response_logs.go creates these fields, even for zero log rows.
+    # Its SDK v0.296.4 data/frame_json.go writes each zero-length column as [];
+    # backend/data.go assigns the response map's RefID to the unnamed frame.
+    fields = [("Time", "time"), ("Line", "string"), ("id", "string"),
+              ("labels", "other"), ("streams", "other"), ("streamId", "string")]
+    return {"results": {"A": {"status": 200, "frames": [{
+        "schema": {"refId": "A", "fields": [{"name": name, "type": kind} for name, kind in fields]},
+        "data": {"values": [[1700000000000] * rows, [""] * rows, [""] * rows,
+                            [{}] * rows, [None] * rows, [""] * rows]},
+    }]}}}
+
+
+def logs_plugin():
+    return {"id": "victoriametrics-logs-datasource", "type": "datasource",
+            "info": {"version": "0.32.0"}, "signature": "valid"}
+
+
 class CredentialsTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="dragontools-credentials-")
@@ -276,6 +294,134 @@ class CredentialsTests(unittest.TestCase):
             self.assertNotIn(PASSWORD, text)
             self.assertNotIn("GF_SECURITY_ADMIN_PASSWORD", text)
             self.assertNotIn("EnvironmentFile=", text)
+
+    def test_logs_query_matches_pinned_upstream_and_is_bounded_readonly(self):
+        body = credentials.logs_query_body()
+        self.assertEqual("now-5m", body["from"])
+        self.assertEqual("now", body["to"])
+        self.assertEqual(1, len(body["queries"]))
+        query = body["queries"][0]
+        self.assertEqual({"uid": "dragontools-logs", "type": "victoriametrics-logs-datasource"}, query["datasource"])
+        self.assertEqual("instant", query["queryType"])
+        self.assertEqual("* | fields _time", query["expr"])
+        self.assertEqual(1, query["maxLines"])
+        self.assertNotIn(USER, repr(body))
+        self.assertNotIn(PASSWORD, repr(body))
+
+    def test_logs_verification_accepts_valid_zero_rows_without_mutation(self):
+        for rows in (0, 1):
+            with mock.patch.object(credentials, "request", side_effect=[logs_plugin(), {"status": "OK"}, logs_frame(rows)]) as request, mock.patch.object(credentials, "reset") as reset, mock.patch.object(credentials, "database_users") as database, mock.patch.object(credentials.subprocess, "run") as process:
+                self.assertEqual("unchanged", credentials.logs_verify(USER, PASSWORD))
+                self.assertEqual(["GET", "GET", "POST"], [call.args[0] for call in request.call_args_list])
+                self.assertEqual([credentials.LOGS_SETTINGS, credentials.LOGS_HEALTH, credentials.LOGS_QUERY], [call.kwargs["path"] for call in request.call_args_list])
+                reset.assert_not_called()
+                database.assert_not_called()
+                process.assert_not_called()
+        self.assertEqual([], os.listdir(self.temp.name))
+
+    def test_logs_delayed_health_and_query_readiness(self):
+        tick, sleeps = [0], []
+        def sleep(seconds):
+            sleeps.append(seconds)
+            tick[0] += seconds
+        delayed_query = {"results": {"A": {"status": 500, "error": "private backend error"}}}
+        responses = [logs_plugin(), credentials.Failure(84), {"status": "ERROR"}, {"status": "OK"},
+                     delayed_query, delayed_query, logs_frame()]
+        with mock.patch.object(credentials.time, "monotonic", side_effect=lambda: tick[0]), mock.patch.object(credentials.time, "sleep", side_effect=sleep), mock.patch.object(credentials, "request", side_effect=responses) as request:
+            self.assertEqual("unchanged", credentials.logs_verify(USER, PASSWORD))
+            self.assertEqual(7, request.call_count)
+        self.assertEqual([0.5, 1, 0.5, 1], sleeps)
+
+    def test_logs_timeout_is_failure_and_auth_failure_is_not_retried(self):
+        tick = [0]
+        def sleep(seconds):
+            tick[0] += seconds
+        with mock.patch.object(credentials.time, "monotonic", side_effect=lambda: tick[0]), mock.patch.object(credentials.time, "sleep", side_effect=sleep), mock.patch.object(credentials, "request", side_effect=credentials.Failure(84)):
+            with self.assertRaises(credentials.Failure) as error:
+                credentials.logs_ready(USER, PASSWORD)
+            self.assertEqual(87, error.exception.code)
+        self.assertEqual(45, tick[0])
+        with mock.patch.object(credentials, "request", return_value=None) as request, mock.patch.object(credentials.time, "sleep") as sleep:
+            with self.assertRaises(credentials.Failure) as error:
+                credentials.logs_verify(USER, PASSWORD)
+            self.assertEqual(83, error.exception.code)
+            request.assert_called_once()
+            sleep.assert_not_called()
+
+    def test_loaded_plugin_version_signature_and_missing_plugin_fail_immediately(self):
+        invalid = [{}, credentials.Failure(84)]
+        for key, value in [("signature", "unsigned"), ("signature", "modified"), ("id", "other"),
+                           ("type", "app"), ("info", {"version": "0.31.0"})]:
+            plugin = logs_plugin()
+            plugin[key] = value
+            invalid.append(plugin)
+        for plugin in invalid:
+            replacement = mock.Mock(side_effect=plugin) if isinstance(plugin, Exception) else mock.Mock(return_value=plugin)
+            with self.subTest(plugin=plugin), mock.patch.object(credentials, "request", replacement), mock.patch.object(credentials.time, "sleep") as sleep:
+                with self.assertRaises(credentials.Failure) as error:
+                    credentials.logs_verify(USER, PASSWORD)
+                self.assertEqual(88, error.exception.code)
+                replacement.assert_called_once()
+                sleep.assert_not_called()
+
+    def test_logs_invalid_data_is_not_success_or_retried(self):
+        invalid = [{}, {"results": {}}, {"error": "private error"}, {"results": {"A": {"frames": []}}},
+                   {"results": {"A": {"status": 400, "error": "invalid LogsQL"}}}, logs_frame(2)]
+        missing_column = logs_frame()
+        missing_column["results"]["A"]["frames"][0]["data"]["values"].pop()
+        invalid.append(missing_column)
+        wrong_schema = logs_frame()
+        wrong_schema["results"]["A"]["frames"][0]["schema"]["fields"][0]["type"] = "string"
+        invalid.append(wrong_schema)
+        for response in invalid:
+            with self.subTest(response=response), mock.patch.object(credentials, "request", return_value=response) as request, mock.patch.object(credentials.time, "sleep") as sleep:
+                with self.assertRaises(credentials.Failure) as error:
+                    credentials.logs_ready(USER, PASSWORD, query=True)
+                self.assertEqual(86, error.exception.code)
+                request.assert_called_once()
+                sleep.assert_not_called()
+
+    def test_logs_http_uses_org_one_and_retries_only_recognized_runtime_responses(self):
+        connection = mock.Mock()
+        headers = {}
+        connection.request.side_effect = lambda method, path, **kwargs: headers.update(kwargs["headers"])
+        response = connection.getresponse.return_value
+        cases = [
+            (200, {"status": "OK"}, credentials.LOGS_HEALTH, None),
+            (400, {"status": "ERROR", "message": USER + PASSWORD}, credentials.LOGS_HEALTH, 84),
+            (400, {"error": "bad request"}, credentials.LOGS_HEALTH, 86),
+            (400, {"results": {"A": {"status": 500, "error": USER + PASSWORD}}}, credentials.LOGS_QUERY, 84),
+            (400, {"results": {"A": {"status": 400, "error": USER + PASSWORD}}}, credentials.LOGS_QUERY, 86),
+            (403, {"message": USER}, credentials.LOGS_QUERY, 86),
+            (302, {}, credentials.LOGS_QUERY, 86),
+        ]
+        for status, body, endpoint, code in cases:
+            response.status = status
+            response.read.return_value = json.dumps(body).encode()
+            method = "GET" if endpoint == credentials.LOGS_HEALTH else "POST"
+            with self.subTest(status=status, endpoint=endpoint), mock.patch.object(credentials.http.client, "HTTPConnection", return_value=connection) as create:
+                if code:
+                    with self.assertRaises(credentials.Failure) as error:
+                        credentials.request(method, USER, PASSWORD, path=endpoint)
+                    self.assertEqual(code, error.exception.code)
+                    self.assertNotIn(USER, str(error.exception))
+                    self.assertNotIn(PASSWORD, str(error.exception))
+                else:
+                    self.assertEqual(body, credentials.request(method, USER, PASSWORD, path=endpoint))
+                create.assert_called_once_with("127.0.0.1", 3000, timeout=5)
+                self.assertEqual((method, endpoint), connection.request.call_args.args)
+                self.assertEqual("1", headers["X-Grafana-Org-Id"])
+                self.assertEqual({}, connection.request.call_args.kwargs["headers"])
+
+    def test_logs_main_outputs_only_fixed_token_and_suppresses_errors(self):
+        for result, code in [("unchanged", 0), (credentials.Failure(86), 86), (ValueError(USER + PASSWORD), 86)]:
+            output, errors = io.StringIO(), io.StringIO()
+            stdin = mock.Mock(buffer=io.BytesIO(json.dumps({"username": USER, "password": PASSWORD}).encode()))
+            replacement = mock.Mock(side_effect=result) if isinstance(result, Exception) else mock.Mock(return_value=result)
+            with mock.patch.object(credentials.sys, "stdin", stdin), mock.patch.object(credentials.sys, "argv", ["helper", "logs_verify"]), mock.patch.object(credentials, "logs_verify", replacement), contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                self.assertEqual(code, credentials.main())
+            self.assertEqual("unchanged" if code == 0 else "", output.getvalue())
+            self.assertEqual("", errors.getvalue())
 
 
 if __name__ == "__main__":

@@ -204,9 +204,13 @@ password = { op = "op://REDACTION-SENTINEL/Grafana/password" }
     assert re.search(r"(?:newest|last) (?:two|2) (?:daily )?partitions", traces), traces
     for component in ("VictoriaMetrics", "VictoriaLogs", "VictoriaTraces"):
         assert component not in unavailable, (component, unavailable)
-    for required in ("pinned OSS release", "local authentication enabled", "Metrics datasource", "http://127.0.0.1:8428", "Traces datasource", "http://127.0.0.1:10428/select/jaeger", "SSH port forwarding only", "manual verification"):
+    for required in ("pinned OSS release", "local authentication enabled", "Metrics datasource", "http://127.0.0.1:8428", "Logs datasource", "http://127.0.0.1:9428", "official VictoriaLogs datasource plugin", "victoriametrics-logs-datasource", "0.32.0", "signed, SHA256-pinned", "Traces datasource", "http://127.0.0.1:10428/select/jaeger", "SSH port forwarding only", "manual verification"):
         assert required in grafana, (required, grafana)
-    assert "Grafana Logs datasource" in unavailable and "dashboards" in unavailable
+    assert "Grafana Logs datasource" not in unavailable and "dashboards" in unavailable
+    assert "Logs plugin query requires administrator references" in grafana
+    configured_plan = local_run(config_args).stdout
+    assert "verify Logs plugin health and a bounded read-only LogsQL query through Grafana" in configured_plan
+    assert "Logs plugin query requires administrator references" not in configured_plan
     for component in ("vmalert", "Alertmanager", "Vector", "vmagent",
                       "OTel", "agents", "firewall", "TLS", "Telegram"):
         assert component in unavailable, (component, unavailable)
@@ -430,6 +434,32 @@ password = { op = "op://REDACTION-SENTINEL/Grafana/password" }
     assert "REDACTION-SENTINEL" not in status.stdout + status.stderr
     checked += 1
 
+    # Successful status still performs only the four service-state queries.
+    # Datasource names are expected policy, never evidence of a plugin query.
+    saved_ssh = ssh.read_text()
+    ssh.write_text("""#!/bin/sh
+for argument do command=$argument; done
+case "$command" in
+  *systemctl*show*--property=LoadState,ActiveState,SubState,UnitFileState*)
+    printf 'status\\n' >> "$DRAGONTOOLS_TEST_MARKER"
+    printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\nUnitFileState=enabled\\n';;
+  *) exit 91;;
+esac
+""")
+    marker.unlink(missing_ok=True)
+    status = subprocess.run([str(binary), "monitoring", "status", "--config", str(config)],
+                            env=env, input="", capture_output=True, text=True, timeout=15)
+    assert status.returncode == 0, (status.stdout, status.stderr)
+    assert marker.read_text() == "status\n" * 4
+    assert "datasources (expected policy; not queried):" in status.stdout
+    for mapping in ("Metrics -> VictoriaMetrics", "Logs -> VictoriaLogs", "Traces -> VictoriaTraces"):
+        assert mapping in status.stdout, status.stdout
+    assert "query verified" not in status.stdout and "credentials verified" not in status.stdout
+    assert "REDACTION-SENTINEL" not in status.stdout + status.stderr
+    assert not provider_marker.exists(), "Successful status resolved references"
+    ssh.write_text(saved_ssh)
+    checked += 1
+
     # Resolution failure happens before SSH and cannot reveal provider output or
     # configured reference paths. The real 1Password CLI is never invoked.
     marker.unlink(missing_ok=True)
@@ -535,7 +565,7 @@ esac
                   + "with open(os.environ['DRAGONTOOLS_PROVIDER_MARKER'], 'a') as output: output.write('resolved\\n')\n"
                   + "sys.stdout.write(values[field])\n")
     ssh.write_text(f"#!{sys.executable}\n" + f"expected = {dummy_credentials!r}\n" + '''
-import json, os, sys
+import json, os, shlex, sys
 from pathlib import Path
 assert all(value not in argument for value in expected.values() for argument in sys.argv)
 command = sys.argv[-1]
@@ -544,7 +574,16 @@ metrics = {"status": "success", "data": {"resultType": "vector", "result": [
     {"metric": {"__name__": "vm_app_version"}, "value": [1, "1"]}]}}
 if "Pinned Grafana credential operations" in command:
     assert json.load(sys.stdin) == expected
-    with marker.open('a') as output: output.write('stdin credentials verified\\n')
+    # Alias mode wraps the fixed Python command in a privileged shell selection.
+    candidates = [item for item in shlex.split(command) if "Pinned Grafana credential operations" in item]
+    args = shlex.split(candidates[0]) if command.startswith("if ") else shlex.split(command)
+    mode = args[-1].removesuffix(";")
+    assert mode in ("bootstrap", "reconcile", "verify", "logs_verify")
+    with marker.open('a') as output: output.write('stdin ' + mode + ' verified\\n')
+    if mode == "logs_verify" and os.environ.get("DRAGONTOOLS_LOGS_FAIL"):
+        print("REDACTION-SENTINEL remote query stderr", file=sys.stderr)
+        print(expected["password"])
+        sys.exit(86)
     sys.stdout.write('unchanged')
 elif '/etc/os-release' in command:
     sys.stdout.write('ubuntu\\n24.04\\nx86_64\\n')
@@ -574,8 +613,8 @@ else:
         assert all(value not in output for value in dummy_credentials.values()), output
         assert "REDACTION-SENTINEL" not in output, output
         assert provider_marker.read_text() == "resolved\nresolved\n"
-        checks = 2 if command == "install" else 1
-        assert marker.read_text() == "stdin credentials verified\n" * checks
+        modes = ("bootstrap", "reconcile", "logs_verify") if command == "install" else ("verify", "logs_verify")
+        assert marker.read_text() == "".join(f"stdin {mode} verified\n" for mode in modes)
         for number, component in enumerate(("VictoriaMetrics", "VictoriaLogs", "VictoriaTraces", "Grafana"), 1):
             heading = f"[{number}/4] {component}"
             assert heading in result.stdout, result.stdout
@@ -584,7 +623,46 @@ else:
             assert component_output.index("verifying...") < component_output.index("healthy; no changes")
         assert "administrator credentials verified" in result.stdout
         assert "administrator credentials updated" not in result.stdout
+        assert "Logs datasource health and query verified" in result.stdout
+        assert "Logs plugin: health and authenticated query verified" in result.stdout
+        for name in ("Metrics", "Logs", "Traces"):
+            assert f"{name} datasource: provisioning and backend query verified" in result.stdout
+        assert "authenticated query unchecked" not in result.stdout
         if command == "install":
             assert "No changes required." in result.stdout
+            assert "checking VictoriaLogs datasource plugin..." in result.stdout
+            assert "plugin current" in result.stdout and "datasources current" in result.stdout
         checked += 1
+
+    # Unconfigured compatibility mode never resolves or sends credentials and
+    # explicitly limits its evidence to provisioning/integrity/direct backends.
+    for command in ("install", "verify"):
+        marker.unlink(missing_ok=True)
+        provider_marker.unlink(missing_ok=True)
+        result = subprocess.run([str(binary), "monitoring", command, "--ssh-host", "monitoring"],
+                                env=env, input="", capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, (command, result.stdout, result.stderr)
+        assert not marker.exists() and not provider_marker.exists()
+        assert "Logs plugin query unchecked; configure administrator references to verify" in result.stdout
+        assert "Logs plugin: authenticated query unchecked" in result.stdout
+        assert "health and authenticated query verified" not in result.stdout
+        assert "Logs datasource: provisioning and backend query verified" in result.stdout
+        checked += 1
+
+    # Failure from the authenticated plugin query is a safe semantic failure,
+    # without leaking commands, credentials, upstream response or stderr.
+    marker.unlink(missing_ok=True)
+    provider_marker.unlink(missing_ok=True)
+    result = subprocess.run([str(binary), "monitoring", "verify", "--config", str(config)],
+                            env=dict(env, DRAGONTOOLS_LOGS_FAIL="1"), input="",
+                            capture_output=True, text=True, timeout=30)
+    output = result.stdout + result.stderr
+    assert result.returncode == 1 and "GrafanaLogsQueryFailed" in output, output
+    assert "Component: Grafana. Check: logs_datasource_ready." in output, output
+    assert marker.read_text() == "stdin verify verified\nstdin logs_verify verified\n"
+    assert "Logs datasource health and query verified" not in output
+    assert "REDACTION-SENTINEL" not in output
+    assert all(value not in output for value in dummy_credentials.values())
+    assert "/api/ds/query" not in output
+    checked += 1
 print(f"PASS: {checked} CLI smoke checks")

@@ -81,8 +81,8 @@ pub const ini =
 // VictoriaMetrics recommends the built-in Prometheus datasource. The pinned
 // VictoriaTraces v0.11.0 Jaeger handler lives beneath /select/jaeger, not root:
 // https://github.com/VictoriaMetrics/VictoriaTraces/blob/v0.11.0/app/vtselect/main.go
-// VictoriaLogs needs the separate victoriametrics-logs-datasource plugin, deferred
-// until its artifact, update, and runtime contracts receive their own review.
+// The signed VictoriaLogs plugin uses its backend's base URL without a prefix:
+// https://docs.victoriametrics.com/victorialogs/integrations/grafana/
 pub const datasources =
     \\# Managed by DragonTools
     \\apiVersion: 1
@@ -100,6 +100,15 @@ pub const datasources =
     \\      httpMethod: POST
     \\      prometheusType: Prometheus
     \\      prometheusVersion: 2.24.0
+    \\  - name: Logs
+    \\    uid: dragontools-logs
+    \\    orgId: 1
+    \\    type: victoriametrics-logs-datasource
+    \\    access: proxy
+    \\    url: http://127.0.0.1:9428
+    \\    isDefault: false
+    \\    editable: false
+    \\    version: 1
     \\  - name: Traces
     \\    uid: dragontools-traces
     \\    orgId: 1
@@ -140,7 +149,7 @@ test "Grafana config keeps authentication and loopback-only persistent SQLite ex
     }
 }
 
-test "Grafana provisions deterministic builtin Metrics and documented Jaeger datasource" {
+test "Grafana provisions deterministic Metrics Logs and Traces with private documented URLs" {
     const a = std.testing.allocator;
     const first = try renderDatasources(a);
     defer a.free(first);
@@ -150,10 +159,13 @@ test "Grafana provisions deterministic builtin Metrics and documented Jaeger dat
     for ([_][]const u8{ "name: Metrics\n", "type: prometheus\n", "url: http://127.0.0.1:8428\n", "isDefault: true\n", "name: Traces\n", "type: jaeger\n", "url: http://127.0.0.1:10428/select/jaeger\n" }) |needle| {
         try std.testing.expect(std.mem.indexOf(u8, first, needle) != null);
     }
-    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, first, "editable: false\n"));
-    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, first, "access: proxy\n"));
-    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, first, "url: http://127.0.0.1:"));
-    for ([_][]const u8{ "loki", "name: Logs", "https://", "deleteDatasources", "prune: true" }) |needle| {
+    for ([_][]const u8{ "name: Logs\n", "uid: dragontools-logs\n", "type: victoriametrics-logs-datasource\n", "url: http://127.0.0.1:9428\n" }) |needle| {
+        try std.testing.expect(std.mem.indexOf(u8, first, needle) != null);
+    }
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, first, "editable: false\n"));
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, first, "access: proxy\n"));
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, first, "url: http://127.0.0.1:"));
+    for ([_][]const u8{ "loki", "https://", "deleteDatasources", "prune: true" }) |needle| {
         try std.testing.expect(std.mem.indexOf(u8, first, needle) == null);
     }
 }

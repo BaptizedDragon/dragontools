@@ -6,7 +6,9 @@ owns username changes. Only original local administrator ID 1 is managed.
 
 Reviewed v13.2.2: pkg/cmd/grafana-cli/commands/{commands,reset_password_command}.go,
 pkg/services/sqlstore/sqlstore.go, pkg/api/user.go. Grafana API authentication may
-record its own last-seen metadata; verify makes only GET requests.
+record its own last-seen metadata; credential verify makes only GET requests.
+Logs verification adds the read-only datasource health and query APIs. Reviewed
+VictoriaLogs datasource v0.32.0 pkg/plugin/{datasource,query,response_logs}.go.
 """
 import base64
 import contextlib
@@ -26,6 +28,12 @@ CONFIG = "/etc/dragontools/grafana/grafana.ini"
 DATA = "/var/lib/dragontools/grafana"
 DATABASE = DATA + "/grafana.db"
 MAX_INPUT = 100000
+LOGS_UID = "dragontools-logs"
+LOGS_TYPE = "victoriametrics-logs-datasource"
+LOGS_VERSION = "0.32.0"
+LOGS_SETTINGS = "/api/plugins/" + LOGS_TYPE + "/settings"
+LOGS_HEALTH = "/api/datasources/uid/" + LOGS_UID + "/health"
+LOGS_QUERY = "/api/ds/query"
 
 
 class Failure(Exception):
@@ -135,30 +143,135 @@ def reset(username, password, bootstrap=False):
         env.clear()
 
 
-def request(method, username, password, body=None, timeout=5):
+def request(method, username, password, body=None, timeout=5, path="/api/user"):
     """Direct fixed loopback HTTP: no proxies, redirects, cookies or URL secrets."""
+    require((method, path) in (("GET", "/api/user"), ("PUT", "/api/user"),
+                              ("GET", LOGS_SETTINGS), ("GET", LOGS_HEALTH), ("POST", LOGS_QUERY)), 86)
+    logs = path != "/api/user"
+    failure = 86 if logs else 83
     connection = http.client.HTTPConnection("127.0.0.1", 3000, timeout=timeout)
     headers = {"Authorization": "Basic " + base64.b64encode((username + ":" + password).encode("utf-8")).decode("ascii"),
                "Accept": "application/json", "Content-Type": "application/json"}
+    if logs:
+        # Use the provisioned org without mutating the administrator's active org.
+        headers["X-Grafana-Org-Id"] = "1"
     try:
         encoded = json.dumps(body, separators=(",", ":")).encode("utf-8") if body is not None else None
-        connection.request(method, "/api/user", body=encoded, headers=headers)
+        connection.request(method, path, body=encoded, headers=headers)
         response = connection.getresponse()
         data = response.read(65537)
-        require(len(data) <= 65536, 83)
+        require(len(data) <= 65536, failure)
         if response.status == 401:
             return None
         if response.status in (500, 502, 503, 504):
             raise Failure(84)
-        require(response.status == 200, 83)
-        value = json.loads(data)
-        require(isinstance(value, dict), 83)
+        try:
+            value = json.loads(data)
+        except (ValueError, UnicodeError):
+            raise Failure(failure) from None
+        require(isinstance(value, dict), failure)
+        # Pinned Grafana maps a plugin's failed health check to HTTP 400. The
+        # datasource's URL/configuration and pinned bytes were checked already;
+        # plugin/backend availability can still be catching up after restart.
+        if response.status == 400 and path == LOGS_HEALTH and value.get("status") == "ERROR":
+            raise Failure(84)
+        # QueryData's backend error can be carried in an HTTP 400 envelope.
+        if response.status == 400 and path == LOGS_QUERY:
+            logs_query_result(value)
+        require(response.status == 200, failure)
         return value
     except (OSError, http.client.HTTPException):
         raise Failure(84) from None
     finally:
         connection.close()
         headers.clear()
+
+
+def logs_query_body():
+    # Upstream instant queries use /select/logsql/query, with explicit start/end
+    # and maxLines translated to limit. Select only the timestamp: query checks
+    # need no application messages/labels, and no log ingestion is performed.
+    return {"from": "now-5m", "to": "now", "queries": [{
+        "refId": "A", "datasource": {"uid": LOGS_UID, "type": LOGS_TYPE},
+        "queryType": "instant", "expr": "* | fields _time", "maxLines": 1,
+        "maxDataPoints": 1, "intervalMs": 1000,
+    }]}
+
+
+def logs_query_result(value):
+    """Accept the pinned plugin's valid empty logs frame, never a missing result."""
+    require(not value.get("error"), 86)
+    results = value.get("results")
+    require(isinstance(results, dict) and set(results) == {"A"}, 86)
+    result = results["A"]
+    require(isinstance(result, dict), 86)
+    status = result.get("status", 200)
+    if status in (500, 502, 503, 504) and result.get("error"):
+        raise Failure(84)
+    require(status == 200 and not result.get("error"), 86)
+    frames = result.get("frames")
+    # v0.32.0 always emits one logs frame, including for an empty backend body.
+    require(isinstance(frames, list) and len(frames) == 1, 86)
+    frame = frames[0]
+    require(isinstance(frame, dict), 86)
+    schema, data = frame.get("schema"), frame.get("data")
+    require(isinstance(schema, dict) and isinstance(data, dict), 86)
+    require(schema.get("refId") == "A", 86)
+    fields, values = schema.get("fields"), data.get("values")
+    require(isinstance(fields, list) and isinstance(values, list), 86)
+    require(len(fields) == len(values) and len(fields) >= 2, 86)
+    require(all(isinstance(field, dict) for field in fields), 86)
+    types = {field.get("name"): field.get("type") for field in fields}
+    require(types.get("Time") == "time" and types.get("Line") == "string", 86)
+    require(all(isinstance(column, list) and len(column) == len(values[0]) for column in values), 86)
+    require(len(values[0]) <= 1, 86)
+
+
+def logs_ready(username, password, query=False):
+    deadline = time.monotonic() + 45
+    delay = 0.5
+    while True:
+        try:
+            left = deadline - time.monotonic()
+            require(left > 0, 87)
+            value = request("POST" if query else "GET", username, password,
+                            logs_query_body() if query else None,
+                            timeout=min(5, left), path=LOGS_QUERY if query else LOGS_HEALTH)
+            require(value is not None, 83)
+            if query:
+                logs_query_result(value)
+            else:
+                if value.get("status") == "ERROR":
+                    raise Failure(84)
+                require(value.get("status") == "OK", 86)
+            require(time.monotonic() < deadline, 87)
+            return
+        except Failure as error:
+            if error.code != 84:
+                raise
+            left = deadline - time.monotonic()
+            require(left > 0, 87)
+            time.sleep(min(delay, left))
+            delay = 1
+
+
+def logs_verify(username, password):
+    # Called only after the read-only/reconciled identity check. No password reset,
+    # account API mutation, SQLite access or service operation belongs here.
+    # Pinned Grafana's GetPluginSettingByID exposes the loaded version/signature.
+    # A loader/signature error produces HTTP 500 before the DTO; never retry this
+    # deterministic gate or confuse bytes on disk with a loaded valid plugin.
+    try:
+        plugin = request("GET", username, password, path=LOGS_SETTINGS)
+    except Failure:
+        raise Failure(88) from None
+    require(plugin is not None, 83)
+    require(plugin.get("id") == LOGS_TYPE and plugin.get("type") == "datasource", 88)
+    require(isinstance(plugin.get("info"), dict) and plugin["info"].get("version") == LOGS_VERSION, 88)
+    require(plugin.get("signature") == "valid", 88)
+    logs_ready(username, password)
+    logs_ready(username, password, query=True)
+    return "unchanged"
 
 
 def authenticated(username, password):
@@ -231,15 +344,18 @@ def main():
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         os.umask(0o027)
         username, password = credentials(sys.stdin.buffer)
-        require(len(sys.argv) == 2 and sys.argv[1] in ("bootstrap", "reconcile", "verify"), 80)
-        result = bootstrap(username, password) if sys.argv[1] == "bootstrap" else reconcile(username, password, sys.argv[1] == "verify")
+        require(len(sys.argv) == 2 and sys.argv[1] in ("bootstrap", "reconcile", "verify", "logs_verify"), 80)
+        if sys.argv[1] == "logs_verify":
+            result = logs_verify(username, password)
+        else:
+            result = bootstrap(username, password) if sys.argv[1] == "bootstrap" else reconcile(username, password, sys.argv[1] == "verify")
         sys.stdout.write(result)
         return 0
     except Failure as error:
         return error.code
     except Exception:
         # Never expose exceptions, response bodies, SQL output or child stderr.
-        return 83
+        return 86 if len(sys.argv) == 2 and sys.argv[1] == "logs_verify" else 83
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ host utility, without a generic resource DSL.
 Small concrete Zig modules render controlled system commands. The controller is
 short-lived and connects only via OpenSSH. Managed services run directly under
 systemd. There is no persistent remote control daemon, container requirement,
-provider abstraction, arbitrary shell hooks, or plugin system.
+provider abstraction, arbitrary shell hooks, or general plugin framework.
 
 ## Implemented boundary
 
@@ -74,19 +74,17 @@ Browser 127.0.0.1:3000 -- SSH tunnel --> Grafana OSS 13.2.2
                                           +-- Metrics --> VictoriaMetrics v1.151.0
                                           |               127.0.0.1:8428
                                           |               90d; reserve: 20%
+                                          +-- Logs ----> VictoriaLogs v1.52.0
+                                          |               127.0.0.1:9428
+                                          |               100y; partition budget: 75%
                                           +-- Traces --> VictoriaTraces v0.11.0
                                                           127.0.0.1:10428
                                                           100y; partition budget: 75%
 
-                                        VictoriaLogs v1.52.0
-                                          127.0.0.1:9428
-                                          100y; partition budget: 75%
-                                          Grafana Logs datasource unavailable
-
 PUBLIC INBOUND: SSH :22 from administrator IP only (operator-managed firewall)
 ```
 
-Grafana Logs integration, agents, remote ingestion, dashboards, alert evaluation/delivery, monitoring
+Agents, remote ingestion, dashboards, alert evaluation/delivery, monitoring
 firewall, TLS, and frontend telemetry are unavailable. The controller exits after
 the command; no controller-side state database or resident remote agent is added.
 
@@ -267,7 +265,17 @@ executable. Release assets stay root-owned under
 SQLite, plugins and other persistent state live under `/var/lib/dragontools/grafana`.
 Root-owned deterministic files under `/etc/dragontools/grafana` configure the
 explicit `127.0.0.1:3000` listener, console logging to journald, local authentication,
-and Metrics/Traces provisioning. No third-party plugin or dashboard is installed.
+and Metrics/Logs/Traces provisioning. The official VictoriaLogs datasource plugin
+0.32.0 is pinned independently of Grafana; no dashboard is installed.
+
+The plugin lives under root-owned `plugins-versions/victoriametrics-logs-datasource/`
+inside the persistent data area, with an atomically selected link in `plugins/`.
+Both roots are read-only in the service mount namespace even though SQLite's parent
+is writable. The signed multi-platform package is retained intact and its full
+catalog is checked on every run. Grafana's embedded signature key accepts the
+reviewed manifest without online key retrieval or an unsigned-plugin exception.
+A pinned plugin change records only Grafana restart intent; old releases remain
+available after atomic replacement. [Exact plugin pins and trust boundary](design.md#official-victorialogs-datasource-plugin).
 
 Without configured secret references, Grafana's standard `admin` / `admin` fresh
 bootstrap flow applies, followed by an immediate password change through the SSH
@@ -285,8 +293,8 @@ Anonymous access, auth proxy and signup remain disabled. Target-local users can
 reach loopback, so initialize promptly on a trusted host.
 
 Metrics uses Grafana's built-in Prometheus datasource at `127.0.0.1:8428`;
+Logs uses the signed `victoriametrics-logs-datasource` plugin at `127.0.0.1:9428`;
 Traces uses the built-in Jaeger datasource at `127.0.0.1:10428/select/jaeger`.
-The official VictoriaLogs integration requires a separate plugin, which is deferred.
 The stores remain independently usable and loopback-only. No public ingress,
 firewall rule, TLS, agent, or application ingestion edge is added.
 
@@ -298,11 +306,14 @@ private listener ownership, HTTP identity, configuration, and non-secret datasou
 records through read-only SQLite. Queries to the provisioned backend endpoints run
 as `dt-grafana`, proving reachability and response contracts. With configured
 credentials, verification additionally authenticates a read-only Grafana identity
-request and confirms administrator privileges. Verification never changes accounts
-or resets passwords. This does not exercise datasource requests through Grafana's
-proxy/query engine; Save & test and Explore remain an explicit disposable-host
-integration gate. Unconfigured verification continues to check public health,
-managed provisioning and private backend access without administrator credentials.
+request and confirms administrator privileges, checks Logs plugin health, then
+executes a bounded read-only LogsQL query through Grafana. Empty results are valid.
+Verification never changes accounts, resets passwords, writes logs or changes
+datasources. Unconfigured verification checks public health, plugin integrity,
+managed provisioning and private backend access while explicitly leaving the
+authenticated Logs query unchecked. Metrics/Traces query-engine and browser
+Save & test/Explore checks remain disposable-host integration gates. Lightweight
+status reports expected datasource policy, not authenticated query success.
 
 ## Service hardening
 
@@ -365,8 +376,7 @@ configuration. Host metric names will be established by Vector implementation;
 systemd service-state monitoring is deferred. No frontend telemetry is included.
 
 Grafana is the normal human-facing UI, with automatically provisioned
-VictoriaMetrics and VictoriaTraces datasources. VictoriaLogs UI integration remains
-deferred pending a reviewed plugin installation. vmalert sends to
+VictoriaMetrics, VictoriaLogs and VictoriaTraces datasources. Future vmalert sends to
 Alertmanager, which optionally sends grouped Telegram warning/critical/resolved
 notifications. Backend administrative APIs stay private. An ingestion gateway must
 expose only approved write routes; allowlisting a raw VictoriaMetrics port would

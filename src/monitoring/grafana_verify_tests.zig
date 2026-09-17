@@ -4,6 +4,14 @@ const remote = @import("../system/remote.zig");
 const install = @import("install.zig");
 const grafana = @import("../components/grafana.zig");
 
+test "direct LogsQL backend fixtures accept empty responses and keep failures read-only" {
+    const a = std.testing.allocator;
+    const result = try std.process.run(a, std.testing.io, .{ .argv = &.{ "python3", "-I", "-B", "tests/grafana_logs_backend_test.py" } });
+    defer a.free(result.stdout);
+    defer a.free(result.stderr);
+    try std.testing.expectEqual(@as(u8, 0), result.term.exited);
+}
+
 test "Grafana health requires application identity stored metrics and valid Jaeger results" {
     const a = std.testing.allocator;
     try verify.validate(a, verify.healthy_fixture);
@@ -75,8 +83,8 @@ test "Grafana rendered verification checks actual policy and never mutates remot
         try std.testing.expect(std.mem.indexOf(u8, combined, mutation) == null);
     }
     try std.testing.expectEqual(@as(usize, 0), report.changes);
-    try std.testing.expectEqual(@as(usize, 5), report.completed);
-    try std.testing.expectEqual(@as(usize, 5), capture.commands.items.len);
+    try std.testing.expectEqual(@as(usize, 7), report.completed);
+    try std.testing.expectEqual(@as(usize, 7), capture.commands.items.len);
     // Parse every actual generated shell body without running its commands.
     for (capture.commands.items) |command| {
         const script = try std.fmt.allocPrint(a, "python3() {{ :; }}\nsh() {{ command /bin/sh -n \"$@\"; }}\n{s}", .{command});
@@ -84,7 +92,7 @@ test "Grafana rendered verification checks actual policy and never mutates remot
         try std.testing.expectEqualStrings("", result.stderr);
         try std.testing.expectEqual(@as(u8, 0), result.term.exited);
     }
-    for ([_][]const u8{ verify.managed_script, verify.active_script, verify.http_script, verify.provisioning_script, verify.backend_script }) |body| {
+    for ([_][]const u8{ verify.managed_script, verify.active_script, verify.http_script, verify.provisioning_script, verify.backend_script, verify.logs_backend_script }) |body| {
         const inner = try std.process.run(a, std.testing.io, .{ .argv = &.{ "/bin/sh", "-n", "-c", body } });
         try std.testing.expectEqualStrings("", inner.stderr);
         try std.testing.expectEqual(@as(u8, 0), inner.term.exited);
@@ -153,6 +161,7 @@ test "Grafana actual SQLite probe rejects drift and leaves database bytes metada
         \\    db = sqlite3.connect(path)
         \\    db.execute("CREATE TABLE data_source (org_id INTEGER, uid TEXT, name TEXT, type TEXT, access TEXT, url TEXT, is_default INTEGER, read_only INTEGER, basic_auth INTEGER, with_credentials INTEGER, json_data TEXT)")
         \\    db.executemany("INSERT INTO data_source VALUES (?,?,?,?,?,?,?,?,?,?,?)", [
+        \\        (1, "dragontools-logs", "Logs", "victoriametrics-logs-datasource", "proxy", "http://127.0.0.1:9428", 0, 1, 0, 0, "{}"),
         \\        (1, "dragontools-metrics", "Metrics", "prometheus", "proxy", "http://127.0.0.1:8428", 1, 1, 0, 0, json.dumps({"httpMethod":"POST", "prometheusType":"Prometheus", "prometheusVersion":"2.24.0"})),
         \\        (1, "dragontools-traces", "Traces", "jaeger", "proxy", "http://127.0.0.1:10428/select/jaeger", 0, 1, 0, 0, "{}"),
         \\    ])
@@ -169,8 +178,29 @@ test "Grafana actual SQLite probe rejects drift and leaves database bytes metada
         \\    create(path)
         \\    check(root, path, 0)
         \\    check(root, path, 0)
+        \\    # The pinned provisioner always writes an object, including its empty
+        \\    # default. Whitespace is immaterial; null/scalars/arrays are not policy.
+        \\    for options in ["{}", " { } \n"]:
+        \\        with sqlite3.connect(path) as db:
+        \\            db.execute("UPDATE data_source SET json_data = ? WHERE name = 'Logs'", (options,))
+        \\        check(root, path, 0)
+        \\    for options in [None, "null", "[]", "0", "false", '""', "not-json",
+        \\                    json.dumps({"customQueryParameters": "extra_filters=secret"}),
+        \\                    json.dumps({"multitenancyHeaders": {"AccountID": "1"}}),
+        \\                    json.dumps({"oauthPassThru": True}),
+        \\                    json.dumps({"httpHeaderName1": "Authorization"}),
+        \\                    json.dumps({"maxLines": 1000}),
+        \\                    json.dumps({"unknown": None})]:
+        \\        with sqlite3.connect(path) as db:
+        \\            db.execute("UPDATE data_source SET json_data = ? WHERE name = 'Logs'", (options,))
+        \\        check(root, path, 1)
+        \\    path.unlink()
+        \\    create(path)
         \\    for statement in [
         \\        "DELETE FROM data_source WHERE name = 'Traces'",
+        \\        "DELETE FROM data_source WHERE name = 'Logs'",
+        \\        "UPDATE data_source SET url = 'http://public.invalid:9428' WHERE name = 'Logs'",
+        \\        "UPDATE data_source SET type = 'loki' WHERE name = 'Logs'",
         \\        "UPDATE data_source SET url = 'http://127.0.0.1:10428' WHERE name = 'Traces'",
         \\        "UPDATE data_source SET read_only = 0",
         \\        "UPDATE data_source SET type = 'loki' WHERE name = 'Traces'",

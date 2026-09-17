@@ -5,12 +5,15 @@ const install = @import("install.zig");
 
 pub const Check = enum {
     managed_state,
+    plugin_integrity,
     service_active,
     http_ready,
     self_scrape_ready,
     storage_ready,
     provisioning_ready,
     backend_ready,
+    logs_backend_ready,
+    logs_datasource_ready,
     credentials_bootstrap,
     credentials_authenticated,
 };

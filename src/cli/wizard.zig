@@ -156,8 +156,8 @@ const overview = std.fmt.comptimePrint(
     \\  Traces retention: disk-bound, logical limit {s}; partition budget {d}% of capacity.
     \\  Logs/traces cleanup is periodic and preserves the newest two partitions.
     \\  Each budget excludes other writers, so adequate headroom is required.
-    \\  Grafana: local authentication and Metrics/Traces datasources, bound to 127.0.0.1:3000.
-    \\  Access with an explicit SSH tunnel; Logs UI and dashboards remain unavailable.
+    \\  Grafana: local authentication and Metrics/Logs/Traces datasources, bound to 127.0.0.1:3000.
+    \\  Access with an explicit SSH tunnel. The official VictoriaLogs plugin is pinned; dashboards remain unavailable.
     \\  No application-host ingestion is configured.
     \\  SSH installation with strict host-key checks, dedicated service users,
     \\  pinned and checksum-verified binaries, and systemd hardening.
@@ -464,7 +464,7 @@ fn preview(input: Input, args: []const []const u8, options: parse.Options) !void
     }, options.host, options.user, options.port });
     try input.write(summary);
     if (options.command == .install) {
-        try input.write(try std.fmt.allocPrint(input.a, "Domain: {s}\nAdmin IPs: {d}\nAgent IPs: {d}\nTLS: {s}\nTelegram: {s}\nStorage: metrics {d} days; {d}% data filesystem reserve.\nLogs: disk-bound retention, logical limit {s}; partition budget {d}% of filesystem capacity (other writers excluded).\nTraces: disk-bound retention, logical limit {s}; partition budget {d}% of filesystem capacity (other writers excluded).\nListeners: loopback:8428 (metrics), loopback:9428 (logs), loopback:{d} (traces), loopback:3000 (Grafana).\nGrafana local authentication is enabled. Access via SSH forwarding only.\nMetrics and Traces are provisioned; Logs UI and dashboards are unavailable.\nApplication-host ingestion is unavailable. An unchanged rerun requires no restart.\n", .{ options.domain orelse "none", options.admin_ips.items.len, options.agent_ips.items.len, options.tls orelse "none", if (options.telegram_token_op != null) "requested (unavailable)" else "disabled", policy.metrics.retention_days, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent, policy.traces.retention, policy.traces.cleanup_usage_percent, vt.port }));
+        try input.write(try std.fmt.allocPrint(input.a, "Domain: {s}\nAdmin IPs: {d}\nAgent IPs: {d}\nTLS: {s}\nTelegram: {s}\nStorage: metrics {d} days; {d}% data filesystem reserve.\nLogs: disk-bound retention, logical limit {s}; partition budget {d}% of filesystem capacity (other writers excluded).\nTraces: disk-bound retention, logical limit {s}; partition budget {d}% of filesystem capacity (other writers excluded).\nListeners: loopback:8428 (metrics), loopback:9428 (logs), loopback:{d} (traces), loopback:3000 (Grafana).\nGrafana local authentication is enabled. Access via SSH forwarding only.\nMetrics, Logs and Traces are provisioned; dashboards are unavailable.\nApplication-host ingestion is unavailable. An unchanged rerun requires no restart.\n", .{ options.domain orelse "none", options.admin_ips.items.len, options.agent_ips.items.len, options.tls orelse "none", if (options.telegram_token_op != null) "requested (unavailable)" else "disabled", policy.metrics.retention_days, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent, policy.traces.retention, policy.traces.cleanup_usage_percent, vt.port }));
     }
     if (options.command == .agents_install) try input.write(try std.fmt.allocPrint(input.a, "Station IP: {s}\nServices: {d}\n", .{ options.station_ip orelse "none", options.services.items.len }));
     if (options.command == .firewall) try input.write(try std.fmt.allocPrint(input.a, "Admin IPs: {d}\nAgent IPs: {d}\nNo firewall rules can be applied in this release.\n", .{ options.admin_ips.items.len, options.agent_ips.items.len }));
