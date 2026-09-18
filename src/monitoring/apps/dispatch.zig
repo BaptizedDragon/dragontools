@@ -111,6 +111,7 @@ pub fn run(init: std.process.Init, options: cli.Options) !void {
             if (report.state.check) |check| @tagName(check) else @tagName(report.state.phase),
             if (options.command == .app_apply) "Completed changes may remain; pending intent is preserved. Correct the cause and rerun the same application config." else "This command is read-only; no configuration or restart intent was changed.",
         }));
+        print(init.io, try report.state.credentialDiagnostics(a));
         if (report.state.check == .dns_unresolved) print(init.io, "Monitoring station hostname does not resolve. DragonTools does not manage DNS. Configure the DNS record and rerun the same command.\n");
         if (report.state.check == .tcp_unreachable) print(init.io, "Monitoring ingestion is unreachable. DragonTools does not manage provider firewalls or network ACLs. Allow TCP 9443 from this monitored host and rerun.\n");
         if (report.state.check == .client_identity_inconsistent) print(init.io, "The managed client identity is inconsistent. Existing files were preserved; restore a verified local backup or correct conflicting metadata before retrying.\n");

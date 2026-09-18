@@ -948,6 +948,18 @@ for key identifiers. When signing with an existing CA, its exact SKI is retained
 as the leaf AKI for strict TLS interoperability. Existing valid certificate/key
 bytes are preserved. Secret allocations use a wiping arena, core dumps are
 disabled, private paths are bounded/no-follow, and errors return fixed codes.
+The optional internal `--diagnostics` flag emits exactly `AgentStage` and
+`AgentError` from closed enums, capped at 256 bytes. It never formats an arbitrary
+Zig error or input. Controller requests carry a separate enrollment stage;
+`ensure` is always `station_ensure`, including failures before a helper response.
+SSH drains stderr concurrently within the existing process deadline, wipes its
+fixed buffers and rejects any extra/unknown bytes. Only typed names and the exit
+code reach the report. Registry refusal (89), CA maintenance (87), client state
+(88), and endpoint errors (91–95) remain distinct; other failures (86) use
+`agent_internal_error` plus the safe native stage/reason when available. CA/server
+checkpoints track directory access, key/certificate creation, validation and
+publication; no mutation, restart or retry policy changes. Rollback preserves the
+original failure unless rollback itself fails.
 The native TLS client checks server profile/hostname and local client identity;
 DNS, TCP, TLS and HTTP phases have explicit four-second process deadlines. It
 sends only the fixed authenticated health request and exposes no listener.

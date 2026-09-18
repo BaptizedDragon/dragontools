@@ -14,8 +14,12 @@ pub const Context = struct {
     ingestion: f.Owner,
     vector: f.Owner,
     vmagent: f.Owner,
+    diagnostic_stage: ?*@import("diagnostics.zig").Stage = null,
     service_context: ?*anyopaque = null,
     service_fn: ?*const fn (?*anyopaque, []const u8, []const u8) anyerror!bool = null,
+    pub fn track(self: Context, stage: @import("diagnostics.zig").Stage) void {
+        if (self.diagnostic_stage) |current| current.* = stage;
+    }
     pub fn account(self: Context, kind: []const u8) !f.Owner {
         const owner = if (std.mem.eql(u8, kind, "vector")) self.vector else if (std.mem.eql(u8, kind, "vmagent")) self.vmagent else return error.CredentialStateRefused;
         try j.require(owner.uid != std.math.maxInt(std.posix.uid_t) and owner.gid != std.math.maxInt(std.posix.gid_t));

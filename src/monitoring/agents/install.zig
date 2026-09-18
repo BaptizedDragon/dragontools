@@ -101,12 +101,16 @@ pub fn install(a: std.mem.Allocator, app: remote.Remote, station: remote.Remote,
             const failed_component = report.component;
             const failed_phase = report.state.phase;
             const failed_check = report.state.check;
-            const rollback = app.run(.credentials, try ingress.finishClientCommand(a, registration.host, registration.station, false)) catch {
+            const rollback_command = try ingress.finishClientCommand(a, registration.host, registration.station, false);
+            const rollback = app.run(.credentials, rollback_command) catch {
+                report.state.beginRequest(rollback_command);
                 report.component = .application_host;
                 report.state.check = .credential_recovery;
                 return error.ClientCredentialRecoveryRequired;
             };
             if (rollback.code != 0) {
+                report.state.beginRequest(rollback_command);
+                report.state.captureAgentFailure(rollback);
                 report.component = .application_host;
                 report.state.check = .credential_recovery;
                 return error.ClientCredentialRecoveryRequired;

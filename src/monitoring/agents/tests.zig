@@ -45,6 +45,7 @@ const Fake = struct {
     fail_vector_binary: bool = false,
     ingestion_directory: bool = false,
     registry_failure: bool = false,
+    ensure_failure: ?remote.Result = null,
     registry_repair: bool = false,
     registry_attempts: usize = 0,
     app_helper: bool = false,
@@ -74,6 +75,11 @@ const Fake = struct {
         }
         const Envelope = struct { action: []const u8, args: []const []const u8 };
         const parsed = try std.json.parseFromSlice(Envelope, self.allocator, input.bytes, .{});
+        if (std.mem.eql(u8, parsed.value.action, "ensure")) {
+            try std.testing.expectEqual(remote.diagnostics.EnrollmentStage.station_ensure, input.enrollment_stage.?);
+            try std.testing.expect(std.mem.indexOf(u8, input.command, "'--diagnostics'") != null);
+            if (self.ensure_failure) |failure| return failure;
+        }
         var argv: std.ArrayList([]const u8) = .empty;
         try argv.appendSlice(self.allocator, &.{ "fixture-agent", parsed.value.action });
         try argv.appendSlice(self.allocator, parsed.value.args);
@@ -584,9 +590,13 @@ test "endpoint failures expose safe semantic checks with bounded transient retri
     const codes = [_]u8{ 91, 92, 93, 94, 95 };
     const checks = [_]readiness.Check{ .dns_unresolved, .tcp_unreachable, .server_tls_invalid, .client_certificate_rejected, .ingestion_rejected };
     for (codes, checks) |code, check| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
         var report: model.Report = .{};
-        var fake: Fake = .{ .allocator = std.testing.allocator, .report = &report, .endpoint_failure = code };
-        const result = verify.secureEndpoint(std.testing.allocator, fake.asRemote(), &report, "fixed read-only endpoint probe");
+        var fake: Fake = .{ .allocator = a, .report = &report, .endpoint_failure = code };
+        const input = try @import("ingestion.zig").endpointCommand(a, "station.example", "canonical", registration.host);
+        const result = verify.secureEndpoint(a, fake.asRemote(), &report, input);
         if (code == 93 or code == 94) {
             try std.testing.expectError(error.RemoteOperationFailed, result);
             try std.testing.expectEqual(@as(usize, 1), fake.endpoint_attempts);
@@ -597,6 +607,8 @@ test "endpoint failures expose safe semantic checks with bounded transient retri
             try std.testing.expectEqual(@as(i64, 30000), fake.now);
         }
         try std.testing.expectEqual(check, report.state.check.?);
+        try std.testing.expectEqual(remote.diagnostics.EnrollmentStage.credential_verify, report.state.enrollment_stage.?);
+        try std.testing.expectEqual(remote.diagnostics.detail(code).?, report.state.agent_detail.?);
         try std.testing.expectEqual(@as(usize, 0), fake.mutations);
     }
 }
@@ -691,4 +703,57 @@ test "hostname change restarts only ingestion and endpoint consumers then reruns
     try std.testing.expectEqual(@as(usize, 0), report.state.changes);
     try std.testing.expectEqual(mutations, fake.mutations);
     for ([_]model.Component{ .ingestion, .vector, .vmagent }) |kind| try std.testing.expectEqual(@as(usize, 2), fake.state(kind).restarts);
+}
+
+test "station ensure failure reports safe substage and preserves native semantic codes" {
+    const Case = struct { code: u8, failure: anyerror, detail: remote.diagnostics.Detail, check: ?readiness.Check = null };
+    for ([_]Case{
+        .{ .code = 86, .failure = error.RemoteOperationFailed, .detail = .agent_internal_error },
+        .{ .code = 87, .failure = error.CaMaintenanceRequired, .detail = .ca_maintenance, .check = .ca_maintenance },
+        .{ .code = 88, .failure = error.ClientIdentityInconsistent, .detail = .client_identity_inconsistent, .check = .client_identity_inconsistent },
+        .{ .code = 89, .failure = error.RegistryPermissionsConflict, .detail = .registry_permissions, .check = .registry_permissions },
+        .{ .code = 91, .failure = error.RemoteOperationFailed, .detail = .dns_unresolved, .check = .dns_unresolved },
+        .{ .code = 92, .failure = error.RemoteOperationFailed, .detail = .tcp_unreachable, .check = .tcp_unreachable },
+        .{ .code = 93, .failure = error.RemoteOperationFailed, .detail = .server_tls_invalid, .check = .server_tls_invalid },
+        .{ .code = 94, .failure = error.RemoteOperationFailed, .detail = .client_certificate_rejected, .check = .client_certificate_rejected },
+        .{ .code = 95, .failure = error.RemoteOperationFailed, .detail = .ingestion_rejected, .check = .ingestion_rejected },
+    }) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var report: model.Report = .{};
+        var fake: Fake = .{ .allocator = a, .report = &report, .ensure_failure = .{ .code = case.code, .output = "PRIVATE KEY sentinel", .diagnostic = if (case.code == 86) .{ .stage = .ca_key_generation, .reason = .CryptoKeyGenerationFailed } else null } };
+        try std.testing.expectError(case.failure, install.install(a, fake.asRemote(), fake.asRemote(), &report, registration));
+        try std.testing.expectEqual(model.Component.ingestion, report.component);
+        try std.testing.expectEqual(remote.Operation.credentials, report.state.phase);
+        try std.testing.expectEqual(case.check, report.state.check);
+        try std.testing.expectEqual(remote.diagnostics.EnrollmentStage.station_ensure, report.state.enrollment_stage.?);
+        try std.testing.expectEqual(case.detail, report.state.agent_detail.?);
+        const output = try report.state.credentialDiagnostics(a);
+        try std.testing.expect(std.mem.startsWith(u8, output, "Stage: station_ensure\nDetail: "));
+        try std.testing.expect(std.mem.indexOf(u8, output, "PRIVATE KEY") == null);
+        try std.testing.expect(std.mem.indexOf(u8, output, "sentinel") == null);
+        if (case.code == 86) try std.testing.expectEqualStrings("Stage: station_ensure\nDetail: agent_internal_error\nAgentStage: ca_key_generation\nAgentError: CryptoKeyGenerationFailed\n", output);
+        try std.testing.expect(fake.state(.ingestion).commands[@intFromEnum(remote.Operation.unit)] == null);
+        try std.testing.expectEqual(@as(usize, 0), fake.enrollments);
+        // Removing the fault resumes normal installation; a further rerun is a no-op.
+        fake.ensure_failure = null;
+        report = .{};
+        try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
+        const mutations = fake.mutations;
+        report = .{};
+        try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
+        try std.testing.expectEqual(@as(usize, 0), report.state.changes);
+        try std.testing.expectEqual(mutations, fake.mutations);
+        try std.testing.expect(report.state.agent_detail == null and report.state.agent_diagnostic == null);
+    }
+}
+test "silent or rejected native diagnostics still identify station ensure and generic failure" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var report: model.Report = .{};
+    var fake: Fake = .{ .allocator = a, .report = &report, .ensure_failure = .{ .code = 86 } };
+    try std.testing.expectError(error.RemoteOperationFailed, install.install(a, fake.asRemote(), fake.asRemote(), &report, registration));
+    try std.testing.expectEqualStrings("Stage: station_ensure\nDetail: agent_internal_error\n", try report.state.credentialDiagnostics(a));
 }

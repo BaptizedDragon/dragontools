@@ -188,11 +188,12 @@ const Fault = struct {
     event: []const u8,
     path: []const u8,
     fired: bool = false,
+    failure: anyerror = error.InjectedInterruption,
     fn inject(raw: ?*anyopaque, event: []const u8, path: []const u8) !void {
         const self: *Fault = @ptrCast(@alignCast(raw.?));
         if (!self.fired and std.mem.eql(u8, event, self.event) and std.mem.eql(u8, path, self.path)) {
             self.fired = true;
-            return error.InjectedInterruption;
+            return self.failure;
         }
     }
     fn context(self: *Fault, ctx: state.Context) state.Context {
@@ -537,4 +538,103 @@ test "native backend accepts existing OpenSSL station and host bundles byte-for-
     try std.testing.expect(f.equal(values, (try client_store.inspectRoot(ac, host, "station.example", false)).?));
     try std.testing.expect(!try sc.store.exists(f.state ++ "/ingestion-restart-required"));
     try std.testing.expectEqual(@as(usize, 0), af.services.mutations);
+}
+
+const diagnostics = @import("agent/diagnostics.zig");
+fn ensureFailure(ctx: state.Context, value: j.Value, stage: *diagnostics.Stage) !struct { err: anyerror } {
+    var tracked = ctx;
+    tracked.diagnostic_stage = stage;
+    if (station.ensure(tracked, value)) |_| return error.ExpectedFailure else |err| return .{ .err = err };
+}
+test "native bootstrap diagnostics identify CA and server failures without changing recovery" {
+    const Case = struct { event: []const u8, path: []const u8, stage: diagnostics.Stage, reason: diagnostics.AgentError, ca_published: bool = false };
+    const ca_path = f.base ++ "/pki/ca";
+    const server_path = f.base ++ "/server";
+    for ([_]Case{
+        .{ .event = "generate_ca_key", .path = ca_path, .stage = .ca_key_generation, .reason = .CryptoKeyGenerationFailed },
+        .{ .event = "generate_ca_certificate", .path = ca_path, .stage = .ca_certificate_generation, .reason = .CertificateGenerationFailed },
+        .{ .event = "validate_ca", .path = ca_path, .stage = .ca_certificate_validation, .reason = .CertificateValidationFailed },
+        .{ .event = "before_publish", .path = ca_path, .stage = .ca_publication, .reason = .FilesystemStateRefused },
+        .{ .event = "generate_server_key", .path = server_path, .stage = .server_key_generation, .reason = .CryptoKeyGenerationFailed, .ca_published = true },
+        .{ .event = "generate_server_certificate", .path = server_path, .stage = .server_certificate_generation, .reason = .CertificateGenerationFailed, .ca_published = true },
+        .{ .event = "validate_server", .path = server_path, .stage = .server_certificate_validation, .reason = .CertificateValidationFailed, .ca_published = true },
+        .{ .event = "before_publish", .path = server_path, .stage = .server_publication, .reason = .FilesystemStateRefused, .ca_published = true },
+    }) |case| {
+        var fixture = try Fixture.init();
+        defer fixture.deinit();
+        const ctx = fixture.context();
+        // Exact production failure state: only the three managed empty parents.
+        for ([_][]const u8{ "pki", "clients" }) |name| _ = try ctx.store.directory(try ctx.store.path(f.base, name), ctx.store.root_owner, 0o700, true);
+        _ = try ctx.store.registry(ctx.ingestion.gid, true);
+        const value = try registration(ctx.store.a);
+        var fault: Fault = .{ .event = case.event, .path = case.path, .failure = error.InvalidPki };
+        var stage: diagnostics.Stage = .request;
+        const err = (try ensureFailure(fault.context(ctx), value, &stage)).err;
+        try std.testing.expect(fault.fired);
+        try std.testing.expectEqual(@as(u8, 86), @import("agent/protocol.zig").exitCode(err));
+        const diagnostic = diagnostics.failure(stage, err);
+        try std.testing.expectEqual(case.stage, diagnostic.stage);
+        try std.testing.expectEqual(case.reason, diagnostic.reason);
+        var buffer: [diagnostics.limit]u8 = undefined;
+        const output = diagnostic.render(&buffer);
+        try std.testing.expectEqual(diagnostic, diagnostics.parse(output).?);
+        try std.testing.expect(std.mem.indexOf(u8, output, "PRIVATE KEY") == null);
+        try std.testing.expect(std.mem.indexOf(u8, output, f.base) == null);
+        try std.testing.expect(!try ctx.store.exists(server_path));
+        const saved_ca: ?f.Files = if (case.ca_published) try station.loadCa(ctx) else null;
+        if (saved_ca == null) try std.testing.expectEqual(@as(usize, 0), (try ctx.store.names(f.base ++ "/pki")).len);
+        try std.testing.expect(try station.ensure(ctx, value));
+        try std.testing.expect(!try station.ensure(ctx, value));
+        if (saved_ca) |root| try std.testing.expect(f.equal(root, try station.loadCa(ctx)));
+    }
+}
+test "native CA validation diagnostic never echoes key bytes or replaces invalid CA" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    const ctx = fixture.context();
+    const value = try registration(ctx.store.a);
+    _ = try station.ensure(ctx, value);
+    const key = try bytes(ctx, f.base ++ "/pki/ca/ca.key");
+    // Malformed certificate deliberately contains actual private material.
+    _ = try ctx.store.atomic(f.base ++ "/pki/ca/ca.crt", key, ctx.store.root_owner, 0o400, f.base ++ "/pki");
+    var stage: diagnostics.Stage = .request;
+    const err = (try ensureFailure(ctx, value, &stage)).err;
+    var buffer: [diagnostics.limit]u8 = undefined;
+    const output = diagnostics.failure(stage, err).render(&buffer);
+    try std.testing.expectEqualStrings("AgentStage: ca_certificate_validation\nAgentError: CertificateValidationFailed\n", output);
+    try std.testing.expect(std.mem.indexOf(u8, output, key) == null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "PRIVATE KEY") == null);
+    try std.testing.expectEqualStrings(key, try bytes(ctx, f.base ++ "/pki/ca/ca.crt"));
+    try std.testing.expectEqualStrings(key, try bytes(ctx, f.base ++ "/pki/ca/ca.key"));
+}
+test "native managed directory refusal and registry permissions keep distinct diagnostics and exit codes" {
+    for ([_]bool{ false, true }) |registry| {
+        var fixture = try Fixture.init();
+        defer fixture.deinit();
+        const ctx = fixture.context();
+        const path = if (registry) f.base ++ "/registry" else f.base ++ "/pki";
+        try ctx.store.write(path, "private-sentinel", ctx.store.root_owner, 0o400);
+        var stage: diagnostics.Stage = .request;
+        const err = (try ensureFailure(ctx, try registration(ctx.store.a), &stage)).err;
+        try std.testing.expectEqual(@as(u8, if (registry) 89 else 86), @import("agent/protocol.zig").exitCode(err));
+        const diagnostic = diagnostics.failure(stage, err);
+        try std.testing.expectEqual(if (registry) diagnostics.Stage.registry_prepare else .managed_directories, diagnostic.stage);
+        try std.testing.expectEqual(if (registry) diagnostics.AgentError.RegistryPermissions else .FilesystemStateRefused, diagnostic.reason);
+        try std.testing.expectEqualStrings("private-sentinel", try bytes(ctx, path));
+    }
+}
+test "native CA maintenance retains exit 87 and existing root with diagnostics enabled" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var ctx = fixture.context();
+    const value = try registration(ctx.store.a);
+    _ = try station.ensure(ctx, value);
+    const root = try station.loadCa(ctx);
+    ctx.now += 3300 * 86400;
+    var stage: diagnostics.Stage = .request;
+    const err = (try ensureFailure(ctx, value, &stage)).err;
+    try std.testing.expectEqual(error.CaMaintenanceRequired, err);
+    try std.testing.expectEqual(@as(u8, 87), @import("agent/protocol.zig").exitCode(err));
+    try std.testing.expectEqual(diagnostics.AgentError.CaMaintenanceRequired, diagnostics.failure(stage, err).reason);
+    try std.testing.expect(f.equal(root, try station.loadCa(ctx)));
 }

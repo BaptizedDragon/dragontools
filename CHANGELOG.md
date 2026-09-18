@@ -2,6 +2,14 @@
 
 ## 0.1.0-dev — unreleased
 
+- Report explicit application enrollment stages (including `station_ensure`),
+  preserve native semantic exit codes, and surface only allowlisted helper error
+  names. CA/server directory, key generation, certificate validation and bundle
+  publication failures now have safe diagnostics. Unknown/oversized stderr is
+  discarded; private material and panic stacks are never forwarded. Existing
+  CA preservation, atomic publication and interrupted-enrollment recovery stay
+  unchanged.
+
 - Verify station vmalert readiness against its base rule packs independently of
   application count. Include SecurityUpdatesPending and RebootRequired in the
   expected host pack; empty app globs and zero samples are valid. Apply/app-verify

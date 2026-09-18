@@ -61,6 +61,7 @@ pub fn ready(_: std.mem.Allocator, _: []const u8) !void {}
 /// a slow command, connection or response cannot start a fresh retry window.
 pub fn poll(a: std.mem.Allocator, r: remote.Remote, report: *install.Report, check: Check, deadline_ms: u32, command: anytype, validator: Validator) !void {
     report.phase = .health;
+    report.beginRequest(command);
     report.check = check;
     report.startVerification();
     const started = now(r);
@@ -73,6 +74,7 @@ pub fn poll(a: std.mem.Allocator, r: remote.Remote, report: *install.Report, che
             error.Timeout => return error.ReadinessTimedOut,
             else => return err,
         };
+        report.captureAgentFailure(result);
         var ready_now = false;
         if (result.code != 75) {
             const output = try report.accept(result);

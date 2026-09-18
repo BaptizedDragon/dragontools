@@ -1,5 +1,6 @@
 //! Dedicated bounded process I/O for sensitive stdout/stdin. Never logs stderr.
 const std = @import("std");
+const diagnostics = @import("../agent/diagnostics.zig");
 const Secret = @import("secret.zig").Secret;
 
 fn terminate(child: *std.process.Child, io: std.Io) void {
@@ -47,16 +48,53 @@ fn waitBounded(child: *std.process.Child, io: std.Io, deadline: std.Io.Timeout) 
 pub const Result = struct {
     code: u8,
     output: *Secret,
+    diagnostic: ?diagnostics.Diagnostic = null,
     pub fn deinit(self: Result) void {
         self.output.deinit();
     }
 };
 /// Fixed capture storage avoids reallocation copies and is wiped on every exit.
 pub fn run(a: std.mem.Allocator, io: std.Io, argv: []const []const u8, input: ?*const Secret, limit: usize, budget_ms: u32) !Result {
+    return runInternal(a, io, argv, input, limit, budget_ms, false);
+}
+/// Only the native helper protocol opts into strictly allowlisted diagnostics.
+pub fn runAgent(a: std.mem.Allocator, io: std.Io, argv: []const []const u8, input: ?*const Secret, limit: usize, budget_ms: u32) !Result {
+    return runInternal(a, io, argv, input, limit, budget_ms, true);
+}
+const DiagnosticCapture = struct {
+    value: ?diagnostics.Diagnostic = null,
+    fn drain(self: *DiagnosticCapture, io: std.Io, file: std.Io.File, deadline: std.Io.Timeout) void {
+        var message: [diagnostics.limit]u8 = undefined;
+        var chunk: [1024]u8 = undefined;
+        defer std.crypto.secureZero(u8, &message);
+        defer std.crypto.secureZero(u8, &chunk);
+        var used: usize = 0;
+        var overflow = false;
+        while (true) {
+            const result = io.operateTimeout(.{ .file_read_streaming = .{ .file = file, .data = &.{&chunk} } }, deadline) catch return;
+            const count = result.file_read_streaming catch |err| switch (err) {
+                error.EndOfStream => break,
+                else => return,
+            };
+            if (count == 0) break;
+            if (count > message.len - used) overflow = true;
+            if (!overflow) {
+                @memcpy(message[used..][0..count], chunk[0..count]);
+                used += count;
+            }
+        }
+        if (!overflow) self.value = diagnostics.parse(message[0..used]);
+    }
+};
+fn runInternal(a: std.mem.Allocator, io: std.Io, argv: []const []const u8, input: ?*const Secret, limit: usize, budget_ms: u32, agent_diagnostics: bool) !Result {
     const duration: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(budget_ms), .clock = .awake } };
     const deadline = duration.toDeadline(io);
-    var child = try std.process.spawn(io, .{ .argv = argv, .stdin = if (input != null) .pipe else .ignore, .stdout = .pipe, .stderr = .ignore });
+    var child = try std.process.spawn(io, .{ .argv = argv, .stdin = if (input != null) .pipe else .ignore, .stdout = .pipe, .stderr = if (agent_diagnostics) .pipe else .ignore });
     defer terminate(&child, io);
+    var capture: DiagnosticCapture = .{};
+    // Drain concurrently with stdin/stdout, including oversized rejected stderr.
+    var diagnostic_task: ?std.Io.Future(void) = if (agent_diagnostics) try io.concurrent(DiagnosticCapture.drain, .{ &capture, io, child.stderr.?, deadline }) else null;
+    defer if (diagnostic_task) |*task| task.cancel(io);
     if (input) |secret| {
         const bytes = secret.protectedBytes();
         var sent: usize = 0;
@@ -85,11 +123,13 @@ pub fn run(a: std.mem.Allocator, io: std.Io, argv: []const []const u8, input: ?*
         used += count;
         if (used > limit) return error.SensitiveOutputTooLarge;
     }
+    // Join before Child.wait closes its pipes. The drainer uses the same deadline.
+    if (diagnostic_task) |*task| task.await(io);
     const term = try waitBounded(&child, io, deadline);
     return .{ .code = switch (term) {
         .exited => |code| code,
         else => 255,
-    }, .output = try Secret.init(a, buffer[0..used]) };
+    }, .output = try Secret.init(a, buffer[0..used]), .diagnostic = capture.value };
 }
 test "sensitive subprocess uses stdin and suppresses stderr" {
     const a = std.testing.allocator;
@@ -117,4 +157,38 @@ test "sensitive process deadline includes wait after stdout EOF and kills an unr
     }, null, 128, 500));
     const elapsed = std.Io.Clock.awake.now(io).toMilliseconds() - start;
     try std.testing.expect(elapsed < 5000);
+}
+
+test "native diagnostic transport accepts only fixed names and drains rejected stderr" {
+    const a = std.testing.allocator;
+    const prefix = "import sys; sys.stderr.buffer.write(";
+    const suffix = "); sys.stderr.flush(); sys.stdout.write('public-result'); sys.exit(86)";
+    const Case = struct { script: []const u8, accepted: bool };
+    for ([_]Case{
+        .{ .script = prefix ++ "b'AgentStage: ca_key_generation\\nAgentError: CryptoKeyGenerationFailed\\n'" ++ suffix, .accepted = true },
+        .{ .script = prefix ++ "b'AgentStage: ca_key_generation\\nAgentError: CryptoKeyGenerationFailed\\nPRIVATE KEY sentinel'" ++ suffix, .accepted = false },
+        .{ .script = prefix ++ "b'PRIVATE KEY sentinel' * 10000" ++ suffix, .accepted = false },
+        .{ .script = prefix ++ "b'AgentStage: ca_key_generation\\nAgentError: PrivateKeyBytes\\n'" ++ suffix, .accepted = false },
+    }) |case| {
+        const result = try runAgent(a, std.testing.io, &.{ "python3", "-I", "-B", "-c", case.script }, null, 64, 5000);
+        defer result.deinit();
+        try std.testing.expectEqual(@as(u8, 86), result.code);
+        try std.testing.expectEqualStrings("public-result", result.output.protectedBytes());
+        try std.testing.expectEqual(case.accepted, result.diagnostic != null);
+        if (result.diagnostic) |diagnostic| try std.testing.expectEqual(diagnostics.AgentError.CryptoKeyGenerationFailed, diagnostic.reason);
+        const formatted = try std.fmt.allocPrint(a, "{any}", .{result});
+        defer a.free(formatted);
+        try std.testing.expect(std.mem.indexOf(u8, formatted, "PRIVATE KEY") == null);
+        try std.testing.expect(std.mem.indexOf(u8, formatted, "sentinel") == null);
+    }
+}
+test "native diagnostic transport retains deadline and concurrent stdin stdout draining" {
+    try std.testing.expectError(error.Timeout, runAgent(std.testing.allocator, std.testing.io, &.{ "python3", "-I", "-B", "-c", "import os,time; os.close(1); time.sleep(10)" }, null, 32, 100));
+    const input = try Secret.init(std.testing.allocator, "public-input" ** 20000);
+    defer input.deinit();
+    const result = try runAgent(std.testing.allocator, std.testing.io, &.{ "python3", "-I", "-B", "-c", "import sys; sys.stderr.buffer.write(b'private-sentinel' * 20000); sys.stderr.flush(); sys.stdin.buffer.read(); sys.stdout.write('unchanged')" }, input, 32, 5000);
+    defer result.deinit();
+    try std.testing.expectEqual(@as(u8, 0), result.code);
+    try std.testing.expectEqualStrings("unchanged", result.output.protectedBytes());
+    try std.testing.expect(result.diagnostic == null);
 }

@@ -893,4 +893,76 @@ else:
     assert all(value not in output for value in dummy_credentials.values())
     assert "/api/ds/query" not in output
     checked += 1
+
+    # Drive actual apply/SSH/stdin/error rendering through station ensure only.
+    # No remote commands execute and no keys or credentials are generated here.
+    app_config.write_text('''version = 1
+[application]
+name = "diagnostics"
+environment = "test"
+[target]
+ssh_host = "application-fixture"
+[station]
+ssh_host = "station-fixture"
+hostname = "station.example"
+[[service]]
+name = "web"
+systemd = "web.service"
+''')
+    ssh.write_text(f"#!{sys.executable}\n" + r'''
+import base64, json, os, re, sys, zlib
+from pathlib import Path
+command = sys.argv[-1]
+if 'zlib.decompress' in command:
+    encoded = max(re.findall(r'[A-Za-z0-9+/]{100,}={0,2}', command), key=len)
+    command = zlib.decompress(base64.b64decode(encoded)).decode()
+marker = Path(os.environ['DRAGONTOOLS_TEST_MARKER'])
+if 'dragontool-agent' in command and '--stdin' in command:
+    assert '--diagnostics' in command
+    request = json.load(sys.stdin)
+    assert request['action'] == 'ensure'
+    marker.write_text('station_ensure\n')
+    diagnostic = os.environ['DRAGONTOOLS_AGENT_DIAGNOSTIC']
+    sys.stderr.write('PRIVATE KEY REDACTION-SENTINEL' * 20000 if diagnostic == 'oversized' else diagnostic)
+    sys.stdout.write('REDACTION-SENTINEL private output')
+    sys.exit(int(os.environ['DRAGONTOOLS_AGENT_CODE']))
+elif '/etc/machine-id' in command:
+    sys.stdout.write('0123456789abcdef0123456789abcdef\n')
+elif '/etc/os-release' in command:
+    sys.stdout.write('ubuntu\n24.04\nx86_64\n')
+elif 'Authoritative per-application signal manifests.' in command:
+    print('unchanged')
+    print(json.dumps({'version': 1, 'host': 'dt-0123456789abcdef0123456789abcdef',
+        'station': 'station.example', 'services': [], 'metrics_targets': [],
+        'applications': [{'name': 'diagnostics', 'environment': 'test',
+            'services': [{'name': 'web', 'systemd': 'web.service'}]}]}))
+else:
+    sys.stdout.write('unchanged')
+''')
+    safe_message = 'AgentStage: ca_key_generation\nAgentError: CryptoKeyGenerationFailed\n'
+    for code, detail, diagnostic, accepted in (
+        (86, 'agent_internal_error', safe_message, True),
+        (86, 'agent_internal_error', '', False),
+        (86, 'agent_internal_error', safe_message + 'PRIVATE KEY REDACTION-SENTINEL', False),
+        (86, 'agent_internal_error', 'oversized', False),
+        (87, 'ca_maintenance', '', False),
+        (88, 'client_identity_inconsistent', '', False),
+        (89, 'registry_permissions', '', False),
+    ):
+        marker.unlink(missing_ok=True)
+        provider_marker.unlink(missing_ok=True)
+        result = subprocess.run([str(binary), 'monitoring', 'apply', '--config', str(app_config)],
+            env=dict(env, DRAGONTOOLS_AGENT_CODE=str(code), DRAGONTOOLS_AGENT_DIAGNOSTIC=diagnostic),
+            input='', capture_output=True, text=True, timeout=30)
+        output = result.stdout + result.stderr
+        assert result.returncode == 1, output
+        assert 'Application monitoring failed. Component: ingestion.' in output, output
+        assert 'Stage: station_ensure\n' in output and f'Detail: {detail}\n' in output, output
+        assert ('AgentError: CryptoKeyGenerationFailed' in output) == accepted, output
+        assert ('AgentStage: ca_key_generation' in output) == accepted, output
+        assert 'PRIVATE KEY' not in output and 'REDACTION-SENTINEL' not in output, output
+        assert marker.read_text() == 'station_ensure\n'
+        assert not provider_marker.exists()
+        checked += 1
+
 print(f"PASS: {checked} CLI smoke checks")

@@ -11,6 +11,9 @@ const vt_unit = @import("../components/victoriatraces_unit.zig");
 const progress = @import("progress.zig");
 pub const Component = progress.Component;
 pub const Report = struct {
+    enrollment_stage: ?remote.diagnostics.EnrollmentStage = null,
+    agent_detail: ?remote.diagnostics.Detail = null,
+    agent_diagnostic: ?remote.diagnostics.Diagnostic = null,
     phase: remote.Operation = .detect,
     check: ?@import("readiness.zig").Check = null,
     component: ?Component = null,
@@ -28,6 +31,24 @@ pub const Report = struct {
     convergence_reported: bool = false,
     verification_reported: bool = false,
     waiting_reported: bool = false,
+    pub fn beginRequest(self: *Report, command: anytype) void {
+        self.enrollment_stage = if (@TypeOf(command) == remote.Input) command.enrollment_stage else null;
+        self.agent_detail = null;
+        self.agent_diagnostic = null;
+    }
+    pub fn credentialDiagnostics(self: *const Report, a: std.mem.Allocator) ![]const u8 {
+        const stage = self.enrollment_stage orelse return "";
+        var buffer: [512]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try writer.print("Stage: {s}\n", .{@tagName(stage)});
+        if (self.agent_detail) |detail| try writer.print("Detail: {s}\n", .{@tagName(detail)});
+        if (self.agent_diagnostic) |diagnostic| try writer.print("AgentStage: {s}\nAgentError: {s}\n", .{ @tagName(diagnostic.stage), @tagName(diagnostic.reason) });
+        return a.dupe(u8, writer.buffered());
+    }
+    pub fn captureAgentFailure(self: *Report, result: remote.Result) void {
+        self.agent_detail = if (self.enrollment_stage != null) remote.diagnostics.detail(result.agent_exit_code orelse result.code) else null;
+        self.agent_diagnostic = if (self.agent_detail != null) result.diagnostic else null;
+    }
     pub fn emit(self: *Report, phase: progress.Phase) void {
         if (self.progress) |sink| if (self.component) |component| sink.emit(.{ .component = component, .phase = phase, .station_enabled = self.station_enabled });
     }
@@ -55,12 +76,14 @@ pub const Report = struct {
     }
     pub fn call(self: *Report, r: remote.Remote, op: remote.Operation, command: anytype) ![]const u8 {
         self.phase = op;
+        self.beginRequest(command);
         if (op == .health) self.startVerification();
         if (op != .health) self.check = null;
         const result = try r.run(op, command);
         return self.accept(result);
     }
     pub fn accept(self: *Report, result: remote.Result) ![]const u8 {
+        self.captureAgentFailure(result);
         switch (result.code) {
             0 => {},
             10 => return error.RootPrivilegesRequired,
@@ -81,6 +104,16 @@ pub const Report = struct {
             89 => {
                 self.check = .registry_permissions;
                 return error.RegistryPermissionsConflict;
+            },
+            91, 92, 93, 94, 95 => {
+                if (self.enrollment_stage != null) self.check = switch (result.code) {
+                    91 => .dns_unresolved,
+                    92 => .tcp_unreachable,
+                    93 => .server_tls_invalid,
+                    94 => .client_certificate_rejected,
+                    else => .ingestion_rejected,
+                };
+                return error.RemoteOperationFailed;
             },
             255 => return error.SshConnectionFailed,
             else => return error.RemoteOperationFailed,

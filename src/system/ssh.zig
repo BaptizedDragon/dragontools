@@ -67,13 +67,18 @@ pub const Ssh = struct {
     fn executeInput(ctx: *anyopaque, _: remote.Operation, request: remote.Input, budget_ms: u32) !remote.Result {
         const self: *Ssh = @ptrCast(@alignCast(ctx));
         if (request.bytes.len > 32 * 1024 * 1024 or request.command.len > 8192) return error.PublicInputTooLarge;
-        // Reuse bounded, stderr-suppressing stdin transport. This public API is
-        // deliberately separate from credential transport and its token output.
+        // Public stdin transport exposes only typed native diagnostic enums.
+        // Secret providers and credential payload transport still discard stderr.
         const input = try @import("../secrets/secret.zig").Secret.init(std.heap.page_allocator, request.bytes);
         defer input.deinit();
-        const result = try @import("../secrets/process.zig").run(std.heap.page_allocator, self.io, try self.argv(request.command), input, 1024 * 1024, budget_ms);
+        const transport = @import("../secrets/process.zig");
+        const args = try self.argv(request.command);
+        const result = if (request.enrollment_stage != null)
+            try transport.runAgent(std.heap.page_allocator, self.io, args, input, 1024 * 1024, budget_ms)
+        else
+            try transport.run(std.heap.page_allocator, self.io, args, input, 1024 * 1024, budget_ms);
         defer result.deinit();
-        if (result.code != 0) return .{ .code = result.code };
+        if (result.code != 0) return .{ .code = result.code, .diagnostic = if (remote.diagnostics.detail(result.code) != null) result.diagnostic else null };
         return .{ .code = 0, .output = try self.allocator.dupe(u8, result.output.protectedBytes()) };
     }
     fn executeTimed(ctx: *anyopaque, _: remote.Operation, command: []const u8, budget_ms: u32) !remote.Result {

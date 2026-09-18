@@ -587,6 +587,15 @@ bounded DNS/TCP/server-TLS/client-auth/request diagnostics without raw errors.
 DNS/provider firewalls remain operator prerequisites; there is no Let's Encrypt
 or public-Grafana TLS integration in this private channel.
 
+Enrollment requests attach a controller-owned semantic stage to public stdin
+transport. Only native helper requests enable bounded concurrent stderr parsing;
+secret-provider/credential transport continues to discard stderr entirely.
+The parser retains typed enums only and rejects mixed or unknown output. Native
+codes 86–89 and 91–95 keep their meaning, including across readiness adaptation.
+`station_ensure` records finer CA/server generation, validation and publication
+stages without changing storage operations or recovery. Native panics exit 86
+without a stack dump; absent diagnostics still retain the controller stage.
+
 Unrecognized credential paths are refused. Host roots and CA remain trusted;
 compromised registered agents can submit arbitrary metric content for their own
 identity. This is not hard tenant isolation. The station enforces host identity

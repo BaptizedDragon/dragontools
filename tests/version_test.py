@@ -21,3 +21,10 @@ for payload in (b'', b'{', b'{"action":"arbitrary-command","args":["PRIVATE KEY 
     result = subprocess.run([str(agent), 'internal', '--stdin'], input=payload, capture_output=True, timeout=10)
     assert result.returncode != 0 and not result.stdout and not result.stderr
 print('PASS: malformed/bounded helper input fails without raw diagnostics or secret echo.')
+
+for payload in (b'', b'{', b'PRIVATE KEY sentinel', b'x' * (512 * 1024 + 1)):
+    result = subprocess.run([str(agent), 'internal', '--stdin', '--diagnostics'], input=payload, capture_output=True, timeout=10)
+    assert result.returncode == 86 and not result.stdout
+    assert result.stderr == b'AgentStage: request\nAgentError: InvalidManagedState\n' or result.stderr == b'AgentStage: request\nAgentError: AgentInternalError\n'
+    assert b'PRIVATE KEY' not in result.stderr and b'sentinel' not in result.stderr
+print('PASS: native diagnostic mode emits only bounded semantic names without input echo.')

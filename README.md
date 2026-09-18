@@ -1127,6 +1127,31 @@ fingerprint bind that identity. Changing a destination cannot replace its CA or
 require a new client key. Read-only verification checks the actual agent config
 and performs strict server hostname verification using `station.hostname`.
 
+Enrollment failures identify the controller stage: `station_ensure`,
+`client_prepare`, `station_stage`, `client_stage`, `agent_credential_install` or
+`credential_verify` (also registration/finalization/rollback where applicable).
+For example, a CA key-generation failure during `dragontool monitoring apply`
+adds these safe fields to the existing component/check failure:
+
+```text
+Stage: station_ensure
+Detail: agent_internal_error
+AgentStage: ca_key_generation
+AgentError: CryptoKeyGenerationFailed
+```
+
+CA maintenance and registry refusal retain their dedicated checks and report
+`Detail: ca_maintenance` or `Detail: registry_permissions`. The controller requests
+native `internal --stdin --diagnostics` mode automatically; no user flag is needed.
+It accepts only a complete, at-most-256-byte message of fixed semantic names.
+Unknown, malformed, oversized or mixed stderr is discarded; the controller stage
+and exit-code detail still remain. CA/server stages distinguish managed directory
+inspection, key/certificate generation, validation (including key/SAN checks),
+and publication. No private key, CSR/certificate contents, paths, raw errors or
+stack traces are printed. A diagnostic does not authorize deleting or rotating
+CA state. Correct the reported cause and rerun the same application config;
+empty managed bootstrap parents remain safe to reuse.
+
 This is a private ingestion channel, so DragonTools intentionally uses its own
 CA rather than Let's Encrypt. The station certificate includes its configured
 DNS/IP SAN. Vector checks both certificate and hostname, and vmagent retains

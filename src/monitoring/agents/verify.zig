@@ -110,8 +110,8 @@ fn secureEndpointGuarded(a: std.mem.Allocator, r: remote.Remote, report: *model.
                 else => .secure_endpoint,
             };
             return switch (result.code) {
-                91, 92, 95 => .{ .code = 75 },
-                93, 94 => .{ .code = 1 },
+                91, 92, 95 => .{ .code = 75, .agent_exit_code = result.code, .diagnostic = result.diagnostic },
+                93, 94 => .{ .code = 1, .agent_exit_code = result.code, .diagnostic = result.diagnostic },
                 else => result,
             };
         }

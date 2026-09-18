@@ -10,28 +10,38 @@ const server_path = f.base ++ "/server";
 const modern = [_][]const u8{ "certificate_pem", "certificate_identity" };
 
 pub fn loadCa(ctx: Context) !f.Files {
+    const caller_stage = if (ctx.diagnostic_stage) |current| current.* else .enrollment;
+    ctx.track(.ca_state);
     const values = try ctx.store.managed(ca_path, ctx.store.root_owner, 0o700, &.{ "ca.crt", "ca.key" }, f.marker, true);
+    ctx.track(.ca_certificate_validation);
     var ca = try ctx.ca(try f.item(values, "ca.crt"));
     defer ca.deinit();
     try ctx.pair(values, "ca");
+    ctx.track(caller_stage);
     return values;
 }
 fn issuance(ctx: Context, ca: f.Files) !void {
     if (try ctx.soon(try f.item(ca, "ca.crt"), s.ca_maintenance)) return error.CaMaintenanceRequired;
 }
 pub fn verifyServer(ctx: Context, endpoint: []const u8, allow_renewal: bool) ![]const u8 {
+    const caller_stage = if (ctx.diagnostic_stage) |current| current.* else .enrollment;
+    ctx.track(.server_certificate_validation);
     try s.endpoint(endpoint);
     const store = ctx.store;
+    ctx.track(.managed_directories);
     _ = try store.directory(f.base, store.root_owner, 0o755, false);
     _ = try store.directory(f.base ++ "/pki", store.root_owner, 0o700, false);
     _ = try store.directory(f.base ++ "/clients", store.root_owner, 0o700, false);
+    ctx.track(.registry_prepare);
     _ = try store.registry(ctx.ingestion.gid, false);
     const root = try loadCa(ctx);
+    ctx.track(.server_state);
     const values = try store.managed(server_path, ctx.ingestion, 0o750, &.{ "ca.crt", "server.crt", "server.key", "endpoint" }, f.marker, true);
     const ca_pem = try f.item(root, "ca.crt");
     try j.require(f.matches(values, "ca.crt", ca_pem));
     const origin = try f.item(values, "endpoint");
     try s.endpoint(origin);
+    ctx.track(.server_certificate_validation);
     var ca = try ctx.ca(ca_pem);
     defer ca.deinit();
     var cert = try ctx.certificate(try f.item(values, "server.crt"));
@@ -39,6 +49,7 @@ pub fn verifyServer(ctx: Context, endpoint: []const u8, allow_renewal: bool) ![]
     try ctx.pair(values, "server");
     try cert.verify(&ca, .server, origin, ctx.now, allow_renewal);
     try cert.verify(&ca, .server, endpoint, ctx.now, allow_renewal);
+    ctx.track(caller_stage);
     return ca_pem;
 }
 pub fn registry(ctx: Context, host: []const u8, missing: bool) !?j.Value {
@@ -104,15 +115,22 @@ fn newServer(ctx: Context, ca_values: f.Files, existing_key: ?[]const u8, origin
     defer ca.deinit();
     var ca_key = try pki.Key.parse(ctx.store.a, try f.item(ca_values, "ca.key"));
     defer ca_key.deinit();
+    ctx.track(if (existing_key != null) .server_state else .server_key_generation);
+    try ctx.store.checkpoint("generate_server_key", server_path);
     var key = if (existing_key) |pem| try pki.Key.parse(ctx.store.a, pem) else try pki.Key.generate();
     defer key.deinit();
+    ctx.track(.server_certificate_generation);
+    try ctx.store.checkpoint("generate_server_certificate", server_path);
     const cert_pem = try pki.createServerCertificate(ctx.store.a, &ca, &ca_key, &key, origin, names, ctx.validity(365));
+    ctx.track(.server_certificate_validation);
+    try ctx.store.checkpoint("validate_server", server_path);
     var cert = try ctx.certificate(cert_pem);
     defer cert.deinit();
     try cert.matchesKey(&key);
     try cert.verify(&ca, .server, origin, ctx.now, false);
     var values: f.Files = .empty;
     try values.put(ctx.store.a, "server.crt", cert_pem);
+    ctx.track(.server_key_serialization);
     try values.put(ctx.store.a, "server.key", existing_key orelse try key.privatePem(ctx.store.a));
     try values.put(ctx.store.a, "ca.crt", try f.item(ca_values, "ca.crt"));
     try values.put(ctx.store.a, "endpoint", origin);
@@ -120,18 +138,29 @@ fn newServer(ctx: Context, ca_values: f.Files, existing_key: ?[]const u8, origin
 }
 pub fn ensure(ctx: Context, value: j.Value) !bool {
     const store = ctx.store;
+    ctx.track(.station_registration_prepare);
     try s.registration(store.a, value, null, null);
     const endpoint = try j.field(value, "station");
+    ctx.track(.managed_directories);
     _ = try store.directory(f.base, store.root_owner, 0o755, false);
+    ctx.track(.registry_prepare);
     var changed = try store.registry(ctx.ingestion.gid, true);
+    ctx.track(.managed_directories);
     changed = try store.directory(f.base ++ "/pki", store.root_owner, 0o700, true) or changed;
     changed = try store.directory(f.base ++ "/clients", store.root_owner, 0o700, true) or changed;
+    ctx.track(.station_registration_prepare);
     if (try registry(ctx, try j.field(value, "host"), true)) |previous| try s.sameMode(previous, value);
+    ctx.track(.ca_state);
     if (!try store.exists(ca_path)) {
         if (try store.exists(server_path) or (try store.names(f.base ++ "/clients")).len != 0 or (try store.names(f.base ++ "/registry")).len != 0) return error.CaMaintenanceRequired;
+        ctx.track(.ca_key_generation);
+        try store.checkpoint("generate_ca_key", ca_path);
         var key = try pki.Key.generate();
         defer key.deinit();
+        ctx.track(.ca_certificate_generation);
+        try store.checkpoint("generate_ca_certificate", ca_path);
         const pem = try pki.createCaCertificate(store.a, &key, ctx.validity(3650));
+        ctx.track(.ca_certificate_validation);
         try store.checkpoint("validate_ca", ca_path);
         // Validate before any CA directory can be published.
         var cert = try ctx.ca(pem);
@@ -139,21 +168,28 @@ pub fn ensure(ctx: Context, value: j.Value) !bool {
         try cert.matchesKey(&key);
         var values: f.Files = .empty;
         try values.put(store.a, "ca.crt", pem);
+        ctx.track(.ca_key_serialization);
         try values.put(store.a, "ca.key", try key.privatePem(store.a));
+        ctx.track(.ca_publication);
         try store.createBundle(ca_path, store.root_owner, 0o700, values, f.marker);
         changed = true;
     }
+    ctx.track(.ca_state);
     const root = try loadCa(ctx);
     try issuance(ctx, root);
+    ctx.track(.server_state);
     if (!try store.exists(server_path)) {
         const values = try newServer(ctx, root, null, endpoint, &.{try pki.San.endpoint(store.a, endpoint)});
+        ctx.track(.server_publication);
         try store.mark("ingestion");
         try store.createBundle(server_path, ctx.ingestion, 0o750, values, f.marker);
         changed = true;
     }
+    ctx.track(.server_state);
     const current = try store.managed(server_path, ctx.ingestion, 0o750, &.{ "ca.crt", "server.crt", "server.key", "endpoint" }, f.marker, true);
     const origin = try f.item(current, "endpoint");
     _ = try verifyServer(ctx, origin, true);
+    ctx.track(.server_certificate_validation);
     var cert = try ctx.certificate(try f.item(current, "server.crt"));
     defer cert.deinit();
     var names: [16]pki.San = undefined;
@@ -171,6 +207,7 @@ pub fn ensure(ctx: Context, value: j.Value) !bool {
             count += 1;
         }
         const renewed = try newServer(ctx, root, try f.item(current, "server.key"), origin, names[0..count]);
+        ctx.track(.server_publication);
         try store.mark("ingestion");
         changed = try store.atomic(server_path ++ "/server.crt", try f.item(renewed, "server.crt"), ctx.ingestion, 0o400, f.base) or changed;
     }

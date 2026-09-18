@@ -1,9 +1,16 @@
 const std = @import("std");
+pub const diagnostics = @import("../agent/diagnostics.zig");
 const Secret = @import("../secrets/secret.zig").Secret;
 pub const Operation = enum { detect, user, directories, capacity, binary, plugin, config, provisioning, unit, activate, health, credentials, finalize, status, notify_test, service_exists, host_inspect, host_packages, host_source, host_zshrc, host_verify, host_shell };
-pub const Result = struct { code: u8, output: []const u8 = "" };
+pub const Result = struct {
+    code: u8,
+    output: []const u8 = "",
+    diagnostic: ?diagnostics.Diagnostic = null,
+    // Readiness adapters preserve the native code when translating to retry/stop.
+    agent_exit_code: ?u8 = null,
+};
 /// Public binary/JSON upload. Private credential bytes have a separate API.
-pub const Input = struct { command: []const u8, bytes: []const u8 };
+pub const Input = struct { command: []const u8, bytes: []const u8, enrollment_stage: ?diagnostics.EnrollmentStage = null };
 /// Monotonic readiness timing, injectable without real waiting in tests.
 pub const Clock = struct {
     context: *anyopaque,

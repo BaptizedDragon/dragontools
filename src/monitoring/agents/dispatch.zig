@@ -80,6 +80,7 @@ pub fn run(init: std.process.Init, options: cli.Options) !void {
     const result = if (options.command == .agents_install) @import("install.zig").install(a, app.asRemote(), station.asRemote(), &report, registration) else @import("verify.zig").verify(a, app.asRemote(), station.asRemote(), &report, registration);
     result catch |err| {
         print(init.io, try std.fmt.allocPrint(a, "Agent verification/install failed. Component: {s}. Check: {s}. {s}\n", .{ @tagName(report.component), if (report.state.check) |check| @tagName(check) else @tagName(report.state.phase), if (report.configured) "Configuration was applied; signal delivery has not been fully verified. Pending restart intent remains; rerun the same command." else "Later steps were not attempted. Completed changes may remain; rerun after correcting the cause." }));
+        print(init.io, try report.state.credentialDiagnostics(a));
         if (@import("verify.zig").networkFailure(report.state.check)) print(init.io, @import("verify.zig").network_guidance);
         if (report.state.check == .client_identity_inconsistent) print(init.io, "The managed client identity is inconsistent. Existing files were preserved; restore a verified local backup or correct conflicting metadata before retrying.\n");
         if (report.state.check == .ca_maintenance) print(init.io, "The private CA requires explicit maintenance. It was not rotated or replaced.\n");
