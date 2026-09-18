@@ -2,6 +2,25 @@
 
 ## 0.1.0-dev — unreleased
 
+- Validate station CA properties explicitly across OpenSSL platforms: parse PEM,
+  check current validity, preserve exact CA:TRUE,pathlen:0 and keyCertSign,cRLSign
+  extensions as DER, compare DER public keys, and verify the self-signature with
+  an explicit purpose. Preserve failure handling and lifecycle checks; add
+  malformed, non-CA, key, expiry and signature
+  regression fixtures without platform-specific expectations.
+- Validate new CA bundles in private staging before atomic publication. Correct
+  new-directory modes under umask 077 and recover the empty-parent bootstrap
+  state. Failed validation publishes no CA; existing invalid CA state is
+  preserved without rotation.
+- Reconcile the fixed root:dt-ingest ingestion registry directory to 0750 on
+  fresh and initialized stations, including legacy 0700. Reject symlinks,
+  incompatible ownership and other file types; preserve contents and restart
+  state. Correct permissions remain a no-op, and refusal reports
+  `ingestion / registry_permissions` without raw diagnostics.
+- Preserve CSR proof of possession on Ubuntu 24.04/OpenSSL 3.0 using explicit
+  ECDSA/SHA-256 verification: `req -verify` can return success for a bad signature.
+  Keep the existing corrupted-CSR rejection test and diagnostic redaction.
+
 - Require `station.hostname` in application monitoring.toml, separate from the
   administrative `station.ssh_host` alias. Reject malformed/non-DNS endpoints
   before SSH; use the explicit hostname for mTLS URLs, SANs and diagnostics.

@@ -27,6 +27,7 @@ pub const Check = enum {
     client_certificate_rejected,
     ingestion_rejected,
     ca_maintenance,
+    registry_permissions,
     credential_recovery,
     client_identity_inconsistent,
     host_metrics_ready,

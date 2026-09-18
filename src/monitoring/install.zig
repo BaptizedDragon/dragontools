@@ -78,6 +78,10 @@ pub const Report = struct {
                 self.check = .client_identity_inconsistent;
                 return error.ClientIdentityInconsistent;
             },
+            89 => {
+                self.check = .registry_permissions;
+                return error.RegistryPermissionsConflict;
+            },
             255 => return error.SshConnectionFailed,
             else => return error.RemoteOperationFailed,
         }

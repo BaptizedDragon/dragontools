@@ -116,6 +116,7 @@ pub fn verify(a: std.mem.Allocator, app: remote.Remote, station: remote.Remote, 
     for (registration.services) |selected| _ = try report.call(app, .service_exists, try common.selectedService(a, selected));
     report.component = .station;
     _ = try report.call(station, .health, @import("install.zig").station_preflight);
+    report.component = .ingestion;
     try service(a, station, report, registration, machine.arch, .ingestion);
     _ = try report.call(station, .health, try ingress.verifyStationCommand(a, registration.host, registration.station, try registration.json(a)));
     report.component = .journald;

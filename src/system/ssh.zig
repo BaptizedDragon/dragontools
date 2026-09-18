@@ -199,7 +199,9 @@ test "compressed agent commands retain literal arguments and protected stdin" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const value = try a.alloc(u8, 65536);
+    // Quotes expand fourfold before transport. Keep the decoded sh -c argument
+    // below Linux's 128 KiB limit while still exceeding the compression threshold.
+    const value = try a.alloc(u8, 16384);
     @memset(value, '\'');
     const command = try remote.shell(a, &.{ "printf", "%s", value });
     const encoded = try compactAgentCommand(a, command);

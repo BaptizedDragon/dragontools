@@ -38,6 +38,10 @@ class CAMaintenanceRequired(ValueError):
     pass
 
 
+class RegistryPermissionsError(ValueError):
+    pass
+
+
 def require(condition):
     if not condition:
         raise ValueError("Agent credential state refused")
@@ -124,11 +128,56 @@ def directory(path, mode, uid, gid, create=False):
     if not os.path.lexists(path) and create:
         os.mkdir(path, mode)
         os.chown(path, uid, gid)
+        os.chmod(path, mode)  # main's private umask must not strip required group access.
         _sync_parent(path)
         changed = True
     st = os.lstat(path)
     require(stat.S_ISDIR(st.st_mode) and st.st_uid == uid and st.st_gid == gid and stat.S_IMODE(st.st_mode) == mode)
     return changed
+
+
+def registry_directory(reconcile=False):
+    """Inspect the fixed managed registry; only apply may repair its mode."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        directory(BASE, 0o755, ROOT, ROOT)
+        # No caller-supplied path, and no links through the owned tree or leaf.
+        parent = os.open(os.path.dirname(BASE), flags)
+        try:
+            st = os.fstat(parent)
+            require(st.st_uid == ROOT and not stat.S_IMODE(st.st_mode) & 0o022)
+            base = os.open(os.path.basename(BASE), flags, dir_fd=parent)
+            try:
+                changed = False
+                try:
+                    fd = os.open("registry", flags, dir_fd=base)
+                except FileNotFoundError:
+                    require(reconcile)
+                    os.mkdir("registry", 0o700, dir_fd=base)
+                    fd = os.open("registry", flags, dir_fd=base)
+                    changed = True
+                try:
+                    gid = pwd.getpwnam("dt-ingest").pw_gid
+                    if changed:
+                        os.fchown(fd, ROOT, gid)
+                    st = os.fstat(fd)
+                    require(stat.S_ISDIR(st.st_mode) and st.st_uid == ROOT and st.st_gid == gid)
+                    if stat.S_IMODE(st.st_mode) != 0o750:
+                        require(reconcile)
+                        os.fchmod(fd, 0o750)
+                        os.fsync(fd)
+                        changed = True
+                    if changed:
+                        os.fsync(base)
+                    return changed
+                finally:
+                    os.close(fd)
+            finally:
+                os.close(base)
+        finally:
+            os.close(parent)
+    except (OSError, ValueError):
+        raise RegistryPermissionsError("Registry permissions refused") from None
 
 
 def read(path, uid, gid, mode, limit=32768):
@@ -200,7 +249,7 @@ def bundle(path, uid, gid, names):
     return {name: read(path + "/" + name, uid, gid, 0o400) for name in names}
 
 
-def create_bundle(path, uid, gid, values):
+def create_bundle(path, uid, gid, values, validate=None):
     stage = tempfile.mkdtemp(prefix=".pki-", dir=os.path.dirname(path))
     try:
         write(stage + "/.dragontools-managed", MARKER, ROOT, ROOT)
@@ -208,6 +257,8 @@ def create_bundle(path, uid, gid, values):
             write(stage + "/" + name, data, uid, gid)
         os.chown(stage, ROOT, gid)
         os.chmod(stage, 0o700 if uid == ROOT else 0o750)
+        if validate is not None:
+            validate(stage)
         os.rename(stage, path)
         stage = None
         _sync_parent(path)
@@ -253,7 +304,7 @@ def validate_client_certificate(path, host, ca, allow_expired=False, data=None):
 
 
 def _der(data):
-    """Small strict DER reader for the single permitted PKCS#10 profile."""
+    """Small strict DER reader for the bounded CSR and CA extension profiles."""
     values, offset = [], 0
     while offset < len(data):
         require(offset + 2 <= len(data))
@@ -276,6 +327,14 @@ def _one(data, tag):
     values = _der(data)
     require(len(values) == 1 and values[0][0] == tag)
     return values[0][1]
+
+
+def _sequence(value):
+    """Restore a SEQUENCE header removed by the strict DER reader."""
+    length = len(value)
+    size = (length.bit_length() + 7) // 8
+    header = bytes([length]) if length < 128 else bytes([0x80 | size]) + length.to_bytes(size, "big")
+    return b"\x30" + header + value
 
 
 def validate_csr(csr, host):
@@ -307,9 +366,17 @@ def validate_csr(csr, host):
     require(extension[-1][0] == 0x04)
     require(_der(_one(extension[-1][1], 0x30)) == [(0x86, identity(host).encode())])
     # Structural constraints do not replace proof of possession or EC validation.
-    run("req", "-verify", "-noout", data=csr.encode())
     public = run("req", "-pubkey", "-noout", data=csr.encode())
     run("pkey", "-pubin", "-pubcheck", "-noout", data=public)
+    # OpenSSL 3.0 req -verify may return success for a bad signature. Verify the
+    # exact CertificationRequestInfo with the already allowlisted ECDSA/SHA-256
+    # algorithm instead; dgst's exit status works without parsing diagnostics.
+    signature = request[2][1]
+    require(signature and signature[0] == 0)
+    with tempfile.TemporaryDirectory(prefix=".verify-csr-", dir=BASE + "/pki") as stage:
+        write(stage + "/public.pem", public, ROOT, ROOT)
+        write(stage + "/signature.der", signature[1:], ROOT, ROOT)
+        run("dgst", "-sha256", "-verify", stage + "/public.pem", "-signature", stage + "/signature.der", data=_sequence(request[0][1]))
     return public
 
 
@@ -371,13 +438,53 @@ def _atomic(path, data, uid, gid, mode, stage_directory=None):
     return True
 
 
-def _validate_ca():
-    ca = BASE + "/pki/ca"
+def _ca_extensions(der):
+    # Inspect X.509 v3 extension DER, not OpenSSL's human-readable labels,
+    # indentation or line wrapping. The existing bounded DER reader is also
+    # used for CSRs; OpenSSL still parses and verifies the whole certificate.
+    certificate = _der(_one(der, 0x30))
+    require([tag for tag, _ in certificate] == [0x30, 0x30, 0x03])
+    tbs = _der(certificate[0][1])
+    require(len(tbs) >= 8 and tbs[0] == (0xa0, b"\x02\x01\x02"))
+    require([tag for tag, _ in tbs[1:7]] == [0x02, 0x30, 0x30, 0x30, 0x30, 0x30])
+    # A CA loaded as its own trust anchor must also be self-issued; otherwise
+    # verify may not check an anchor's signature even with -check_ss_sig.
+    require(tbs[3] == tbs[5])
+    extension_fields = [value for tag, value in tbs[7:] if tag == 0xa3]
+    require(len(extension_fields) == 1)
+    extensions = {}
+    for tag, value in _der(_one(extension_fields[0], 0x30)):
+        require(tag == 0x30)
+        fields = _der(value)
+        require(len(fields) in (2, 3) and fields[0][0] == 0x06 and fields[-1][0] == 0x04)
+        if len(fields) == 3:
+            require(fields[1] in ((0x01, b"\x00"), (0x01, b"\xff")))
+        oid = fields[0][1]
+        require(oid not in extensions)
+        extensions[oid] = fields[-1][1]
+    basic = _der(_one(extensions.get(bytes.fromhex("551d13"), b""), 0x30))
+    # Preserve the generated root's exact policy: CA:TRUE,pathlen:0.
+    require(basic == [(0x01, b"\xff"), (0x02, b"\x00")])
+    usage = _one(extensions.get(bytes.fromhex("551d0f"), b""), 0x03)
+    # Exactly keyCertSign + cRLSign: bits 5/6, MSB first, one unused bit.
+    require(usage == b"\x01\x06")
+
+
+def _validate_ca(ca=None):
+    if ca is None:
+        ca = BASE + "/pki/ca"
     values = bundle(ca, ROOT, ROOT, ("ca.crt", "ca.key"))
-    validate_pair(ca, "ca")
-    run("verify", "-CAfile", ca + "/ca.crt", ca + "/ca.crt")
-    require(_extension(ca + "/ca.crt", "basicConstraints") == "CA:TRUE, pathlen:0")
-    require(_extension(ca + "/ca.crt", "keyUsage") == "Certificate Sign, CRL Sign")
+    cert, key = ca + "/ca.crt", ca + "/ca.key"
+    der = run("x509", "-inform", "PEM", "-in", cert, "-outform", "DER")
+    _ca_extensions(der)
+    run("x509", "-in", cert, "-checkend", "0", "-noout")
+    public_pem = run("x509", "-in", cert, "-pubkey", "-noout")
+    public_der = run("pkey", "-pubin", "-inform", "PEM", "-outform", "DER", data=public_pem)
+    require(public_der == run("pkey", "-in", key, "-pubout", "-outform", "DER"))
+    # Explicit purpose and root self-signature checking work across supported
+    # OpenSSL versions. Exit status also enforces notBefore/notAfter; no output
+    # wording is part of the protocol, and failure is never treated as success.
+    run("verify", "-CAfile", cert, "-purpose", "any", "-check_ss_sig", cert)
     return values
 
 
@@ -407,7 +514,7 @@ def _station(endpoint, allow_server_renewal=False):
     directory(BASE, 0o755, ROOT, ROOT)
     directory(BASE + "/pki", 0o700, ROOT, ROOT)
     directory(BASE + "/clients", 0o700, ROOT, ROOT)
-    directory(BASE + "/registry", 0o750, ROOT, account.pw_gid)
+    registry_directory()
     ca = BASE + "/pki/ca"
     values = _validate_ca()
     server = bundle(BASE + "/server", account.pw_uid, account.pw_gid, ("ca.crt", "server.crt", "server.key", "endpoint"))
@@ -436,7 +543,7 @@ def _ca_issuance_check():
 def _registry(host, missing=False):
     account = pwd.getpwnam("dt-ingest")
     path = BASE + "/registry/" + valid_host(host) + ".json"
-    directory(BASE + "/registry", 0o750, ROOT, account.pw_gid)
+    registry_directory()
     if missing and not os.path.lexists(path):
         return None
     value = json.loads(read(path, ROOT, account.pw_gid, 0o640, REGISTRY_LIMIT))
@@ -507,9 +614,9 @@ def ensure(value):
     account = pwd.getpwnam("dt-ingest")
     endpoint = value["station"]
     directory(BASE, 0o755, ROOT, ROOT)
-    changed = directory(BASE + "/pki", 0o700, ROOT, ROOT, True)
+    changed = registry_directory(reconcile=True)
+    changed = directory(BASE + "/pki", 0o700, ROOT, ROOT, True) or changed
     changed = directory(BASE + "/clients", 0o700, ROOT, ROOT, True) or changed
-    changed = directory(BASE + "/registry", 0o750, ROOT, account.pw_gid, True) or changed
     previous = _registry(value["host"], True)
     if previous:
         require(bool(previous.get("applications")) == bool(value.get("applications")))
@@ -519,7 +626,9 @@ def ensure(value):
         # never permission to silently replace its trust root.
         if os.path.lexists(BASE + "/server") or os.listdir(BASE + "/clients") or os.listdir(BASE + "/registry"):
             raise CAMaintenanceRequired("CA maintenance required")
-        create_bundle(ca, ROOT, ROOT, generate(None, "ca", "DragonTools agent CA"))
+        # Validate privately before publication. A rejected new CA must leave
+        # only the parent directories so the next apply can bootstrap cleanly.
+        create_bundle(ca, ROOT, ROOT, generate(None, "ca", "DragonTools agent CA"), validate=_validate_ca)
         changed = True
     bundle(ca, ROOT, ROOT, ("ca.crt", "ca.key"))
     _ca_issuance_check()
@@ -705,5 +814,7 @@ def main():
         return 0
     except CAMaintenanceRequired:
         return 87
+    except RegistryPermissionsError:
+        return 89
     except Exception:
         return 86

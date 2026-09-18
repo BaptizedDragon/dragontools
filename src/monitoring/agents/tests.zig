@@ -44,6 +44,9 @@ const Fake = struct {
     station_unreachable: bool = false,
     fail_vector_binary: bool = false,
     ingestion_directory: bool = false,
+    registry_failure: bool = false,
+    registry_repair: bool = false,
+    registry_attempts: usize = 0,
     fn asRemote(self: *Fake) remote.Remote {
         return .{ .context = self, .execute = execute, .clock = .{ .context = self, .now_ms = nowMs, .sleep_ms = sleepMs } };
     }
@@ -61,6 +64,16 @@ const Fake = struct {
     fn execute(ctx: *anyopaque, op: remote.Operation, command: []const u8) !remote.Result {
         const self: *Fake = @ptrCast(@alignCast(ctx));
         try std.testing.expect(std.mem.indexOf(u8, command, "PRIVATE-CERTIFICATE-SENTINEL") == null);
+        const registry_ensure = std.mem.indexOf(u8, command, " 'ensure' '") != null;
+        if (registry_ensure or std.mem.indexOf(u8, command, " 'verify' '") != null) {
+            self.registry_attempts += 1;
+            if (self.registry_failure) return .{ .code = 89 };
+            if (registry_ensure and self.registry_repair) {
+                self.registry_repair = false;
+                self.mutations += 1;
+                return .{ .code = 0, .output = "changed" };
+            }
+        }
         if (std.mem.indexOf(u8, command, " 'inspect' '") != null) return .{ .code = 0, .output = try std.fmt.allocPrint(self.allocator, "{{\"host\":\"dt-0123456789abcdef0123456789abcdef\",\"station\":\"{s}\",\"ca.crt\":\"PUBLIC-CA\",\"legacy\":{s},\"legacy_expired\":false,\"legacy_active\":{s},\"certificate_sha256\":\"{s}\",\"pending_certificate_sha256\":{s}}}", .{ self.station_hostname, if (self.legacy) "true" else "false", if (self.legacy) "true" else "false", if (self.committed_pending) "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" else "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", if (self.pending_registry) "\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"" else "null" }) };
         if (std.mem.indexOf(u8, command, " 'client-prepare' '") != null) {
             if (self.enrolled and !self.renew and !self.legacy and !self.candidate) return .{ .code = 0, .output = "{\"action\":\"unchanged\",\"csr\":null,\"certificate_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}" };
@@ -197,6 +210,60 @@ test "agents first install signals finalize and unchanged rerun performs no muta
         try std.testing.expectEqual(@as(usize, 1), fake.state(kind).restarts);
         if (kind != .ingestion) try std.testing.expectEqual(@as(usize, 1), fake.state(kind).credential_writes);
     }
+}
+test "registry permissions failure reports ingestion check without retry and recovers on apply" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var report: model.Report = .{};
+    var fake: Fake = .{ .allocator = a, .report = &report, .registry_failure = true };
+    try std.testing.expectError(error.RegistryPermissionsConflict, install.install(a, fake.asRemote(), fake.asRemote(), &report, registration));
+    try std.testing.expectEqual(model.Component.ingestion, report.component);
+    try std.testing.expectEqual(readiness.Check.registry_permissions, report.state.check.?);
+    try std.testing.expectEqual(remote.Operation.credentials, report.state.phase);
+    try std.testing.expectEqual(@as(usize, 1), fake.registry_attempts);
+    try std.testing.expectEqual(@as(usize, 0), fake.enrollments);
+    try std.testing.expectEqual(@as(i64, 0), fake.now);
+    fake.registry_failure = false;
+    report = .{};
+    try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
+    const before = fake.mutations;
+    report = .{};
+    try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
+    try std.testing.expectEqual(@as(usize, 0), report.state.changes);
+    try std.testing.expectEqual(before, fake.mutations);
+}
+test "registry mode repair changes only permissions without restarting and rerun is a no-op" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var report: model.Report = .{};
+    var fake: Fake = .{ .allocator = a, .report = &report };
+    try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
+    const before = fake.mutations;
+    const states = fake.states;
+    fake.registry_repair = true;
+    report = .{};
+    try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
+    try std.testing.expectEqual(@as(usize, 1), report.state.changes);
+    try std.testing.expectEqual(before + 1, fake.mutations);
+    for (states, fake.states) |old, current| {
+        try std.testing.expectEqual(old.restarts, current.restarts);
+        try std.testing.expectEqual(old.pending, current.pending);
+        try std.testing.expectEqual(old.credential_writes, current.credential_writes);
+    }
+    report = .{};
+    try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
+    try std.testing.expectEqual(@as(usize, 0), report.state.changes);
+    try std.testing.expectEqual(before + 1, fake.mutations);
+    const attempts = fake.registry_attempts;
+    fake.registry_failure = true;
+    report = .{};
+    try std.testing.expectError(error.RegistryPermissionsConflict, verify.verify(a, fake.asRemote(), fake.asRemote(), &report, registration));
+    try std.testing.expectEqual(model.Component.ingestion, report.component);
+    try std.testing.expectEqual(readiness.Check.registry_permissions, report.state.check.?);
+    try std.testing.expectEqual(attempts + 1, fake.registry_attempts);
+    try std.testing.expectEqual(before + 1, fake.mutations);
 }
 test "Vector-only and vmagent-only edits restart only the affected agent" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

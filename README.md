@@ -988,6 +988,21 @@ root:root 0400 under `/etc/dragontools/ingestion/pki/ca/`; its server key remain
 local to the station. Private keys never enter controller argv, output, ordinary
 managed-file writes or logs.
 
+Bootstrap validates the generated CA before publishing it: exact
+CA:TRUE,pathlen:0 and keyCertSign,cRLSign extensions, current validity, matching
+public keys and a verified self-signature. Failed validation leaves no partial CA
+bundle. If a failed apply left only empty `pki/`, `clients/` and `registry/`
+directories, rerun the same apply with the rebuilt binary; no deletion is needed.
+Apply reconciles the fixed ingestion `registry/` directory to root:dt-ingest
+0750, including an older mode-0700 directory on an initialized station. It proves
+the directory's location and ownership before changing permissions; symlinks,
+wrong owners/groups and other file types are refused. Registry contents and keys
+are preserved, and a mode-only repair does not restart services. Correct 0750 is
+a no-op. Read-only verification never repairs permissions; a registry permission
+failure reports `Component: ingestion`, `Check: registry_permissions`.
+Existing invalid CA material is preserved and fails validation, never silently
+rotated.
+
 CA lifetime is ten years; server/client certificates last one year. `apply`
 (and legacy `agents install`) inspects expiry on every run. More than 30 days
 remaining is a no-op: no CSR, signature, credential rewrite or agent restart.

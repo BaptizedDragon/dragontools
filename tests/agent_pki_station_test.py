@@ -81,6 +81,250 @@ class StationPKI(unittest.TestCase):
         with patch.object(pki, "run", side_effect=run):
             return pki.sign(csr, HOST, str(self.base / "pki/ca"))
 
+    def ca_certificate(self, basic="basicConstraints=critical,CA:TRUE,pathlen:0", usage="keyUsage=critical,keyCertSign,cRLSign", days=3650):
+        key = str(self.base / "pki/ca/ca.key")
+        csr = pki.run("req", "-new", "-key", key, "-subj", "/CN=DragonTools agent CA")
+        extensions = self.app / "ca-extensions"
+        extensions.write_text("\n".join(value for value in (basic, usage) if value) + "\n")
+        return pki.run("x509", "-req", "-signkey", key, "-days", str(days), "-sha256",
+                       "-extfile", str(extensions), data=csr)
+
+    def replace_ca(self, name, data):
+        path = self.base / "pki/ca" / name
+        path.chmod(0o600)
+        path.write_bytes(data)
+        path.chmod(0o400)
+
+    def assert_ca_refused(self):
+        before = self.snapshot()
+        with self.assertRaises((ValueError, subprocess.CalledProcessError)):
+            pki._validate_ca()
+        self.assertEqual(before, self.snapshot())
+
+    @contextlib.contextmanager
+    def empty_station(self, registry_mode=None):
+        with tempfile.TemporaryDirectory(dir=self.app) as temporary:
+            base, state = Path(temporary) / "ingestion", Path(temporary) / "state"
+            for path in (base, state):
+                path.mkdir(mode=0o755)
+                path.chmod(0o755)
+            with patch.object(pki, "BASE", str(base)), patch.object(pki, "STATE", str(state)), patch.object(self, "base", base):
+                if registry_mode is not None:
+                    pki.directory(str(base / "pki"), 0o700, pki.ROOT, pki.ROOT, True)
+                    pki.directory(str(base / "clients"), 0o700, pki.ROOT, pki.ROOT, True)
+                    pki.directory(str(base / "registry"), registry_mode, pki.ROOT, os.getgid(), True)
+                yield base
+
+    def ensure_entrypoint(self, expected):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(pki.sys, "argv", ["pki", "ensure", HOST, "localhost", json.dumps(self.value)]), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            result = pki.main()
+        self.assertEqual(result, expected)
+        self.assertEqual(stdout.getvalue(), "changed" if expected == 0 else "")
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_bootstrap_under_private_umask_from_absent_or_empty_parents_and_rerun(self):
+        # Include the exact failed production layout, including the registry's
+        # mode after mkdir(0750) under the entrypoint's umask 077.
+        for registry_mode in (None, 0o750, 0o700):
+            with self.subTest(registry_mode=registry_mode), self.empty_station(registry_mode) as base:
+                if registry_mode is not None:
+                    self.assertEqual(set(path.name for path in base.iterdir()), {"pki", "clients", "registry"})
+                    self.assertTrue(all(not list(path.iterdir()) for path in base.iterdir()))
+                self.ensure_entrypoint(0)
+                self.assertEqual((base / "registry").stat().st_mode & 0o777, 0o750)
+                self.assertTrue((base / "pki/ca/ca.key").is_file())
+                self.assertTrue((base / "server/server.key").is_file())
+                self.assertFalse(list(base.rglob("client.key")))
+                pki._station("localhost")
+                before = self.snapshot()
+                with patch.object(pki, "generate", side_effect=AssertionError("No silent rotation on rerun")):
+                    self.assertEqual(pki.ensure(self.value), "unchanged")
+                self.assertEqual(before, self.snapshot())
+
+    def test_new_ca_validation_failure_leaves_empty_parents_and_retry_bootstraps(self):
+        with self.empty_station(0o750) as base:
+            original = pki.run
+            attempts = []
+            def fail_verification(*args, **kwargs):
+                if args[0] == "verify":
+                    attempts.append(((base / "pki/ca").exists(), Path(args[2]).parent.parent))
+                    raise subprocess.CalledProcessError(2, ["openssl", *args], stderr=b"PRIVATE KEY sentinel")
+                return original(*args, **kwargs)
+            with patch.object(pki, "run", side_effect=fail_verification):
+                self.ensure_entrypoint(86)
+            self.assertEqual(attempts, [(False, base / "pki")])
+            self.assertEqual(set(path.name for path in base.iterdir()), {"pki", "clients", "registry"})
+            self.assertTrue(all(not list(path.iterdir()) for path in base.iterdir()))
+            self.ensure_entrypoint(0)
+            pki._station("localhost")
+            before = self.snapshot()
+            self.assertEqual(pki.ensure(self.value), "unchanged")
+            self.assertEqual(before, self.snapshot())
+
+    def test_registry_migration_preserves_populated_station_and_correct_mode_is_noop(self):
+        self.enroll()
+        registry = self.base / "registry"
+        (registry / "manual-sentinel").write_bytes(b"preserve")
+        registry.chmod(0o700)
+        before = self.snapshot()
+        self.ensure_entrypoint(0)
+        self.assertEqual(registry.stat().st_mode & 0o777, 0o750)
+        self.assertEqual(before, self.snapshot())
+        pki.verify_station(self.value)
+        metadata = registry.stat()
+        with patch.object(pki.os, "fchmod", side_effect=AssertionError("Correct registry mode must be a no-op")):
+            self.assertFalse(pki.registry_directory(reconcile=True))
+            self.assertEqual(pki.ensure(self.value), "unchanged")
+        self.assertEqual(before, self.snapshot())
+        self.assertEqual(metadata, registry.stat())
+
+    def test_registry_verification_is_readonly_and_reports_permissions_without_output(self):
+        self.enroll()
+        registry = self.base / "registry"
+        registry.chmod(0o700)
+        before = self.snapshot()
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(pki.sys, "argv", ["pki", "verify", HOST, "localhost", json.dumps(self.value)]), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            self.assertEqual(pki.main(), 89)
+        self.assertEqual((stdout.getvalue(), stderr.getvalue()), ("", ""))
+        self.assertEqual(registry.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(before, self.snapshot())
+
+    def test_registry_rejects_wrong_owner_and_group_without_repair(self):
+        registry = self.base / "registry"
+        registry.chmod(0o700)
+        original = os.fstat
+        expected = registry.stat()
+        for field in ("st_uid", "st_gid"):
+            def fstat(fd):
+                st = original(fd)
+                if (st.st_dev, st.st_ino) == (expected.st_dev, expected.st_ino):
+                    values = dict(st_mode=st.st_mode, st_uid=st.st_uid, st_gid=st.st_gid)
+                    values[field] += 1
+                    return types.SimpleNamespace(**values)
+                return st
+            with self.subTest(field=field), patch.object(os, "fstat", side_effect=fstat), patch.object(os, "fchmod", side_effect=AssertionError("Never repair foreign ownership")):
+                self.ensure_entrypoint(89)
+            self.assertEqual(registry.stat(), expected)
+
+    def test_registry_rejects_symlinks_files_and_fifo_without_touching_destination(self):
+        for kind in ("symlink", "file", "fifo"):
+            with self.subTest(kind=kind), self.empty_station() as base:
+                outside = base.parent / "outside"
+                outside.mkdir(mode=0o700)
+                (outside / "sentinel").write_bytes(b"preserve")
+                metadata = outside.stat()
+                registry = base / "registry"
+                if kind == "symlink":
+                    registry.symlink_to(outside, target_is_directory=True)
+                elif kind == "file":
+                    registry.write_bytes(b"preserve")
+                else:
+                    os.mkfifo(registry)
+                self.ensure_entrypoint(89)
+                self.assertEqual(outside.stat(), metadata)
+                self.assertEqual((outside / "sentinel").read_bytes(), b"preserve")
+                self.assertEqual(set(path.name for path in base.iterdir()), {"registry"})
+                if kind == "file":
+                    self.assertEqual(registry.read_bytes(), b"preserve")
+
+    def test_registry_refuses_symlinked_owned_tree_escape(self):
+        with self.empty_station() as base:
+            alias = self.app / "tree-alias"
+            alias.symlink_to(base.parent, target_is_directory=True)
+            with patch.object(pki, "BASE", str(alias / base.name)):
+                self.ensure_entrypoint(89)
+            self.assertEqual(list(base.iterdir()), [])
+
+    def test_existing_invalid_ca_is_preserved_without_rotation(self):
+        self.replace_ca("ca.key", self.key.read_bytes())
+        before = self.snapshot()
+        with patch.object(pki, "generate", side_effect=AssertionError("Never rotate an existing CA")):
+            self.ensure_entrypoint(86)
+        self.assertEqual(before, self.snapshot())
+
+    def test_ca_valid_extensions_der_key_matching_and_explicit_self_signature(self):
+        for encoding in ("pkey", "ec"):
+            with self.subTest(encoding=encoding):
+                self.replace_ca("ca.crt", self.ca_certificate())
+                # EC and PKCS#8 private key PEM encodings must normalize to the
+                # same SubjectPublicKeyInfo DER as the certificate public key.
+                key = str(self.base / "pki/ca/ca.key")
+                self.replace_ca("ca.key", pki.run(encoding, "-in", key, "-outform", "PEM"))
+                before = self.snapshot()
+                with patch.object(pki, "run", wraps=pki.run) as run:
+                    values = pki._validate_ca()
+                self.assertEqual(values["ca.crt"], (self.base / "pki/ca/ca.crt").read_bytes())
+                run.assert_any_call("pkey", "-in", key, "-pubout", "-outform", "DER")
+                cert = str(self.base / "pki/ca/ca.crt")
+                self.assertEqual(run.call_args.args, ("verify", "-CAfile", cert, "-purpose", "any", "-check_ss_sig", cert))
+                self.assertEqual(before, self.snapshot())
+
+    def test_ca_non_ca_missing_and_malformed_basic_constraints_refused_before_verify(self):
+        for basic in ("basicConstraints=critical,CA:FALSE", None, "2.5.29.19=critical,DER:01:01:FF",
+                      "basicConstraints=critical,CA:TRUE", "basicConstraints=critical,CA:TRUE,pathlen:1"):
+            with self.subTest(basic=basic):
+                self.replace_ca("ca.crt", self.ca_certificate(basic=basic))
+                with patch.object(pki, "run", wraps=pki.run) as run:
+                    self.assert_ca_refused()
+                self.assertFalse(any(call.args[0] == "verify" for call in run.call_args_list))
+
+    def test_ca_missing_signing_usage_and_malformed_usage_refused_before_verify(self):
+        for usage in ("keyUsage=critical,digitalSignature,cRLSign", None, "keyUsage=critical,keyCertSign",
+                      "keyUsage=critical,digitalSignature,keyCertSign,cRLSign",
+                      "2.5.29.15=critical,DER:04:02:02:04", "2.5.29.15=critical,DER:03:02:07:04"):
+            with self.subTest(usage=usage):
+                self.replace_ca("ca.crt", self.ca_certificate(usage=usage))
+                with patch.object(pki, "run", wraps=pki.run) as run:
+                    self.assert_ca_refused()
+                self.assertFalse(any(call.args[0] == "verify" for call in run.call_args_list))
+
+    def test_ca_malformed_pem_refused(self):
+        for cert in (b"not an X.509 certificate\n",
+                     b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"):
+            with self.subTest(cert=cert):
+                self.replace_ca("ca.crt", cert)
+                self.assert_ca_refused()
+
+    def test_ca_mismatched_private_key_refused(self):
+        self.replace_ca("ca.key", self.key.read_bytes())
+        self.assert_ca_refused()
+
+    def test_ca_requires_parseable_private_key(self):
+        key = str(self.base / "pki/ca/ca.key")
+        public_only = pki.run("pkey", "-in", key, "-pubout")
+        for invalid in (b"not a private key\n", public_only):
+            with self.subTest(invalid=invalid):
+                self.replace_ca("ca.key", invalid)
+                self.assert_ca_refused()
+
+    def test_ca_not_self_issued_refused(self):
+        ca = self.base / "pki/ca"
+        csr = pki.run("req", "-new", "-key", str(ca / "ca.key"), "-subj", "/CN=Different CA")
+        self.ca_certificate()  # Write the same exact CA extension fixture.
+        cert = pki.run("x509", "-req", "-CA", str(ca / "ca.crt"), "-CAkey", str(ca / "ca.key"),
+                       "-set_serial", "1", "-days", "3650", "-sha256", "-extfile", str(self.app / "ca-extensions"), data=csr)
+        self.replace_ca("ca.crt", cert)
+        self.assert_ca_refused()
+
+    def test_ca_expired_certificate_refused(self):
+        # x509 -req permits zero days: notAfter is already reached, without sleep.
+        self.replace_ca("ca.crt", self.ca_certificate(days=0))
+        self.assert_ca_refused()
+
+    def test_ca_corrupted_self_signature_refused(self):
+        cert = (self.base / "pki/ca/ca.crt").read_bytes()
+        der = bytearray(pki.run("x509", "-inform", "PEM", "-outform", "DER", data=cert))
+        der[-1] ^= 1
+        # Keep the certificate and extensions parseable, changing only signature.
+        pki._ca_extensions(bytes(der))
+        self.replace_ca("ca.crt", pki.run("x509", "-inform", "DER", "-outform", "PEM", data=bytes(der)))
+        with patch.object(pki, "run", wraps=pki.run) as run:
+            self.assert_ca_refused()
+        self.assertEqual(run.call_args.args[0], "verify")
+        self.assertIn("-check_ss_sig", run.call_args.args)
+
     def test_valid_csr_locality_and_forced_extensions(self):
         public = pki.stage(self.value, self.csr())
         self.assertEqual(set(public), {"host", "station", "ca.crt", "client.crt", "certificate_sha256"})

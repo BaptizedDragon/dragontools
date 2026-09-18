@@ -905,6 +905,31 @@ station's server certificate retains the configured DNS/IP SAN; Vector verifies
 certificate and hostname, and vmagent retains normal strict TLS validation. This
 private CA channel deliberately does not use Let's Encrypt.
 
+Station CA validation parses X.509 PEM and a private key, and preserves the exact
+CA:TRUE,pathlen:0 and keyCertSign,cRLSign extension policy, read from DER rather
+than OpenSSL's formatted text. Public keys must match as normalized DER. The CA
+must be self-issued; after those checks, `openssl verify -CAfile <ca.crt>
+-purpose any -check_ss_sig <ca.crt>` proves current validity and self-signature.
+An explicit expiry check also rejects a certificate at its notAfter boundary.
+Invalid or malformed CA state remains a read-only failure; validation never
+replaces keys, suppresses a failure or relies on platform-specific output text.
+
+New CA bundles are fully validated in root-private staging before atomic rename;
+validation failure removes staging and leaves no published CA directory. Parent
+directories may remain. New directories explicitly receive their requested mode
+after creation under the helper's private umask. Apply reconciles the fixed
+ingestion registry directory to root:dt-ingest 0750, including older mode-0700
+directories on initialized stations. Directory handles opened without following
+symlinks anchor the repair under the owned ingestion tree. Only mode is repaired
+after root ownership and the dt-ingest group are proven; unsafe paths, other file
+types and incompatible ownership fail with `ingestion / registry_permissions`.
+Contents and credentials are preserved; no service restart is requested for a
+mode-only repair, and correct permissions are a no-op. Read-only verification
+reports drift without repairing it. Empty pki/clients/registry parents remain a
+valid bootstrap starting point. An existing CA is never replaced on
+validation failure; missing CA material on an initialized station still requires
+explicit maintenance. Rerunning apply needs no manual cleanup of empty parents.
+
 `ingestion.zig` embeds the Python standard-library helpers. SSH transports only
 public inspection, CSR and certificate payloads, through the existing quoted,
 bounded command interface. A CSR is at most 8192 bytes and must be strict PEM
@@ -914,6 +939,11 @@ CA/serverAuth), extra names and attributes fail before signing. Issuance never
 copies CSR extensions: the station fixes critical CA:FALSE/digitalSignature,
 clientAuth and the expected SAN. Private key bytes are handled only inside their
 owning host's helper; no station client generator or private export command exists.
+CSR proof of possession uses `openssl dgst -sha256 -verify` over the exact DER
+CertificationRequestInfo with the allowlisted ECDSA/SHA-256 algorithm. OpenSSL
+3.0's `req -verify` exit status alone does not reject a corrupted CSR signature.
+Only public key/signature bytes enter temporary verification files; no diagnostic
+wording is interpreted, and the private staging directory is removed on failure.
 
 The canonical client identity lives under root:root 0700
 `/etc/dragontools/monitoring-client/`, with four root-owned 0400 files:
