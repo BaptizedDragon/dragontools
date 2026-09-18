@@ -1,0 +1,9 @@
+# Observed 2026-09-18: native test helper -> Vector 0.58.0 exec/log_to_metric/remap
+# Isolated Linux arm64 process fixture, not SSH/systemd validation.
+dragontool_agent_version_info{agent="vector",application="doers",environment="production",host="dt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",version="0.1.0-fixture"} 1
+dragontool_host_automatic_security_updates_enabled{agent="vector",application="doers",environment="production",host="dt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} 1
+dragontool_host_automatic_security_updates_healthy{agent="vector",application="doers",environment="production",host="dt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} 1
+dragontool_host_package_metadata_fresh{agent="vector",application="doers",environment="production",host="dt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} 1
+dragontool_host_reboot_required{agent="vector",application="doers",environment="production",host="dt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} 1
+dragontool_host_security_updates_pending{agent="vector",application="doers",environment="production",host="dt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} 3
+dragontool_host_updates_pending{agent="vector",application="doers",environment="production",host="dt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} 12

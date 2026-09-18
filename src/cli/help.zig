@@ -33,11 +33,11 @@ pub fn render(a: std.mem.Allocator, node: spec.Node) ![]const u8 {
     errdefer out.deinit();
     const w = &out.writer;
     const item = spec.getNode(node);
-    if (node == .root) try w.writeAll("DragonTools 0.1.0-dev\n\n");
+    if (node == .root) try w.print("DragonTools {s}\n\n", .{@import("../version.zig").version});
     try w.print("{s}\n\nUsage:\n  ", .{item.description});
     try writePath(w, node);
     if (item.command) |command| {
-        try w.writeAll(if (spec.applicationCommand(command)) (if (command == .app_apply) " [--config PATH] [--plan]\n" else " [--config PATH]\n") else if (spec.flagAllowed(spec.flag("--config").?, command)) " (--config PATH | --ssh-host ALIAS | --host HOST) [options]\n" else if (spec.flagAllowed(spec.flag("--station").?, command)) " (--ssh-host ALIAS | --host HOST) --station ALIAS [options]\n" else if (spec.flagAllowed(spec.flag("--ssh-host").?, command)) " (--ssh-host ALIAS | --host HOST) [options]\n" else " --host HOST [options]\n");
+        try w.writeAll(if (command == .version) " [--json]\n" else if (command == .maintenance_check) " [--ssh-host ALIAS | --host HOST] [options]\n" else if (spec.applicationCommand(command)) (if (command == .app_apply) " [--config PATH] [--plan]\n" else " [--config PATH]\n") else if (spec.flagAllowed(spec.flag("--config").?, command)) " (--config PATH | --ssh-host ALIAS | --host HOST) [options]\n" else if (spec.flagAllowed(spec.flag("--station").?, command)) " (--ssh-host ALIAS | --host HOST) --station ALIAS [options]\n" else if (spec.flagAllowed(spec.flag("--ssh-host").?, command)) " (--ssh-host ALIAS | --host HOST) [options]\n" else " --host HOST [options]\n");
     } else {
         var has_children = false;
         for (spec.commands) |child| {
@@ -46,6 +46,7 @@ pub fn render(a: std.mem.Allocator, node: spec.Node) ![]const u8 {
         try w.writeAll(if (has_children) " <command>\n" else "\n");
     }
 
+    if (node == .maintenance_check) try w.writeAll("\nWith no connection options, inspect this machine locally. Only Ubuntu 24.04/26.04 is supported. Unknown fields are null; no packages, timers or settings are changed. Remote checks require a previously installed matching agent.\n");
     var listed_children = false;
     for (spec.commands) |child| {
         if (child.parent != node) continue;
@@ -55,7 +56,7 @@ pub fn render(a: std.mem.Allocator, node: spec.Node) ![]const u8 {
     }
 
     if (item.command) |command| {
-        if (!spec.applicationCommand(command)) {
+        if (command != .version and !spec.applicationCommand(command)) {
             try w.writeAll(if (spec.flagAllowed(spec.flag("--ssh-host").?, command)) "\nConnection (choose one):\n" else "\nRequired:\n");
             if (spec.flagAllowed(spec.flag("--ssh-host").?, command)) try writeFlag(w, spec.flag("--ssh-host").?);
             try writeFlag(w, spec.flag("--host").?);

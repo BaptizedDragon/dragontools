@@ -24,16 +24,22 @@ def version(value):
     return value
 
 
-def filename(release, target):
-    return f"dragontool_{version(release)}_{TARGETS[target]}.tar.gz"
+def filename(release, target, agent=False):
+    if agent and "linux" not in target:
+        raise ValueError("agents are Linux-only release artifacts")
+    name = "dragontool-agent" if agent else "dragontool"
+    return f"{name}_{version(release)}_{TARGETS[target]}.tar.gz"
 
 
-def package(release, target, binary, output):
+def package(release, target, binary, output, agent=False):
     output.mkdir(parents=True, exist_ok=True)
-    destination = output / filename(release, target)
-    entries = [("dragontool", binary.read_bytes(), 0o755),
+    destination = output / filename(release, target, agent)
+    entries = [("dragontool-agent" if agent else "dragontool", binary.read_bytes(), 0o755),
                ("LICENSE", (ROOT / "LICENSE").read_bytes(), 0o644),
-               ("README.md", (ROOT / "README.md").read_bytes(), 0o644)]
+               ("README.md", (ROOT / "README.md").read_bytes(), 0o644),
+               ("THIRD_PARTY_NOTICES", (ROOT / "THIRD_PARTY_NOTICES").read_bytes(), 0o644),
+               ("MbedTLS-LICENSE", (ROOT / "vendor/mbedtls/LICENSE").read_bytes(), 0o644),
+               ("TF-PSA-Crypto-LICENSE", (ROOT / "vendor/mbedtls/tf-psa-crypto/LICENSE").read_bytes(), 0o644)]
     # Stable metadata and gzip timestamp make repeated packaging reproducible.
     with destination.open("wb") as raw:
         with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed:
@@ -48,9 +54,9 @@ def package(release, target, binary, output):
 
 
 def checksums(release, output):
-    names = sorted(filename(release, target) for target in TARGETS)
+    names = sorted([filename(release, target) for target in TARGETS] + [filename(release, target, True) for target in TARGETS if "linux" in target])
     if sorted(path.name for path in output.glob("*.tar.gz")) != names:
-        raise ValueError("exactly four matching release archives are required")
+        raise ValueError("exactly six matching release archives are required")
     lines = [f"{hashlib.sha256((output / name).read_bytes()).hexdigest()}  {name}\n" for name in names]
     (output / "SHA256SUMS").write_text("".join(lines), encoding="ascii")
 
@@ -61,6 +67,7 @@ def main():
     parser.add_argument("--version", required=True)
     parser.add_argument("--target", choices=TARGETS)
     parser.add_argument("--binary", type=Path)
+    parser.add_argument("--agent", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:
@@ -68,7 +75,7 @@ def main():
         if args.operation == "package":
             if not args.target or args.binary is None:
                 parser.error("package requires --target and --binary")
-            package(args.version, args.target, args.binary, args.output)
+            package(args.version, args.target, args.binary, args.output, args.agent)
         else:
             checksums(args.version, args.output)
     except (OSError, ValueError):

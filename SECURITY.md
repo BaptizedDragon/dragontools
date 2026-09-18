@@ -192,3 +192,40 @@ verification succeeds; unchanged healthy services are not restarted. Standalone
 verification is read-only and never clears markers. No controller-side state
 database is used. Do not post raw command output or secret-bearing logs publicly.
 Keep storage backups independently; a free-space threshold does not replace them.
+
+## Embedded cryptography maintenance
+
+Pinned **Mbed TLS 4.2.0**, official release archive (includes TF-PSA-Crypto 1.2.0):
+https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-4.2.0/mbedtls-4.2.0.tar.bz2
+SHA-256 `2bed9d713b4668f76553b097e72b8aa30bc8f112a940d7ae228d524bbde6ffea`.
+The upstream release digest and downloaded archive were reviewed on 2026-09-18;
+this is dated provenance, not a permanent claim of freshness or a security audit.
+Vendored upstream files remain unmodified and have an offline SHA-256 manifest.
+The reviewed feature subset and licenses are in `vendor/mbedtls/README.md` and
+`THIRD_PARTY_NOTICES`. Controller/helper metadata exposes the compiled version,
+source digest and code-reviewed **minimum approved version 4.2.0**.
+
+Weekly/manual `crypto-maintenance.yml` verifies the official archive against the
+vendored subset and checks upstream stable releases. Unreachable feeds fail that
+maintenance check, not normal installation/verification. A newer release flags
+review; it never changes pins. Maintainers review release/security advisories,
+update the approved floor, version, source/hash/config and notices intentionally,
+run native PKI, malformed corpus, filesystem lifecycle and real local mTLS tests
+on Linux/macOS, cross-build all four controllers and both helpers, and release
+matching binaries. Do not infer trusted security decisions from scraped CVE prose.
+
+Native PKI has no Python/OpenSSL CLI/openssl.cnf dependency. The existing Python
+TLS ingestion gateway remains in its dedicated unprivileged service boundary.
+The helper has no listener; its internal interface accepts only fixed operations,
+bounded public envelopes and fixed managed paths, never arbitrary command text.
+It keeps CA/server keys on the station and client keys on the host, with root
+canonical state and service-local copies. Protected directories, exclusive private
+staging, file metadata checks, local serialization and independent restart intent
+remain required; a generated-file marker alone is not an ownership proof.
+
+Read-only maintenance uses bounded distro providers and emits no package names,
+command output, raw stderr or credentials. Missing providers, stale APT metadata
+and unrecognized automatic-update policy remain unknown. The optional Ubuntu
+apt-check provider can depend on distro Python; it is not part of the PKI backend.
+No automated installation, security-policy mutation, reboot or vulnerability scan
+is implemented. The controller and host roots remain trusted.

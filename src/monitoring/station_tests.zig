@@ -38,6 +38,7 @@ const Fake = struct {
     secret_writes: usize = 0,
     notify_calls: usize = 0,
     check_syntax: bool = false,
+    helper_present: bool = false,
     fail_after_unit: ?workflow.Component = null,
 
     fn state(self: *Fake, component: workflow.Component) *State {
@@ -45,7 +46,7 @@ const Fake = struct {
         unreachable;
     }
     fn asRemote(self: *Fake) remote.Remote {
-        return .{ .context = self, .execute = execute, .execute_secret = secret, .clock = .{ .context = self, .now_ms = nowMs, .sleep_ms = sleepMs } };
+        return .{ .context = self, .execute = execute, .execute_secret = secret, .execute_input = publicInput, .clock = .{ .context = self, .now_ms = nowMs, .sleep_ms = sleepMs } };
     }
     fn nowMs(ctx: *anyopaque) i64 {
         const self: *Fake = @ptrCast(@alignCast(ctx));
@@ -92,6 +93,14 @@ const Fake = struct {
             else => return error.UnexpectedScrapeOperation,
         }
     }
+    fn publicInput(ctx: *anyopaque, op: remote.Operation, input: remote.Input, _: u32) !remote.Result {
+        const self: *Fake = @ptrCast(@alignCast(ctx));
+        try std.testing.expectEqual(remote.Operation.binary, op);
+        try std.testing.expectEqual(workflow.Component.agent_helper, self.report.component.?);
+        try std.testing.expect(input.bytes.len > 100000);
+        self.helper_present = true;
+        return .{ .code = 0, .output = "changed" };
+    }
     fn execute(ctx: *anyopaque, op: remote.Operation, command: []const u8) !remote.Result {
         const self: *Fake = @ptrCast(@alignCast(ctx));
         if (self.check_syntax) {
@@ -104,6 +113,7 @@ const Fake = struct {
         if (std.mem.indexOf(u8, command, "base64.b64decode(sys.argv.pop(1)") != null) return self.scrape(op);
         if (op == .detect) return self.core.asRemote().run(op, command);
         const component = self.report.component.?;
+        if (component == .agent_helper) return .{ .code = 0, .output = if (self.helper_present) "unchanged" else "upload" };
         if (@intFromEnum(component) < @intFromEnum(workflow.Component.blackbox_exporter)) return self.core.asRemote().run(op, command);
         const current = self.state(component);
         current.calls[@intFromEnum(op)] += 1;

@@ -13,7 +13,7 @@ spec.loader.exec_module(release)
 
 
 class ReleaseTests(unittest.TestCase):
-    def test_four_portable_archives_and_checksums(self):
+    def test_six_portable_archives_and_checksums(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             binary = root / "binary"
@@ -25,12 +25,17 @@ class ReleaseTests(unittest.TestCase):
                 release.package("v0.1.0-test.1", target, binary, output)
                 self.assertEqual(original, path.read_bytes())
                 with tarfile.open(path) as archive:
-                    self.assertEqual(archive.getnames(), ["dragontool", "LICENSE", "README.md"])
+                    self.assertEqual(archive.getnames(), ["dragontool", "LICENSE", "README.md", "THIRD_PARTY_NOTICES", "MbedTLS-LICENSE", "TF-PSA-Crypto-LICENSE"])
                     self.assertEqual(archive.getmember("dragontool").mode, 0o755)
                     self.assertEqual(archive.extractfile("dragontool").read(), binary.read_bytes())
+            for target in ("aarch64-linux", "x86_64-linux"):
+                path = release.package("v0.1.0-test.1", target, binary, output, agent=True)
+                with tarfile.open(path) as archive:
+                    self.assertEqual(archive.getmember("dragontool-agent").mode, 0o755)
+                    self.assertIn("MbedTLS-LICENSE", archive.getnames())
             release.checksums("v0.1.0-test.1", output)
             lines = (output / "SHA256SUMS").read_text().splitlines()
-            self.assertEqual(len(lines), 4)
+            self.assertEqual(len(lines), 6)
             for line in lines:
                 digest, name = line.split("  ")
                 self.assertEqual(digest, hashlib.sha256((output / name).read_bytes()).hexdigest())

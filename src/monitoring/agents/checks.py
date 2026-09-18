@@ -114,18 +114,11 @@ def health(spec):
         sys.exit(75)
 
 
-def endpoint(spec):
-    runtime(spec)
-    # endpoint.py is embedded before this verifier by the controller. The staged
-    # credential enrollment path calls the same check() before publication.
-    sys.exit(check(spec['station'], '/etc/dragontools/' + spec['kind']))
-
-
 if __name__ == '__main__':
     try:
         action, data = sys.argv[1:]
         spec = json.loads(data)
-        {'managed': managed, 'active': runtime, 'http': health, 'endpoint': endpoint}[action](spec)
+        {'managed': managed, 'active': runtime, 'http': health}[action](spec)
     except (ssl.SSLCertVerificationError, ssl.SSLError):
         sys.exit(1)
     except socket.gaierror as error:

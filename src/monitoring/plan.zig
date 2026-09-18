@@ -7,7 +7,7 @@ const vt = @import("../components/victoriatraces.zig");
 const grafana = @import("../components/grafana.zig");
 const logs_plugin = @import("../components/grafana_victorialogs_plugin.zig");
 
-pub const unavailable = "Not yet available: dashboards, OTel Collector/traces agents, HostDown and systemd-service state alerts, firewall, public Grafana TLS, update monitoring and maintenance.\n";
+pub const unavailable = "Not yet available: dashboards, OTel Collector/traces agents, HostDown and systemd-service state alerts, firewall, public Grafana TLS, automatic OS upgrades.\n";
 
 pub fn renderStation(a: std.mem.Allocator, grafana_configured: bool, telegram_configured: bool, probe_count: usize) ![]const u8 {
     const core = try renderWithCredentials(a, grafana_configured);

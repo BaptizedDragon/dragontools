@@ -645,6 +645,7 @@ esac
 for argument do command=$argument; done
 case "$command" in
   *'/etc/os-release'*) printf 'ubuntu\\n24.04\\nx86_64\\n';;
+  *'dt-helper-inspect'*) printf unchanged;;
   *"stat -f -c"*) printf '1000000 4096';;
   *'dragontools-victoriametrics-self_scrape_ready'*)
     printf 'probe\\n' >> "$DRAGONTOOLS_TEST_MARKER"
@@ -712,7 +713,9 @@ def python_arguments(text, needle, depth=0):
     return None
 metrics = {"status": "success", "data": {"resultType": "vector", "result": [
     {"metric": {"__name__": "vm_app_version"}, "value": [1, "1"]}]}}
-if "Pinned Grafana credential operations" in command:
+if "dt-helper-inspect" in command:
+    print("unchanged", end="")
+elif "Pinned Grafana credential operations" in command:
     assert json.load(sys.stdin) == expected
     # Alias mode wraps the fixed Python command in a privileged shell selection.
     args = python_arguments(command, "Pinned Grafana credential operations")

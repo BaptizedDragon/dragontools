@@ -1,8 +1,8 @@
 //! One small catalog shared by the strict parser and local UX frontends.
 const std = @import("std");
-pub const Command = enum { app_apply, app_verify, app_status, install, verify, status, notify_test, agents_install, agents_verify, agents_status, firewall, install_oh_my_zsh };
+pub const Command = enum { version, maintenance_check, app_apply, app_verify, app_status, install, verify, status, notify_test, agents_install, agents_verify, agents_status, firewall, install_oh_my_zsh };
 pub const Shell = enum { bash, zsh, fish };
-pub const Node = enum { root, monitoring, app_apply, app_verify, app_status, install, verify, status, notify_test, agents, agents_install, agents_verify, agents_status, firewall, host, install_oh_my_zsh, completion, completion_bash, completion_zsh, completion_fish, wizard };
+pub const Node = enum { root, version, maintenance, maintenance_check, monitoring, app_apply, app_verify, app_status, install, verify, status, notify_test, agents, agents_install, agents_verify, agents_status, firewall, host, install_oh_my_zsh, completion, completion_bash, completion_zsh, completion_fish, wizard };
 pub const CommandSpec = struct {
     node: Node,
     parent: ?Node,
@@ -12,6 +12,9 @@ pub const CommandSpec = struct {
 };
 pub const commands = [_]CommandSpec{
     .{ .node = .root, .parent = null, .name = "dragontool", .description = "Opinionated monitoring and small host utilities over SSH" },
+    .{ .node = .version, .parent = .root, .name = "version", .description = "Report the binary and embedded cryptography versions", .command = .version },
+    .{ .node = .maintenance, .parent = .root, .name = "maintenance", .description = "Read-only Ubuntu maintenance observations" },
+    .{ .node = .maintenance_check, .parent = .maintenance, .name = "check", .description = "Report local or installed remote agent maintenance state", .command = .maintenance_check },
     .{ .node = .monitoring, .parent = .root, .name = "monitoring", .description = "Install, verify and inspect monitoring" },
     .{ .node = .app_apply, .parent = .monitoring, .name = "apply", .description = "Apply application monitoring from ./monitoring.toml", .command = .app_apply },
     .{ .node = .app_verify, .parent = .monitoring, .name = "app-verify", .description = "Verify application agents, signals, probes and alerts read-only", .command = .app_verify },
@@ -45,18 +48,19 @@ pub const FlagSpec = struct {
     unavailable: bool = false,
     commands: []const Command,
 };
-const all = &[_]Command{ .install, .verify, .status, .notify_test, .agents_install, .agents_verify, .agents_status, .firewall, .install_oh_my_zsh };
+const all = &[_]Command{ .maintenance_check, .install, .verify, .status, .notify_test, .agents_install, .agents_verify, .agents_status, .firewall, .install_oh_my_zsh };
 const monitoring = &[_]Command{ .install, .verify, .status, .agents_install, .agents_verify, .agents_status, .firewall };
 const mutations = &[_]Command{ .app_apply, .install, .agents_install, .firewall, .install_oh_my_zsh };
 const host = &[_]Command{.install_oh_my_zsh};
-const native_ssh = &[_]Command{ .install, .verify, .status, .notify_test, .agents_install, .agents_verify, .agents_status, .install_oh_my_zsh };
+const native_ssh = &[_]Command{ .maintenance_check, .install, .verify, .status, .notify_test, .agents_install, .agents_verify, .agents_status, .install_oh_my_zsh };
 const station = &[_]Command{.install};
 const configured = &[_]Command{ .app_apply, .app_verify, .app_status, .install, .verify, .status, .notify_test };
-const help_commands = &[_]Command{ .app_apply, .app_verify, .app_status } ++ all.*;
+const help_commands = &[_]Command{ .version, .app_apply, .app_verify, .app_status } ++ all.*;
 const grafana_credentials = &[_]Command{ .install, .verify };
 const agents = &[_]Command{ .agents_install, .agents_verify, .agents_status };
 const network = &[_]Command{ .install, .firewall };
 pub const flags = [_]FlagSpec{
+    .{ .name = "--json", .description = "Machine-readable version metadata", .kind = .boolean, .group = "Output", .commands = &.{.version} },
     .{ .name = "--host", .description = "Direct target host", .metavar = "HOST", .group = "Required", .commands = all },
     .{ .name = "--ssh-host", .description = "OpenSSH host/alias; use normal SSH configuration", .metavar = "ALIAS", .group = "Connection", .commands = native_ssh },
     .{ .name = "--config", .description = "Monitoring TOML path; app commands default to ./monitoring.toml", .metavar = "PATH", .kind = .path, .group = "Configuration", .commands = configured },

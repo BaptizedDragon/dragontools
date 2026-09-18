@@ -47,8 +47,10 @@ const Fake = struct {
     registry_failure: bool = false,
     registry_repair: bool = false,
     registry_attempts: usize = 0,
+    app_helper: bool = false,
+    station_helper: bool = false,
     fn asRemote(self: *Fake) remote.Remote {
-        return .{ .context = self, .execute = execute, .clock = .{ .context = self, .now_ms = nowMs, .sleep_ms = sleepMs } };
+        return .{ .context = self, .execute = execute, .execute_input = executeInput, .clock = .{ .context = self, .now_ms = nowMs, .sleep_ms = sleepMs } };
     }
     fn state(self: *Fake, component: model.Component) *State {
         return &self.states[@intFromEnum(component)];
@@ -61,8 +63,25 @@ const Fake = struct {
         const self: *Fake = @ptrCast(@alignCast(ctx));
         self.now += delay;
     }
+    fn executeInput(ctx: *anyopaque, op: remote.Operation, input: remote.Input, _: u32) !remote.Result {
+        const self: *Fake = @ptrCast(@alignCast(ctx));
+        if (std.mem.indexOf(u8, input.command, "dt-helper-upload") != null) {
+            try std.testing.expectEqual(remote.Operation.binary, op);
+            try std.testing.expect(input.bytes.len > 1024);
+            if (self.report.component == .application_host) self.app_helper = true else self.station_helper = true;
+            self.mutations += 1;
+            return .{ .code = 0, .output = "changed" };
+        }
+        const Envelope = struct { action: []const u8, args: []const []const u8 };
+        const parsed = try std.json.parseFromSlice(Envelope, self.allocator, input.bytes, .{});
+        var argv: std.ArrayList([]const u8) = .empty;
+        try argv.appendSlice(self.allocator, &.{ "fixture-agent", parsed.value.action });
+        try argv.appendSlice(self.allocator, parsed.value.args);
+        return execute(ctx, op, try remote.shell(self.allocator, argv.items));
+    }
     fn execute(ctx: *anyopaque, op: remote.Operation, command: []const u8) !remote.Result {
         const self: *Fake = @ptrCast(@alignCast(ctx));
+        if (std.mem.indexOf(u8, command, "dt-helper-inspect") != null) return .{ .code = 0, .output = if (if (self.report.component == .application_host) self.app_helper else self.station_helper) "unchanged" else "upload" };
         try std.testing.expect(std.mem.indexOf(u8, command, "PRIVATE-CERTIFICATE-SENTINEL") == null);
         const registry_ensure = std.mem.indexOf(u8, command, " 'ensure' '") != null;
         if (registry_ensure or std.mem.indexOf(u8, command, " 'verify' '") != null) {
@@ -658,7 +677,7 @@ test "hostname change restarts only ingestion and endpoint consumers then reruns
     var changed = registration;
     changed.station = "monitoring.baptizeddragon.com";
     fake.station_hostname = changed.station;
-    // The real OpenSSL fixture proves SAN reconciliation. Model its sole marker.
+    // The native PKI fixture proves SAN reconciliation. Model its sole marker.
     fake.state(.ingestion).pending = true;
     report = .{};
     try install.install(a, fake.asRemote(), fake.asRemote(), &report, changed);

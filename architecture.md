@@ -544,8 +544,8 @@ monitoring-client/client.key (P-256)          pki/ca/ca.key (root:root 0400)
 CONTROLLER: public CSR/certificate orchestration; no long-term private keys
 ```
 
-The embedded `pki.py` owns station CA/server state and a bounded CSR signer;
-`client_pki.py` owns root-private host identity, resumable enrollment and local
+The native `src/agent/station.zig` owns CA/server state and bounded CSR signing;
+`src/agent/client*.zig` owns root-private host identity, resumable enrollment and local
 service-owned 0400 copies. No shared credential group or private SSH export exists.
 The signer accepts only P-256 proof of possession, the expected machine CN and
 sole URI SAN. It rejects other requested extensions and issues a fixed clientAuth,
@@ -572,7 +572,7 @@ Apply renews client/server certificates with their existing keys at 30 days or
 less remaining (one-year leaf lifetime, ten-year CA). Valid identities are unchanged;
 server renewal dirties only ingestion. CA lifetime of 366 days or less requires
 explicit maintenance and never triggers automatic rollover. Read-only verify
-creates no CSR, staged file or certificate. `endpoint.py` provides ordered,
+creates no CSR, staged file or certificate. The native Mbed TLS client provides ordered,
 bounded DNS/TCP/server-TLS/client-auth/request diagnostics without raw errors.
 DNS/provider firewalls remain operator prerequisites; there is no Let's Encrypt
 or public-Grafana TLS integration in this private channel.
@@ -627,12 +627,35 @@ credential-file mechanism is added.
 
 ## Maintenance and testing
 
-`dragontools-maintenance` is a reserved, uninstalled module. It will be a oneshot
-plus timer, exit after checks, listen on no port and accept no remote commands.
-Station checks: TLS, OS/security and component metadata, helper health metrics.
-Agent checks: OS/security and agent metadata, helper health metrics. Updates are
-notify-only for components and normal OS upgrades. Security installation is allowed
-by policy; automatic reboot is disabled. None of this policy changes hosts yet.
+The small installed `dragontool-agent` is a one-shot executable, with no inbound
+listener or remote-command platform. Both controller and helper statically link
+Mbed TLS 4.2.0/TF-PSA-Crypto 1.2.0. `src/pki` owns strict P-256/SHA-256 X.509/CSR
+profiles; `src/agent` owns local filesystem generations and the closed public
+protocol. `system/remote.zig` separates bounded public stdin (helper binary and
+CSR/certificate envelopes) from protected secret transfer. The controller uploads
+its matching helper to both host and station; each validates the digest and
+version before atomic activation. Station install also ensures that helper.
+
+```text
+Controller + bundled Mbed TLS
+  | SSH: verified helper artifact, bounded public CSR/certificates
+  +--> Application: dragontool-agent (local client key, no listener)
+  |      | maintenance JSON -> Vector exec -> existing metrics sink
+  |      + Vector :8686 loopback; optional vmagent :8429 loopback
+  +--> Station: dragontool-agent (local CA/server key, no listener)
+         ^ registered mTLS :9443 (existing Python gateway)
+         +--> VictoriaMetrics :8428 / VictoriaLogs :9428 loopback
+```
+
+Maintenance is read-only: Ubuntu numeric update counts, reboot marker, APT
+configuration and apt upgrade timer/service state. Missing/stale providers are
+unknown. Vector schedules a fixed local invocation every minute, with bounded
+output, no shell and trusted labels. The existing vmalert host pack includes two
+24-hour warnings for security updates and reboot need. No upgrade/refresh/reboot
+mutation, separate timer or public port is added. Scheduled/manual CI reports
+newer stable Mbed TLS releases for intentional source review; install and verify
+never query upstream. Broader component release monitoring and automatic OS
+maintenance remain unavailable.
 
 Unit tests cover parsing, redaction, quoting, units, storage, artifact plans and
 update-state parsing, as well as CLI metadata, completion, contextual help and

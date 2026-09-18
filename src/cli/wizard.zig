@@ -190,7 +190,7 @@ const overview = std.fmt.comptimePrint(
     \\  Monitoring station: dashboards and systemd-service state alerts.
     \\  Monitored server:
     \\    OpenTelemetry Collector  traces
-    \\    maintenance checker   update and security checks
+    \\    automatic OS upgrades   deferred; read-only maintenance checks are available
     \\  Security: firewall automation and public Grafana TLS.
     \\  Host alerts use verified Vector metrics; service-state alerts remain deferred.
     \\  Intended defaults: disk warning {d}%, critical {d}%;

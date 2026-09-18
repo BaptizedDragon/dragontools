@@ -2,6 +2,25 @@
 
 ## 0.1.0-dev — unreleased
 
+- Replace Python/OpenSSL CLI PKI with Zig and statically bundled Mbed TLS 4.2.0
+  (TF-PSA-Crypto 1.2.0); pin official archive SHA-256
+  `2bed9d713b4668f76553b097e72b8aa30bc8f112a940d7ae228d524bbde6ffea`.
+  Strict DER profiles, self/CSR/chain signatures, key locality, renewal, legacy
+  migration and interrupted rollout remain enforced. Valid OpenSSL-generated
+  bundles remain byte-for-byte unchanged. Native TLS performs the fixed mTLS probe.
+- Install controller-matched, checksum-verified `dragontool-agent` artifacts
+  atomically on monitored hosts and signing stations; no listener or daemon.
+- Add `version [--json]`, read-only local/SSH `maintenance check`, and native agent
+  maintenance metrics through Vector's existing mTLS path. Unknown data remains
+  unknown; no packages/settings are changed. SecurityUpdatesPending and
+  RebootRequired wait 24 hours at warning severity.
+- Ship four controller and two Linux helper archives with SHA256SUMS and bundled
+  crypto license notices. Add offline vendor guards, compiled metadata checks and
+  weekly/manual upstream crypto maintenance checks; never automatic updates.
+- Replace the retired Python PKI suites with native crypto/lifecycle/interruption
+  fixtures, retain real Python-gateway TLS tests with native certificates, and
+  add isolated helper installation and pinned Vector maintenance-contract tests.
+
 - Validate station CA properties explicitly across OpenSSL platforms: parse PEM,
   check current validity, preserve exact CA:TRUE,pathlen:0 and keyCertSign,cRLSign
   extensions as DER, compare DER public keys, and verify the self-signature with

@@ -1,5 +1,10 @@
 # Host-local PKI validation — 2026-09-17
 
+> Historical evidence for the retired Python/OpenSSL PKI backend. These recorded
+> commands are not current instructions. Run `zig build test-agent` and the native
+> TLS fixtures described in [README](README.md#native-pki-and-maintenance-fixture-gate)
+> for the current implementation.
+
 This iteration changes enrollment and certificate lifecycle, without changing
 application ownership, rule files, datasource URLs, Grafana or the traces schema.
 Validation ran on the local macOS controller with Zig 0.16.0, plus isolated local

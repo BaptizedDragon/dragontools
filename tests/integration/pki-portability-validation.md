@@ -1,5 +1,10 @@
 # Station CA bootstrap and portability validation — 2026-09-18
 
+> Historical evidence for the retired Python/OpenSSL PKI backend. These recorded
+> commands are not current instructions. Run `zig build test-agent` and the native
+> TLS fixtures described in [README](README.md#native-pki-and-maintenance-fixture-gate)
+> for the current implementation.
+
 CA validation checks X.509 PEM/private-key parsing, current validity, exact
 CA:TRUE,pathlen:0 and keyCertSign,cRLSign, matching DER public keys and the
 self-issued certificate's self-signature. Basic Constraints

@@ -34,18 +34,16 @@ def prepare_credentials(fixture):
     os.umask(0o077)
     certs = fixture / "certs"
     certs.mkdir(mode=0o700)
-    def run(*args):
-        subprocess.run(["openssl", *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=20)
-    run("req", "-new", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-days", "2",
-        "-keyout", str(certs / "ca.key"), "-out", str(certs / "ca.crt"), "-subj", "/CN=Disposable fixture CA",
-        "-addext", "basicConstraints=critical,CA:TRUE,pathlen:0", "-addext", "keyUsage=critical,keyCertSign,cRLSign")
-    for name, subject, extensions in (("server", "localhost", "extendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost\n"),
-                                      ("client", "dt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "extendedKeyUsage=clientAuth\nsubjectAltName=URI:dragontools://hosts/dt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n")):
-        run("req", "-new", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", str(certs / (name + ".key")),
-            "-out", str(certs / (name + ".csr")), "-subj", "/CN=" + subject)
-        (certs / "extensions").write_text("basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\n" + extensions)
-        run("x509", "-req", "-in", str(certs / (name + ".csr")), "-CA", str(certs / "ca.crt"), "-CAkey", str(certs / "ca.key"),
-            "-set_serial", "0x" + os.urandom(16).hex(), "-days", "2", "-extfile", str(certs / "extensions"), "-out", str(certs / (name + ".crt")))
+    spec = importlib.util.spec_from_file_location("native_pki", ROOT / "tests/native_pki.py")
+    native = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(native)
+    native.ca(certs)
+    for name, host in (("server", "localhost"), ("client", "dt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")):
+        directory = certs / name
+        directory.mkdir(mode=0o700)
+        native.issue(certs, directory, name, host)
+        for suffix in ("key", "crt"):
+            shutil.copyfile(directory / ("client." + suffix), certs / (name + "." + suffix))
     print("Disposable localhost fixture credentials prepared.")
 
 

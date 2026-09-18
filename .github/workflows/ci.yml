@@ -13,11 +13,16 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+      - run: python3 tools/verify_crypto_vendor.py
       - run: zig fmt --check build.zig src
       - run: zig build
+      - run: python3 tests/version_test.py
       - run: zig build test --summary all
       - run: python3 tests/cli_smoke.py
       - run: python3 -I -B tests/release_test.py
+      - name: Linux helper filesystem lifecycle (temporary paths only)
+        if: runner.os == 'Linux'
+        run: sudo python3 -I -B tests/helper_install_test.py --fixture "$PWD/zig-out/bin/dragontool-pki-fixture" --agent "$PWD/zig-out/bin/dragontool-agent"
   cross-build:
     runs-on: ubuntu-24.04
     strategy:
@@ -28,8 +33,10 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-      - run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
+      - run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe -Dversion=0.0.0-ci
       - run: python3 tools/package_release.py package --version 0.0.0-ci --target ${{ matrix.target }} --binary zig-out/bin/dragontool --output dist
+      - if: contains(matrix.target, 'linux')
+        run: python3 tools/package_release.py package --version 0.0.0-ci --target ${{ matrix.target }} --binary zig-out/bin/dragontool-agent --agent --output dist
       - uses: actions/upload-artifact@v4
         with:
           name: build-${{ matrix.target }}

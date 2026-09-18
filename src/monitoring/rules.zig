@@ -28,6 +28,12 @@ pub fn renderHosts(a: std.mem.Allocator) ![]const u8 {
     try beginRule(w, "InodesCritical");
     try w.print("(100 * {s}{{agent=\"vector\"}} >= {d}) and ({s}{{agent=\"vector\"}} > 0)\n", .{ metrics.inode_ratio, policy.host.inode_percent, metrics.inode_total });
     try finishRule(w, policy.host.inode_for, "critical", "vector", null, "Inodes critical on {{ $labels.host }}", "Filesystem {{ $labels.mountpoint }} is above the inode threshold.");
+    try beginRule(w, "SecurityUpdatesPending");
+    try w.writeAll("dragontool_host_security_updates_pending{agent=\"vector\"} > 0\n");
+    try finishRule(w, "24h", "warning", "vector", null, "Security updates pending on {{ $labels.host }}", "Ubuntu reports pending security updates for at least 24 hours; review the host maintenance state.");
+    try beginRule(w, "RebootRequired");
+    try w.writeAll("dragontool_host_reboot_required{agent=\"vector\"} == 1\n");
+    try finishRule(w, "24h", "warning", "vector", null, "Reboot required on {{ $labels.host }}", "Ubuntu has requested a reboot for at least 24 hours; schedule maintenance.");
     return out.toOwnedSlice();
 }
 
@@ -163,4 +169,18 @@ test "host alerts use the verified Vector contract and policy thresholds" {
     for ([_][]const u8{ "CPUHigh", "MemoryPressure", "DiskWarning", "DiskCritical", "InodesCritical", "host_cpu_seconds_total", "host_memory_available_bytes", "host_memory_total_bytes", "host_filesystem_used_ratio", "host_filesystem_inodes_used_ratio", "host_filesystem_inodes_total", "agent=\"vector\"", "for: 10m", "for: 5m", "> 90", ">= 70", ">= 80", ">= 90" }) |needle| try expectContains(rendered, needle);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "ServiceDown") == null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "node_") == null);
+}
+
+test "maintenance warnings use observed names and wait 24 hours without general update alert" {
+    const output = try renderHosts(std.testing.allocator);
+    defer std.testing.allocator.free(output);
+    const observed = @embedFile("agents/maintenance_fixture.prom");
+    for ([_][]const u8{ "SecurityUpdatesPending", "RebootRequired" }, [_][]const u8{ "dragontool_host_security_updates_pending", "dragontool_host_reboot_required" }) |name, metric| {
+        try expectContains(observed, metric);
+        const block = try ruleBlock(output, name);
+        try expectContains(block, metric);
+        try expectContains(block, "for: 24h");
+        try expectContains(block, "severity: 'warning'");
+    }
+    try std.testing.expect(std.mem.indexOf(u8, output, "dragontool_host_updates_pending") == null);
 }

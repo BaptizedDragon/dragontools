@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import ssl
+import socket
 import subprocess
 import tempfile
 import threading
@@ -33,7 +34,16 @@ def load(name, file):
 
 
 ingestion = load('agent_ingestion', 'src/monitoring/agents/ingestion.py')
-endpoint = load('agent_endpoint', 'src/monitoring/agents/endpoint.py')
+native = load('native_pki', 'tests/native_pki.py')
+
+
+class Endpoint:
+    @staticmethod
+    def check(hostname, directory, port):
+        return native.endpoint(hostname, directory, port, HOST)
+
+
+endpoint = Endpoint()
 
 
 def refused(call):
@@ -44,28 +54,22 @@ def refused(call):
     raise AssertionError('Expected rejection')
 
 
-def openssl(*args):
-    subprocess.run(['openssl', *map(str, args)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                   stderr=subprocess.DEVNULL, check=True, timeout=15)
-
-
-def key(path):
-    openssl('genpkey', '-algorithm', 'EC', '-pkeyopt', 'ec_paramgen_curve:P-256', '-out', path)
-    path.chmod(0o400)
-
-
 def issue(root, ca, name, cn, san=None, purpose='clientAuth', days='365'):
     directory = root / name
     directory.mkdir(mode=0o700)
-    key(directory / 'client.key')
-    openssl('req', '-new', '-key', directory / 'client.key', '-out', directory / 'client.csr', '-subj', '/CN=' + cn)
-    extensions = directory / 'extensions'
-    extensions.write_text('basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=' + purpose + '\n' + ('subjectAltName=' + san + '\n' if san else ''))
-    openssl('x509', '-req', '-in', directory / 'client.csr', '-CA', ca / 'ca.crt', '-CAkey', ca / 'ca.key',
-            '-set_serial', str(int.from_bytes(os.urandom(12), 'big')), '-days', days, '-sha256', '-extfile', extensions, '-out', directory / 'client.crt')
-    (directory / 'ca.crt').write_bytes((ca / 'ca.crt').read_bytes())
-    for file in ('client.crt', 'ca.crt'):
-        (directory / file).chmod(0o400)
+    if days == '0':
+        kind = 'expired'
+    elif purpose == 'serverAuth':
+        kind = 'server' if cn == 'localhost' else 'wrong_purpose'
+    elif san is None:
+        kind = 'legacy'
+    elif ',DNS:' in san:
+        kind = 'extra_san'
+    elif san != 'URI:dragontools://hosts/' + cn:
+        kind = 'wrong_san'
+    else:
+        kind = 'client'
+    native.issue(ca, directory, kind, cn)
     return directory
 
 
@@ -97,10 +101,7 @@ def main():
         root = Path(temporary)
         ca = root / 'station-ca'
         ca.mkdir(mode=0o700)
-        key(ca / 'ca.key')
-        extensions = ca / 'ca.conf'
-        extensions.write_text('[req]\ndistinguished_name=dn\nx509_extensions=ca\n[dn]\n[ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n')
-        openssl('req', '-new', '-x509', '-key', ca / 'ca.key', '-out', ca / 'ca.crt', '-days', '3650', '-subj', '/CN=Fixture CA', '-config', extensions)
+        native.ca(ca)
         server_files = issue(root, ca, 'station-server', 'localhost', 'DNS:localhost', 'serverAuth')
         (server_files / 'server.crt').write_bytes((server_files / 'client.crt').read_bytes())
         (server_files / 'server.key').write_bytes((server_files / 'client.key').read_bytes())
@@ -147,6 +148,11 @@ def main():
             finally:
                 connection.close()
         try:
+            assert endpoint.check('/', str(clients['active']), server.server_port) == 91
+            with socket.socket() as unavailable:
+                unavailable.bind(('127.0.0.1', 0))
+                # Bound but not listening: refused without a race for a free port.
+                assert endpoint.check('localhost', str(clients['active']), unavailable.getsockname()[1]) == 92
             assert request('GET', '/health') == 204
             assert endpoint.check('localhost', str(clients['active']), server.server_port) == 0
             # CA signature alone, mismatched identities and extra identities fail.

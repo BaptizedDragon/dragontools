@@ -64,6 +64,27 @@ fn run(init: std.process.Init) !void {
 /// Both CLI arguments and wizard answers reach this one existing operation path.
 fn execute(init: std.process.Init, options: cli.Options) !void {
     const a = init.arena.allocator();
+    if (options.command == .version) {
+        print(init.io, try @import("version.zig").render(a, options.json, false));
+        return;
+    }
+    if (options.command == .maintenance_check) {
+        const maintenance = @import("maintenance/main.zig");
+        if (options.ssh_host == null and options.host.len == 0) {
+            print(init.io, try maintenance.json(a, try maintenance.collect(a, init.io)));
+        } else {
+            var ssh: @import("system/ssh.zig").Ssh = .{ .allocator = a, .io = init.io, .options = options };
+            const installed = try ssh.asRemote().runTimed(.health, @import("monitoring/agents/helper.zig").executable ++ " version --json", 10000);
+            if (installed.code != 0 or !std.mem.eql(u8, std.mem.trim(u8, installed.output, "\r\n"), try @import("version.zig").render(a, true, true))) return error.MatchingAgentRequired;
+            const result = try ssh.asRemote().runTimed(.health, @import("monitoring/agents/helper.zig").executable ++ " maintenance check", 35000);
+            if (result.code != 0 or result.output.len > 4096) return error.MaintenanceCheckFailed;
+            const parsed = std.json.parseFromSlice(maintenance.State, a, result.output, .{}) catch return error.InvalidMaintenanceResponse;
+            defer parsed.deinit();
+            print(init.io, try maintenance.json(a, parsed.value));
+        }
+        print(init.io, "\n");
+        return;
+    }
     if (options.unsupported()) {
         print(init.io, "Requested workflow or integration is not yet available. Nothing changed; SSH was not attempted.\n");
         return error.NotImplemented;

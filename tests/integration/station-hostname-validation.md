@@ -1,5 +1,10 @@
 # Explicit station hostname validation — 2026-09-17
 
+> Historical evidence for the retired Python/OpenSSL PKI backend. These recorded
+> commands are not current instructions. Run `zig build test-agent` and the native
+> TLS fixtures described in [README](README.md#native-pki-and-maintenance-fixture-gate)
+> for the current implementation.
+
 Application `station.ssh_host` remains the administrative SSH alias;
 `station.hostname` is now the required DNS-only ingestion/TLS name. Tests run
 locally with Zig 0.16.0. No application/station SSH host was contacted.

@@ -61,7 +61,7 @@ pub fn service(a: std.mem.Allocator, r: remote.Remote, report: *model.Report, re
     try ready.poll(a, r, &report.state, .service_active, ready.active_ms, try common.python(a, ingress.checks_program, &.{ "active", data }), ready.ready);
     if (kind != .ingestion) {
         try ready.poll(a, r, &report.state, .http_ready, ready.http_ms, try common.python(a, ingress.checks_program, &.{ "http", data }), ready.ready);
-        try secureEndpoint(a, r, report, try common.python(a, ingress.checks_program, &.{ "endpoint", data }));
+        try secureEndpointGuarded(a, r, report, try ingress.endpointCommand(a, registration.station, @tagName(kind), registration.host), try common.python(a, ingress.checks_program, &.{ "active", data }));
     }
 }
 pub const network_guidance = "DragonTools does not manage DNS or provider firewalls. Ensure the station hostname resolves and TCP 9443 is allowed.\n";
@@ -70,9 +70,13 @@ pub fn networkFailure(check: ?ready.Check) bool {
 }
 /// Keep fixed diagnostic exit codes separate from raw remote output. Only
 /// reachability/HTTP absence retries; a bad server/client identity fails closed.
-pub fn secureEndpoint(a: std.mem.Allocator, r: remote.Remote, report: *model.Report, command: []const u8) !void {
+pub fn secureEndpoint(a: std.mem.Allocator, r: remote.Remote, report: *model.Report, command: anytype) !void {
+    return secureEndpointGuarded(a, r, report, command, null);
+}
+fn secureEndpointGuarded(a: std.mem.Allocator, r: remote.Remote, report: *model.Report, command: anytype, runtime_guard: ?[]const u8) !void {
     const Probe = struct {
         source: remote.Remote,
+        runtime_guard: ?[]const u8,
         report: *model.Report,
         fn execute(ctx: *anyopaque, op: remote.Operation, cmd: []const u8) anyerror!remote.Result {
             return executeTimed(ctx, op, cmd, ready.http_ms);
@@ -80,6 +84,23 @@ pub fn secureEndpoint(a: std.mem.Allocator, r: remote.Remote, report: *model.Rep
         fn executeTimed(ctx: *anyopaque, op: remote.Operation, cmd: []const u8, budget: u32) anyerror!remote.Result {
             const self: *@This() = @ptrCast(@alignCast(ctx));
             const result = try self.source.runTimed(op, cmd, budget);
+            return self.accept(result);
+        }
+        fn executeInput(ctx: *anyopaque, op: remote.Operation, input: remote.Input, budget: u32) anyerror!remote.Result {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            const deadline = ready.now(self.source) + budget;
+            if (self.runtime_guard) |guard| {
+                const result = try self.source.runTimed(.health, guard, budget);
+                if (result.code != 0) {
+                    self.report.state.check = .service_active;
+                    return result;
+                }
+            }
+            const remaining = deadline - ready.now(self.source);
+            if (remaining <= 0) return error.Timeout;
+            return self.accept(try self.source.runTimed(op, input, @intCast(remaining)));
+        }
+        fn accept(self: *@This(), result: remote.Result) remote.Result {
             self.report.state.check = switch (result.code) {
                 91 => .dns_unresolved,
                 92 => .tcp_unreachable,
@@ -95,9 +116,65 @@ pub fn secureEndpoint(a: std.mem.Allocator, r: remote.Remote, report: *model.Rep
             };
         }
     };
-    var probe = Probe{ .source = r, .report = report };
-    const adapted = remote.Remote{ .context = &probe, .execute = Probe.execute, .execute_timed = Probe.executeTimed, .clock = r.clock };
+    var probe = Probe{ .source = r, .report = report, .runtime_guard = runtime_guard };
+    const adapted = remote.Remote{ .context = &probe, .execute = Probe.execute, .execute_timed = Probe.executeTimed, .execute_input = Probe.executeInput, .clock = r.clock };
     try ready.poll(a, adapted, &report.state, .secure_endpoint, ready.http_ms, command, ready.ready);
+}
+
+test "native endpoint guard and TLS probe share one deadline and deterministic guard failures do not retry" {
+    const Fake = struct {
+        elapsed: i64 = 0,
+        guard_ms: i64 = 17000,
+        guard_code: u8 = 0,
+        guards: usize = 0,
+        probes: usize = 0,
+        fn now(raw: *anyopaque) i64 {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return self.elapsed;
+        }
+        fn sleep(_: *anyopaque, _: u32) anyerror!void {
+            return error.UnexpectedRetry;
+        }
+        fn run(raw: *anyopaque, op: remote.Operation, command: []const u8) anyerror!remote.Result {
+            return timed(raw, op, command, ready.http_ms);
+        }
+        fn timed(raw: *anyopaque, _: remote.Operation, _: []const u8, budget: u32) anyerror!remote.Result {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try std.testing.expectEqual(ready.http_ms, budget);
+            self.guards += 1;
+            self.elapsed += self.guard_ms;
+            return .{ .code = self.guard_code };
+        }
+        fn input(raw: *anyopaque, _: remote.Operation, _: remote.Input, budget: u32) anyerror!remote.Result {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try std.testing.expectEqual(@as(u32, 13000), budget);
+            self.probes += 1;
+            self.elapsed += 12000;
+            return .{ .code = 0 };
+        }
+        fn remoteValue(self: *@This()) remote.Remote {
+            return .{ .context = self, .execute = run, .execute_timed = timed, .execute_input = input, .clock = .{ .context = self, .now_ms = now, .sleep_ms = sleep } };
+        }
+    };
+    const request: remote.Input = .{ .command = "fixed helper", .bytes = "public request" };
+    for (0..3) |scenario| {
+        var fake: Fake = .{};
+        var report: model.Report = .{};
+        if (scenario == 1) fake.guard_ms = ready.http_ms;
+        if (scenario == 2) fake.guard_code = 1;
+        const result = secureEndpointGuarded(std.testing.allocator, fake.remoteValue(), &report, request, "fixed guard");
+        switch (scenario) {
+            0 => try result,
+            1 => try std.testing.expectError(error.ReadinessTimedOut, result),
+            2 => {
+                try std.testing.expectError(error.RemoteOperationFailed, result);
+                try std.testing.expectEqual(ready.Check.service_active, report.state.check.?);
+            },
+            else => unreachable,
+        }
+        try std.testing.expectEqual(@as(usize, 1), fake.guards);
+        try std.testing.expectEqual(@as(usize, if (scenario == 0) 1 else 0), fake.probes);
+    }
 }
 
 pub fn signals(a: std.mem.Allocator, app: remote.Remote, station: remote.Remote, report: *model.Report, registration: model.Registration, comptime mode: []const u8) !void {
@@ -113,8 +190,11 @@ pub fn signals(a: std.mem.Allocator, app: remote.Remote, station: remote.Remote,
 pub fn verify(a: std.mem.Allocator, app: remote.Remote, station: remote.Remote, report: *model.Report, registration: model.Registration) !void {
     report.component = .application_host;
     const machine = try host.parse(try report.call(app, .detect, host.detect_command));
+    try @import("helper.zig").verify(a, app, report, machine.arch);
     for (registration.services) |selected| _ = try report.call(app, .service_exists, try common.selectedService(a, selected));
     report.component = .station;
+    const station_machine = try host.parse(try report.call(station, .detect, host.detect_command));
+    try @import("helper.zig").verify(a, station, report, station_machine.arch);
     _ = try report.call(station, .health, @import("install.zig").station_preflight);
     report.component = .ingestion;
     try service(a, station, report, registration, machine.arch, .ingestion);

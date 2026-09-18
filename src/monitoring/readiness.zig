@@ -39,7 +39,7 @@ pub const http_ms = 30_000;
 pub const telemetry_ms = 45_000;
 pub const Validator = *const fn (std.mem.Allocator, []const u8) anyerror!void;
 
-fn now(r: remote.Remote) i64 {
+pub fn now(r: remote.Remote) i64 {
     if (r.clock) |clock| return clock.now_ms(clock.context);
     return std.Io.Clock.awake.now(std.Io.Threaded.global_single_threaded.io()).toMilliseconds();
 }
@@ -48,7 +48,7 @@ fn sleep(r: remote.Remote, milliseconds: u32) !void {
     try std.Io.sleep(std.Io.Threaded.global_single_threaded.io(), .fromMilliseconds(milliseconds), .awake);
 }
 
-pub fn deterministic(_: std.mem.Allocator, r: remote.Remote, report: *install.Report, check: Check, command: []const u8) ![]const u8 {
+pub fn deterministic(_: std.mem.Allocator, r: remote.Remote, report: *install.Report, check: Check, command: anytype) ![]const u8 {
     report.check = check;
     return report.call(r, .health, command);
 }
@@ -59,7 +59,7 @@ pub fn ready(_: std.mem.Allocator, _: []const u8) !void {}
 /// keep invariant checks outside that classification, including on later probes.
 /// Production SSH receives the remaining budget as an absolute process deadline;
 /// a slow command, connection or response cannot start a fresh retry window.
-pub fn poll(a: std.mem.Allocator, r: remote.Remote, report: *install.Report, check: Check, deadline_ms: u32, command: []const u8, validator: Validator) !void {
+pub fn poll(a: std.mem.Allocator, r: remote.Remote, report: *install.Report, check: Check, deadline_ms: u32, command: anytype, validator: Validator) !void {
     report.phase = .health;
     report.check = check;
     report.startVerification();

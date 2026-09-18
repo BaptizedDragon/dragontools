@@ -8,7 +8,7 @@ pub const Ssh = struct {
     options: Options,
     elevation: Elevation = .root,
     pub fn asRemote(self: *Ssh) remote.Remote {
-        return .{ .context = self, .execute = execute, .execute_timed = executeTimed, .execute_secret = executeSecret, .clock = .{ .context = self, .now_ms = nowMs, .sleep_ms = sleepMs } };
+        return .{ .context = self, .execute = execute, .execute_timed = executeTimed, .execute_secret = executeSecret, .execute_input = executeInput, .clock = .{ .context = self, .now_ms = nowMs, .sleep_ms = sleepMs } };
     }
     fn nowMs(ctx: *anyopaque) i64 {
         const self: *Ssh = @ptrCast(@alignCast(ctx));
@@ -63,6 +63,18 @@ pub const Ssh = struct {
             if (std.mem.eql(u8, result.output.protectedBytes(), token)) return .{ .code = 0, .output = token };
         }
         return error.InvalidCredentialResponse;
+    }
+    fn executeInput(ctx: *anyopaque, _: remote.Operation, request: remote.Input, budget_ms: u32) !remote.Result {
+        const self: *Ssh = @ptrCast(@alignCast(ctx));
+        if (request.bytes.len > 32 * 1024 * 1024 or request.command.len > 8192) return error.PublicInputTooLarge;
+        // Reuse bounded, stderr-suppressing stdin transport. This public API is
+        // deliberately separate from credential transport and its token output.
+        const input = try @import("../secrets/secret.zig").Secret.init(std.heap.page_allocator, request.bytes);
+        defer input.deinit();
+        const result = try @import("../secrets/process.zig").run(std.heap.page_allocator, self.io, try self.argv(request.command), input, 1024 * 1024, budget_ms);
+        defer result.deinit();
+        if (result.code != 0) return .{ .code = result.code };
+        return .{ .code = 0, .output = try self.allocator.dupe(u8, result.output.protectedBytes()) };
     }
     fn executeTimed(ctx: *anyopaque, _: remote.Operation, command: []const u8, budget_ms: u32) !remote.Result {
         const self: *Ssh = @ptrCast(@alignCast(ctx));

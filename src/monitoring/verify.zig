@@ -106,6 +106,11 @@ pub fn validateMetrics(a: std.mem.Allocator, output: []const u8) !void {
 pub fn verify(a: std.mem.Allocator, r: remote.Remote, report: *install.Report) !void {
     report.component = null;
     const machine = try host.parse(try report.call(r, .detect, host.detect_command));
+    if (report.station_enabled) {
+        report.beginComponent(.agent_helper);
+        try @import("agents/helper.zig").verify(a, r, report, machine.arch);
+        report.endComponent();
+    }
     report.beginComponent(.victoriametrics);
     report.reserve_bytes = try fs.reserve(try fs.capacity(try report.call(r, .capacity, install.capacity_command)));
     try health(a, r, report, machine.arch);

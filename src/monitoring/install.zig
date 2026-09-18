@@ -53,7 +53,7 @@ pub const Report = struct {
         self.waiting_reported = true;
         self.emit(.waiting);
     }
-    pub fn call(self: *Report, r: remote.Remote, op: remote.Operation, command: []const u8) ![]const u8 {
+    pub fn call(self: *Report, r: remote.Remote, op: remote.Operation, command: anytype) ![]const u8 {
         self.phase = op;
         if (op == .health) self.startVerification();
         if (op != .health) self.check = null;
@@ -176,6 +176,11 @@ pub const activate_grafana = activation("grafana");
 pub fn install(a: std.mem.Allocator, r: remote.Remote, report: *Report) !void {
     report.component = null;
     const machine = try host.parse(try report.call(r, .detect, host.detect_command));
+    if (report.station_enabled) {
+        report.beginComponent(.agent_helper);
+        try @import("agents/helper.zig").ensure(a, r, report, machine.arch);
+        report.endComponent();
+    }
     report.beginComponent(.victoriametrics);
     _ = try report.call(r, .user, host.victoriametrics_preflight ++ "\n" ++ @import("../system/users.zig").ensure_victoriametrics);
     _ = try report.call(r, .directories, directories);

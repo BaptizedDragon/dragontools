@@ -10,9 +10,11 @@ pub const Component = enum {
     alertmanager,
     vmalert_logs,
     vmalert_metrics,
+    agent_helper,
 
     pub fn name(self: Component) []const u8 {
         return switch (self) {
+            .agent_helper => "DragonTool agent helper",
             .victoriametrics => "VictoriaMetrics",
             .victorialogs => "VictoriaLogs",
             .victoriatraces => "VictoriaTraces",
@@ -53,6 +55,7 @@ pub const Event = struct {
     pub fn text(self: Event) []const u8 {
         return switch (self.phase) {
             .component_started => switch (self.component) {
+                .agent_helper => "DragonTool agent helper\n",
                 .victoriametrics => if (self.station_enabled) "[1/8] VictoriaMetrics\n" else "[1/4] VictoriaMetrics\n",
                 .victorialogs => if (self.station_enabled) "[2/8] VictoriaLogs\n" else "[2/4] VictoriaLogs\n",
                 .victoriatraces => if (self.station_enabled) "[3/8] VictoriaTraces\n" else "[3/4] VictoriaTraces\n",

@@ -1,6 +1,6 @@
 # Contributing
 
-Use Zig 0.16.0. No third-party Zig package manager dependencies are needed.
+Use Zig 0.16.0. Mbed TLS sources are vendored and integrity-checked; no system crypto library is used.
 
 ```bash
 zig fmt build.zig src
@@ -8,6 +8,8 @@ zig build
 zig build test --summary all
 python3 tests/cli_smoke.py
 python3 -I -B tests/release_test.py
+python3 tools/verify_crypto_vendor.py
+python3 tests/version_test.py
 ./zig-out/bin/dragontool --help
 ./zig-out/bin/dragontool monitoring install --host example.com --plan
 ./zig-out/bin/dragontool host install-oh-my-zsh --ssh-host monitoring --plan
@@ -55,7 +57,7 @@ Cross-build the four controller combinations with `zig build -Dtarget=...`:
 runs native tests on macOS/Linux. Integration requires separately supplied disposable
 VM infrastructure and is not silently skipped inside a claimed successful VM test.
 
-CI packages the same four targets. `.github/workflows/release.yml` runs native
+CI packages four controller targets and two Linux helper targets. `.github/workflows/release.yml` runs native
 Linux/macOS tests before building tagged release archives and `SHA256SUMS`.
 `tools/package_release.py` creates deterministic tar metadata and rejects incomplete
 archive sets; only the publish job receives repository write permission. A tag

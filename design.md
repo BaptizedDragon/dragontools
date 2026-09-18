@@ -907,14 +907,14 @@ private CA channel deliberately does not use Let's Encrypt.
 
 Station CA validation parses X.509 PEM and a private key, and preserves the exact
 CA:TRUE,pathlen:0 and keyCertSign,cRLSign extension policy, read from DER rather
-than OpenSSL's formatted text. Public keys must match as normalized DER. The CA
-must be self-issued; after those checks, `openssl verify -CAfile <ca.crt>
--purpose any -check_ss_sig <ca.crt>` proves current validity and self-signature.
+than library-formatted text. Public keys must match as normalized DER. The CA
+must be self-issued, and bundled Mbed TLS verifies its ECDSA/SHA-256 self-signature
+with the exact P-256 profile. No OpenSSL executable or configuration is consulted.
 An explicit expiry check also rejects a certificate at its notAfter boundary.
 Invalid or malformed CA state remains a read-only failure; validation never
 replaces keys, suppresses a failure or relies on platform-specific output text.
 
-New CA bundles are fully validated in root-private staging before atomic rename;
+New CA material is fully validated in memory before root-private staging and atomic rename;
 validation failure removes staging and leaves no published CA directory. Parent
 directories may remain. New directories explicitly receive their requested mode
 after creation under the helper's private umask. Apply reconciles the fixed
@@ -930,20 +930,27 @@ valid bootstrap starting point. An existing CA is never replaced on
 validation failure; missing CA material on an initialized station still requires
 explicit maintenance. Rerunning apply needs no manual cleanup of empty parents.
 
-`ingestion.zig` embeds the Python standard-library helpers. SSH transports only
-public inspection, CSR and certificate payloads, through the existing quoted,
-bounded command interface. A CSR is at most 8192 bytes and must be strict PEM
+`ingestion.zig` invokes the installed native helper using a fixed command and
+bounded public JSON on stdin. SSH transports only public inspection, CSR and
+certificate payloads. The root operation lock serializes local generations. A CSR is at most 8192 bytes and must be strict PEM
 PKCS#10. The station checks its signature, P-256 public-key validity, exact CN and
 sole host URI SAN with a narrow DER profile. Other requested extensions (including
 CA/serverAuth), extra names and attributes fail before signing. Issuance never
 copies CSR extensions: the station fixes critical CA:FALSE/digitalSignature,
 clientAuth and the expected SAN. Private key bytes are handled only inside their
 owning host's helper; no station client generator or private export command exists.
-CSR proof of possession uses `openssl dgst -sha256 -verify` over the exact DER
-CertificationRequestInfo with the allowlisted ECDSA/SHA-256 algorithm. OpenSSL
-3.0's `req -verify` exit status alone does not reject a corrupted CSR signature.
-Only public key/signature bytes enter temporary verification files; no diagnostic
-wording is interpreted, and the private staging directory is removed on failure.
+CSR proof of possession hashes the original DER CertificationRequestInfo and
+verifies the ECDSA/SHA-256 signature with Mbed TLS/PSA. Malformed DER/PEM, duplicate
+extensions, extra attributes, RSA and other curves fail closed. Generated leaf
+extensions come only from policy. New certificates include noncritical SKI/AKI:
+SHA-256 truncated to 160 bits per RFC 7093 method 1 avoids enabling SHA-1 merely
+for key identifiers. When signing with an existing CA, its exact SKI is retained
+as the leaf AKI for strict TLS interoperability. Existing valid certificate/key
+bytes are preserved. Secret allocations use a wiping arena, core dumps are
+disabled, private paths are bounded/no-follow, and errors return fixed codes.
+The native TLS client checks server profile/hostname and local client identity;
+DNS, TCP, TLS and HTTP phases have explicit four-second process deadlines. It
+sends only the fixed authenticated health request and exposes no listener.
 
 The canonical client identity lives under root:root 0700
 `/etc/dragontools/monitoring-client/`, with four root-owned 0400 files:
@@ -1036,7 +1043,7 @@ leaving CA material unchanged and requiring future explicit rollover. This avoid
 issuing a full-year leaf beyond CA expiry. Read-only verify rejects expired
 credentials and never renews or stages files.
 
-`endpoint.py` checks DNS from the monitored host, bounded TCP connection, trusted
+`src/agent/endpoint.zig` and `src/pki/tls.zig` check host DNS, bounded TCP connection, trusted
 server chain/hostname, client authentication and authenticated health in order,
 after station service/listener verification. Fixed exit codes map to
 `dns_unresolved`, `tcp_unreachable`, `server_tls_invalid`,
@@ -1393,7 +1400,10 @@ Beyond the installed probe/log/host packs and deferred service-state policy, lat
 | Group | Planned rules (not rendered yet) |
 | --- | --- |
 | Pipeline | LogsNotArriving, MetricsNotArriving, VectorForwardFailure, VmagentForwardFailure, MonitoringDiskPressure |
-| Updates | SecurityUpdatesPending, CriticalSecurityUpdatePending, SecurityUpdateInstallFailed, RebootRequired, MonitoringComponentUpdateAvailable, MonitoringAgentUpdateAvailable, OSReleaseNearEndOfSupport, OSReleaseUnsupported, UpdateCheckFailed, UpdateCheckStale |
+| Updates | CriticalSecurityUpdatePending, SecurityUpdateInstallFailed, MonitoringComponentUpdateAvailable, MonitoringAgentUpdateAvailable, OSReleaseNearEndOfSupport, OSReleaseUnsupported, UpdateCheckFailed, UpdateCheckStale |
+
+SecurityUpdatesPending and RebootRequired are already rendered in the host pack,
+using the verified native-agent/Vector metric contract and a 24-hour warning delay.
 
 Optional Telegram now uses vmalert → Alertmanager → bot → channel/chat with
 protected credential files and grouped warning/critical/resolved notifications.
@@ -1401,9 +1411,9 @@ Only explicit `monitoring notify-test` submits a test alert. Installation and
 verification never send test notifications. API acceptance alone is not proof of
 Telegram delivery to a human. No other notification provider is exposed.
 
-## Update monitoring and maintenance: roadmap
+## Read-only maintenance and future update policy
 
-Track VictoriaMetrics, VictoriaLogs, VictoriaTraces, Grafana, vmalert, Alertmanager,
+Future component release monitoring will track VictoriaMetrics, VictoriaLogs, VictoriaTraces, Grafana, vmalert, Alertmanager,
 ingress/TLS and DragonTools helper releases; agent side vmagent, Vector, OTel and
 host metrics/helper components. Use trusted upstream/distro metadata, bounded timeouts,
 atomic results, last-success timestamps and explicit unknown/failure states.
@@ -1416,9 +1426,11 @@ unknown/unavailable. No generic vulnerability scanner.
 Default policy allows automatic OS security patches, not ordinary OS upgrades;
 components notify only; automatic reboot disabled. Report successful installed
 security patches, failed installations, reboot need, component availability, failed
-or stale checks. Policy is documented/modelled only; no unattended-upgrades files
-are modified yet. Future maintenance runs as a local oneshot/timer, with no listener
-and no remote command channel. Future explicit upgrades must verify new artifacts,
+or stale checks. This future mutation policy is not implemented. Current `maintenance check` and
+Vector-scheduled agent metrics only inspect Ubuntu state; no unattended-upgrades
+files are modified, no package index refresh occurs, and no upgrades or reboots
+are run. The implemented SecurityUpdatesPending/RebootRequired warnings wait
+24 hours. There is no separate timer, listener or arbitrary remote command channel. Future explicit upgrades must verify new artifacts,
 preserve previous versions, restart affected services and verify before success.
 
 ## Complete-stack verification gate

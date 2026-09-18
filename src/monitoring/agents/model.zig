@@ -18,7 +18,7 @@ pub const Report = struct {
             .migrate => "legacy certificate detected\nlocal client identity enrolled\nmTLS verified\n",
         };
     }
-    pub fn call(self: *Report, r: remote.Remote, op: remote.Operation, command: []const u8) ![]const u8 {
+    pub fn call(self: *Report, r: remote.Remote, op: remote.Operation, command: anytype) ![]const u8 {
         return self.state.call(r, op, command);
     }
 };

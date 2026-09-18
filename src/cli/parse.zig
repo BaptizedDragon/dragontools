@@ -6,13 +6,14 @@ const references = @import("../secrets/reference.zig");
 const probes = @import("../monitoring/probes.zig");
 const targets = @import("../monitoring/agents/targets.zig");
 pub const Command = spec.Command;
-pub const Action = enum { monitoring, host, completion, wizard };
+pub const Action = enum { monitoring, host, completion, wizard, local };
 pub const Options = struct {
     command: Command = .install,
     action: Action = .monitoring,
     node: spec.Node = .root,
     shell: ?spec.Shell = null,
     help: bool = false,
+    json: bool = false,
     plan: bool = false,
     host: []const u8 = "",
     ssh_host: ?[]const u8 = null,
@@ -161,6 +162,7 @@ pub fn parse(a: std.mem.Allocator, args: []const []const u8) !Options {
     o.action = switch (o.node) {
         .completion, .completion_bash, .completion_zsh, .completion_fish => .completion,
         .wizard => .wizard,
+        .version, .maintenance, .maintenance_check => .local,
         .host, .install_oh_my_zsh => .host,
         else => .monitoring,
     };
@@ -188,7 +190,7 @@ pub fn parse(a: std.mem.Allocator, args: []const []const u8) !Options {
             try seen.put(key, {});
         }
         if (item.kind == .boolean) {
-            if (eq(key, "--help")) o.help = true else if (eq(key, "--plan")) o.plan = true else if (eq(key, "--set-default-shell")) o.set_default_shell = true else if (eq(key, "--update-managed-zshrc")) o.update_managed_zshrc = true;
+            if (eq(key, "--json")) o.json = true else if (eq(key, "--help")) o.help = true else if (eq(key, "--plan")) o.plan = true else if (eq(key, "--set-default-shell")) o.set_default_shell = true else if (eq(key, "--update-managed-zshrc")) o.update_managed_zshrc = true;
             continue;
         }
         if (i + 1 >= args.len or std.mem.startsWith(u8, args[i + 1], "--")) return error.MissingValue;
@@ -200,7 +202,7 @@ pub fn parse(a: std.mem.Allocator, args: []const []const u8) !Options {
 }
 
 fn validateMerged(o: Options, complete: bool) !void {
-    if (spec.applicationCommand(o.command)) return;
+    if (o.command == .version or spec.applicationCommand(o.command)) return;
     if (o.ssh_host) |value| try validateValue("--ssh-host", value);
     if (o.grafana_user_op) |value| try validateValue("--grafana-user-op", value);
     if (o.grafana_password_op) |value| try validateValue("--grafana-password-op", value);
@@ -215,7 +217,7 @@ fn validateMerged(o: Options, complete: bool) !void {
         // Alias mode lets OpenSSH resolve every connection/authentication field.
         if (o.explicit_user or o.explicit_port or o.ssh_sock != null or o.identity != null or o.ssh_op_path != null) return error.ConflictingSshMode;
     }
-    if (complete and !o.help and o.host.len == 0 and o.ssh_host == null) return error.HostRequired;
+    if (o.command != .maintenance_check and complete and !o.help and o.host.len == 0 and o.ssh_host == null) return error.HostRequired;
     if (complete and !o.help and (o.command == .agents_install or o.command == .agents_verify or o.command == .agents_status)) {
         if (o.station == null) return error.StationRequired;
         if (o.command == .agents_install and o.services.items.len == 0) return error.ServiceRequired;
@@ -573,4 +575,19 @@ test "application CLI loads only its schema and missing config fails locally" {
     try std.testing.expectEqualStrings("doers", options.application_config.?.application.name);
     try std.testing.expect(options.config_values == null);
     try std.testing.expectError(error.ApplicationConfigAlreadyLoaded, loadAndMerge(a, std.testing.io, &options));
+}
+
+test "version and maintenance share strict CLI metadata without implicit SSH" {
+    const a = std.testing.allocator;
+    var version = try parse(a, &.{ "version", "--json" });
+    defer version.deinit(a);
+    try std.testing.expect(version.json and version.command == .version);
+    var local = try parse(a, &.{ "maintenance", "check" });
+    defer local.deinit(a);
+    try std.testing.expect(local.host.len == 0 and local.ssh_host == null);
+    var remote_check = try parse(a, &.{ "maintenance", "check", "--ssh-host", "application" });
+    defer remote_check.deinit(a);
+    try std.testing.expectEqualStrings("application", remote_check.ssh_host.?);
+    try std.testing.expectError(error.FlagNotAllowed, parse(a, &.{ "maintenance", "check", "--plan" }));
+    try std.testing.expectError(error.FlagNotAllowed, parse(a, &.{ "version", "--ssh-host", "application" }));
 }

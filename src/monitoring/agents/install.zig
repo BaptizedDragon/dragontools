@@ -11,12 +11,12 @@ pub const Report = model.Report;
 pub const Registration = model.Registration;
 pub const prerequisites =
     \\set -eu
-    \\for tool in python3 openssl journalctl systemd-analyze runuser sort; do command -v "$tool" >/dev/null || exit 12; done
+    \\for tool in python3 journalctl systemd-analyze runuser sort; do command -v "$tool" >/dev/null || exit 12; done
     \\getent group systemd-journal >/dev/null || exit 12
 ;
 pub const station_preflight =
     \\set -eu
-    \\for tool in python3 openssl; do command -v "$tool" >/dev/null || exit 12; done
+    \\command -v python3 >/dev/null || exit 12
     \\for pair in victoriametrics:8428 victorialogs:9428; do
     \\  name=${pair%:*}; port=${pair#*:}
     \\  systemctl is-active --quiet dragontools-$name.service
@@ -41,6 +41,10 @@ pub fn install(a: std.mem.Allocator, app: remote.Remote, station: remote.Remote,
     report.component = .station;
     const station_machine = try host.parse(try report.call(station, .detect, host.detect_command));
     _ = try report.call(station, .health, station_preflight);
+    report.component = .application_host;
+    try @import("helper.zig").ensure(a, app, report, app_machine.arch);
+    report.component = .station;
+    try @import("helper.zig").ensure(a, station, report, station_machine.arch);
 
     // Safe preregistration before agent startup. No station backend, Grafana,
     // Alertmanager, firewall, or preexisting agent is restarted here.
@@ -70,7 +74,7 @@ pub fn install(a: std.mem.Allocator, app: remote.Remote, station: remote.Remote,
         // a replacement; cryptographic parsing alone does not prove enrollment.
         // A staged migration already passed this check. Its consumers may now
         // use the candidate, whose rollout lease must be refreshed before probing.
-        try verify.secureEndpoint(a, app, report, try ingress.endpointCommand(a, registration.station, "/etc/dragontools/vector"));
+        try verify.secureEndpoint(a, app, report, try ingress.endpointCommand(a, registration.station, "vector", registration.host));
     }
     const prepared = try ingress.parsePrepared(a, try report.call(app, .credentials, try ingress.prepareClientCommand(a, registration.host, registration.station, inspection)));
     if (prepared.recovered_key) _ = try report.state.accept(.{ .code = 0, .output = "changed" });
@@ -83,7 +87,7 @@ pub fn install(a: std.mem.Allocator, app: remote.Remote, station: remote.Remote,
         _ = try report.call(app, .credentials, try ingress.stageClientCommand(a, bundle));
         // Prove the candidate before stopping a working consumer. The old active
         // registration remains valid throughout the explicit rollover lease.
-        try verify.secureEndpoint(a, app, report, try ingress.endpointCommand(a, registration.station, ingress.client_directory ++ "/.pending"));
+        try verify.secureEndpoint(a, app, report, try ingress.endpointCommand(a, registration.station, "pending", registration.host));
     } else {
         report.component = .ingestion;
         _ = try report.call(station, .credentials, try ingress.reconcileCommand(a, registration.host, registration.station, try registration.json(a)));

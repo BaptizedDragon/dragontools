@@ -2,6 +2,8 @@ const std = @import("std");
 const Secret = @import("../secrets/secret.zig").Secret;
 pub const Operation = enum { detect, user, directories, capacity, binary, plugin, config, provisioning, unit, activate, health, credentials, finalize, status, notify_test, service_exists, host_inspect, host_packages, host_source, host_zshrc, host_verify, host_shell };
 pub const Result = struct { code: u8, output: []const u8 = "" };
+/// Public binary/JSON upload. Private credential bytes have a separate API.
+pub const Input = struct { command: []const u8, bytes: []const u8 };
 /// Monotonic readiness timing, injectable without real waiting in tests.
 pub const Clock = struct {
     context: *anyopaque,
@@ -14,11 +16,14 @@ pub const Remote = struct {
     execute: *const fn (*anyopaque, Operation, []const u8) anyerror!Result,
     execute_timed: ?*const fn (*anyopaque, Operation, []const u8, u32) anyerror!Result = null,
     execute_secret: ?*const fn (*anyopaque, Operation, []const u8, *const Secret, u32) anyerror!Result = null,
+    execute_input: ?*const fn (*anyopaque, Operation, Input, u32) anyerror!Result = null,
     clock: ?Clock = null,
-    pub fn run(self: Remote, op: Operation, command: []const u8) !Result {
+    pub fn run(self: Remote, op: Operation, command: anytype) !Result {
+        if (@TypeOf(command) == Input) return (self.execute_input orelse return error.PublicInputTransportUnavailable)(self.context, op, command, 120000);
         return self.execute(self.context, op, command);
     }
-    pub fn runTimed(self: Remote, op: Operation, command: []const u8, budget_ms: u32) !Result {
+    pub fn runTimed(self: Remote, op: Operation, command: anytype, budget_ms: u32) !Result {
+        if (@TypeOf(command) == Input) return (self.execute_input orelse return error.PublicInputTransportUnavailable)(self.context, op, command, budget_ms);
         if (self.execute_timed) |execute| return execute(self.context, op, command, budget_ms);
         return self.run(op, command);
     }

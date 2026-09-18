@@ -585,7 +585,7 @@ amd64/arm64 where available. Keep operator access and a recovery console.
 
 Prepare an existing DragonTools station and an application host, with verified
 OpenSSH aliases `replace-me-monitoring` and `replace-me-application`, root or
-noninteractive sudo, normal prerequisites plus Python 3/OpenSSL, and a routable
+noninteractive sudo, normal prerequisites plus Python 3 for the gateway/non-PKI checks, and a routable
 DNS/IPv4 station HostName. Allow station TCP 9443 only from monitored hosts in the
 operator-managed firewall. Raw VM/VL/VT/Grafana/Alertmanager remain private. Prepare
 an `app.service` that emits ordinary structured journal entries and a small
@@ -775,3 +775,35 @@ metadata, mTLS and disk buffers remained active. This is evidence for the native
 ingestion/data contracts, **not** SSH, systemd hardening, full installer reruns,
 real journal collection or extended outage/buffer recovery. The disposable-host
 gate remains unrun.
+
+
+## Native PKI and maintenance fixture gate
+
+See [the dated native validation record](native-pki-validation.md) for exact local
+commands, results, emulation details and the remaining deployment/CI limits.
+
+Run `zig build test --summary all`: native `src/pki/tests.zig` and
+`src/agent_tests.zig` replace the retired Python/OpenSSL PKI implementation tests.
+They cover strict profile/signature parsing, historical OpenSSL bundle no-op,
+station/client locality, empty bootstrap/registry migration, renewal, legacy
+migration, retained rollback/disabled consumers, expired leases and interrupted
+publication/finalization/cleanup. `zig build test-fixture` builds a test-only
+certificate factory and TLS probe, excluded from release artifacts.
+`python3 -I -B tests/agent_ingestion_test.py` runs the existing Python gateway
+against native-created certificates and the native TLS client. Set
+`DRAGONTOOLS_PKI_FIXTURE` to a target-native test helper in isolated Linux runs.
+No OpenSSL CLI generates or validates these test credentials.
+
+`tests/helper_install_test.py --fixture PATH --agent PATH` executes the actual
+helper installation scripts under a private temporary replacement for `/opt` on
+Linux. The temporary filesystem must allow executable files. It checks fresh
+upload, exact no-op, interrupted/bad upload, version switch, retained prior
+release and conflicting metadata/symlinks. No real `/opt` path is changed.
+`tests/integration/maintenance_metrics.py` takes `--vector`, `--fixture`, `--agent`
+and `--config` (from `render_agent_apps.py`). It validates actual production
+configuration, executes the native fixture through the exact Vector source and
+metric transforms, and captures trusted labels without a network sink. Pinned
+Vector 0.58.0 names/values are recorded in `maintenance_fixture.prom`.
+These Linux process/filesystem and local TLS checks are not disposable-host
+SSH/systemd integration. That gate still requires supported Ubuntu hosts, actual
+service users, hardening, fresh station telemetry and unchanged rerun evidence.

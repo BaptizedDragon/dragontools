@@ -51,13 +51,15 @@ dragontool_0.1.0_darwin_arm64.tar.gz
 dragontool_0.1.0_darwin_amd64.tar.gz
 dragontool_0.1.0_linux_arm64.tar.gz
 dragontool_0.1.0_linux_amd64.tar.gz
+dragontool-agent_0.1.0_linux_arm64.tar.gz
+dragontool-agent_0.1.0_linux_amd64.tar.gz
 SHA256SUMS
 ```
 
 Download the matching archive and `SHA256SUMS` from a published repository release.
 Verify its SHA-256 against that manifest, extract it, then install `dragontool`
-into a directory on your PATH. Archives contain the executable, README and MIT
-license. Checksums establish artifact integrity, not an independent publisher
+into a directory on your PATH. Archives contain the executable, README, MIT license, third-party notices and
+Mbed TLS/TF-PSA-Crypto license files. Checksums establish artifact integrity, not an independent publisher
 signature. macOS binaries are not Developer ID signed or notarized. Adding the
 workflow does not imply that a release has already been published.
 
@@ -899,7 +901,7 @@ noninteractive sudo access. `--station` is the station alias, not a Victoria URL
 Its OpenSSH `HostName` must be a DNS name or IPv4 address reachable from the
 application host; a controller-only jump-host address does not provide an agent
 network route. DragonTools owns the fixed ingestion port. Both hosts require the
-normal station prerequisites, Python 3 and OpenSSL; DragonTools does not install OS
+normal station prerequisites (including Python 3 for non-PKI runtime checks); DragonTools does not install OS
 packages or change the firewall. Permit **TCP 9443** from the application host to
 the station in the operator-managed network firewall.
 
@@ -962,9 +964,72 @@ route. Raw VictoriaMetrics/VictoriaLogs stay on loopback; Grafana, Alertmanager 
 VictoriaTraces gain no public route. The station owns its CA and server private
 keys. Each application host generates its own **ECDSA P-256** client key; only a
 bounded public CSR and signed certificate cross SSH through the controller. The
-controller stores neither long-term private key nor a state database. Python 3
-standard-library helpers are embedded in the controller; no Python package or
-remote helper download is needed.
+controller stores neither long-term private key nor a state database. PKI uses
+Zig with statically bundled Mbed TLS; no OpenSSL CLI, Python PKI implementation,
+system Mbed TLS or ambient openssl.cnf is used. Python remains necessary for the
+existing ingestion gateway and unrelated remote service checks.
+
+### Native helper and read-only maintenance
+
+`monitoring apply` and `monitoring agents install` ensure the controller's matching
+`dragontool-agent` on the application host and station; `monitoring install` also
+ensures the station helper. The controller bundles both Linux architectures and
+uploads the selected artifact through SSH stdin. The installer checks SHA-256,
+root ownership and exact version metadata, publishes a private staged release
+under `/opt/dragontools/agent/<version>-<sha256>/dragontool-agent`, and switches
+`current` atomically. Correct files are unchanged on rerun; old releases remain.
+No target-side latest-release lookup, helper daemon, listener, arbitrary command
+API or inbound control plane is added. Internal operations have fixed managed
+paths and a bounded public JSON protocol; keys stay local.
+
+The pinned crypto release is **Mbed TLS 4.2.0**, including **TF-PSA-Crypto 1.2.0**.
+Official archive SHA-256:
+`2bed9d713b4668f76553b097e72b8aa30bc8f112a940d7ae228d524bbde6ffea`.
+See [source provenance and configuration](vendor/mbedtls/README.md) and
+[the security update process](SECURITY.md#embedded-cryptography-maintenance).
+
+```bash
+dragontool version
+dragontool version --json
+# Replace with the existing monitored-host alias; no installation or upgrades:
+dragontool maintenance check --ssh-host replace-me-application
+# On Ubuntu itself (no SSH options means this machine):
+dragontool maintenance check
+/opt/dragontools/agent/current/dragontool-agent maintenance check
+```
+
+The result is JSON with pending package/security counts, reboot need, automatic
+security-update enablement/health and package-metadata freshness. Unknown values
+are `null`, not zero. Ubuntu 24.04/26.04 package counts use the distro's numeric
+`/usr/lib/update-notifier/apt-check` interface (provided by
+`update-notifier-common`), with a 20-second bound and a successful APT refresh
+stamp no older than 48 hours. Missing provider/stamp, stale metadata, timeout or
+malformed output leaves counts unknown. This optional distro provider may use
+Python internally; native PKI and the agent executable do not require it.
+DragonTools does not install that provider, refresh indexes or upgrade packages.
+Read-only `apt-config` output and `systemctl show` inspect the explicit Ubuntu
+security-origin policy and apt upgrade timer/service. Custom policies that cannot
+be proven remain unknown. `/run/reboot-required` supplies the reboot signal.
+
+Vector runs `dragontool-agent maintenance metrics` once per minute as `dt-vector`,
+with no shell and no stderr forwarding. It decodes bounded numeric JSON gauges,
+applies the same trusted host/application/environment labels, and sends them
+through its existing mTLS remote-write sink. There is no new listener or timer.
+Unknown gauges are omitted; a freshness gauge remains visible. Metrics are
+`dragontool_host_updates_pending`, `dragontool_host_security_updates_pending`,
+`dragontool_host_reboot_required`,
+`dragontool_host_automatic_security_updates_enabled`,
+`dragontool_host_automatic_security_updates_healthy`,
+`dragontool_host_package_metadata_fresh`, and `dragontool_agent_version_info`.
+Only the version-info metric adds the bounded build-version label.
+
+`SecurityUpdatesPending` and `RebootRequired` are warning alerts after 24 hours.
+General package updates do not alert. Metrics were exercised with pinned Vector
+0.58.0 in an isolated Linux process fixture; this is not two-host/systemd
+validation. No automatic security-update setting or reboot policy is changed.
+Weekly/manual CI checks the upstream stable crypto release feed and fails for
+maintainer review when a newer release exists. It never changes dependencies;
+normal apply/install/verify remains offline with respect to crypto updates.
 
 ### Private ingestion certificates
 
@@ -1268,7 +1333,7 @@ not establish runtime or production compatibility.
 
 Dashboards, authenticated Metrics/Traces datasource query checks; OTel Collector
 for application OTLP; safe monitoring firewall; public Grafana DNS-01 TLS;
-oneshot maintenance; update/security checks and alerts.
+automatic OS upgrades/reboots; broader component-update and lifecycle checks.
 
 [Architecture](architecture.md), [design and roadmap](design.md),
 [contributing/testing](CONTRIBUTING.md), [security](SECURITY.md),

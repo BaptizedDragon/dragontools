@@ -67,6 +67,7 @@ fn vectorConfig(a: std.mem.Allocator, host_id: []const u8, station_hostname: []c
     // Immutable image filesystems commonly report 100% usage by design. Keep
     // ordinary filesystems even when systemd protects their mounts read-only.
     try w.writeAll("# Managed by DragonTools\ndata_dir: /var/lib/dragontools/vector\napi:\n  enabled: false\nsources:\n  host:\n    type: host_metrics\n    namespace: host\n    collectors: [cpu, memory, filesystem, disk, network]\n    filesystem:\n      filesystems:\n        excludes: [squashfs, iso9660]\n    scrape_interval_secs: 15\n  internal:\n    type: internal_metrics\n    scrape_interval_secs: 15\n");
+    try w.writeAll("  maintenance_exec:\n    type: exec\n    command: [/opt/dragontools/agent/current/dragontool-agent, maintenance, metrics]\n    mode: scheduled\n    scheduled:\n      exec_interval_secs: 60\n    clear_environment: true\n    include_stderr: false\n    maximum_buffer_size_bytes: 4096\n    decoding:\n      codec: json\n");
     if (ordered.len != 0) {
         try w.writeAll("  journal:\n    type: journald\n    current_boot_only: false\n    since_now: true\n    include_units:\n");
         for (ordered) |service| {
@@ -85,7 +86,9 @@ fn vectorConfig(a: std.mem.Allocator, host_id: []const u8, station_hostname: []c
         try string(w, metadata);
         try w.writeByte('\n');
     }
-    try w.writeAll("transforms:\n");
+    try w.writeAll("transforms:\n  maintenance:\n    type: log_to_metric\n    inputs: [maintenance_exec]\n    metrics:\n");
+    inline for (@import("../../maintenance/main.zig").gauges) |name| try w.writeAll("      - type: gauge\n        field: dragontool_host_" ++ name ++ "\n");
+    try w.writeAll("      - type: gauge\n        field: dragontool_host_package_metadata_fresh\n      - type: gauge\n        field: dragontool_agent_version_info\n        tags:\n          version: '{{ version }}'\n");
     if (applications.len == 0) {
         try metricTransform(w, "metrics_identity", host_id, null);
     } else {
@@ -138,7 +141,7 @@ fn vectorConfig(a: std.mem.Allocator, host_id: []const u8, station_hostname: []c
 }
 
 fn metricTransform(w: *std.Io.Writer, name: []const u8, host: []const u8, app: ?model.ApplicationScope) !void {
-    try w.print("  {s}:\n    type: remap\n    inputs: [host, internal]\n    source: |\n      .tags.host = ", .{name});
+    try w.print("  {s}:\n    type: remap\n    inputs: [host, internal, maintenance]\n    source: |\n      .tags.host = ", .{name});
     try string(w, host);
     try w.writeAll("\n      .tags.agent = \"vector\"\n");
     if (app) |scope| {
@@ -278,7 +281,10 @@ test "Vector selects only explicit journal services with trusted identity and bo
     const config = try renderVector(a, "app-host", "monitor.example", &.{ "orderflow.service", "doers.service" });
     defer a.free(config);
     for ([_][]const u8{ "include_units:", "\"orderflow.service\"", "\"doers.service\"", ".host = \"app-host\"", ".service = unit", "api:\n  enabled: false", "when_full: block", "max_size: 268435488", "retry_initial_backoff_secs: 1", "retry_max_duration_secs: 30", "verify_hostname: true", "verify_certificate: true", "compression: none", "type: internal_metrics", "collectors: [cpu, memory, filesystem, disk, network]", "address: 127.0.0.1:8686", "interval: 30", "dragontools_stream" }) |needle| try std.testing.expect(std.mem.indexOf(u8, config, needle) != null);
-    for ([_][]const u8{ "type: exec", "demo: error", "0.0.0.0", "bearer", "password", "source: |\n      . = parsed" }) |needle| try std.testing.expect(std.mem.indexOf(u8, config, needle) == null);
+    for ([_][]const u8{ "demo: error", "0.0.0.0", "bearer", "password", "source: |\n      . = parsed" }) |needle| try std.testing.expect(std.mem.indexOf(u8, config, needle) == null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, config, "type: exec"));
+    try std.testing.expect(std.mem.indexOf(u8, config, "command: [/opt/dragontools/agent/current/dragontool-agent, maintenance, metrics]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, config, "include_stderr: false") != null);
     const reversed = try renderVector(a, "app-host", "monitor.example", &.{ "doers.service", "orderflow.service" });
     defer a.free(reversed);
     try std.testing.expectEqualStrings(config, reversed);
