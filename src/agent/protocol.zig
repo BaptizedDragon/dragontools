@@ -16,8 +16,8 @@ pub fn stationAction(action: []const u8) bool {
 pub fn dispatch(ctx: s.Context, action: []const u8, args: []const []const u8) ![]const u8 {
     for (args) |arg| try j.require(arg.len <= s.f.limit and std.mem.indexOfScalar(u8, arg, 0) == null);
     if (std.mem.eql(u8, action, "endpoint")) {
-        try count(args, 3);
-        try @import("endpoint.zig").check(ctx, args[0], args[1], args[2]);
+        try count(args, 4);
+        try @import("endpoint.zig").check(ctx, args[0], args[1], args[2], args[3]);
         return "unchanged";
     }
     if (j.contains(&.{ "ensure", "verify", "stage", "stage-registration" }, action)) {

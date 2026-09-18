@@ -2,6 +2,20 @@
 
 ## 0.1.0-dev — unreleased
 
+- Add pinned Caddy v2.11.4 for registered mTLS on separate IPv4 ports: 9443 metrics,
+  9444 logs. Keep 9445 closed until tracing is supported. Preserve fingerprint,
+  rollout and trusted-label checks in a private Unix-socket authorization helper;
+  do not restore the historical public Python gateway. Raw backends stay loopback.
+- Provision/verify ingress before app client enrollment using explicit
+  station.hostname. Keep independent Caddy/auth/agent restart intent; registration
+  edits alone do not restart Caddy. Add per-signal reachability diagnostics and
+  preserve native PKI/key locality/renewal/legacy identity migration.
+- Fix Zig 0.16 normal stdin EOF in native enrollment request decoding. Retain
+  bounded strict input and safe semantic diagnostics without request contents.
+- Add real pinned-Caddy TLS/security fixtures to Linux/macOS CI, restart/no-op and
+  listener checks, documented pins and operator-managed firewall prerequisites.
+  Historical public gateway cutover is explicit; no automatic traffic interruption.
+
 - Report explicit application enrollment stages (including `station_ensure`),
   preserve native semantic exit codes, and surface only allowlisted helper error
   names. CA/server directory, key generation, certificate validation and bundle

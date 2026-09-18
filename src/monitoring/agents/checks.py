@@ -34,7 +34,7 @@ def managed(spec):
     assert account.pw_dir == '/var/lib/dragontools/' + kind
     assert output('id', '-gn', owner) == owner
     assert set(output('id', '-nG', owner).split()) <= ({owner, 'systemd-journal'} if kind == 'vector' else {owner})
-    unit = 'dragontools-' + kind + '.service'
+    unit = 'dragontools-' + spec.get('service', kind) + '.service'
     path = '/etc/systemd/system/' + unit
     assert regular(path) == spec['unit'].encode()
     values = properties(unit)
@@ -42,12 +42,22 @@ def managed(spec):
                 'LoadState': 'loaded', 'NeedDaemonReload': 'no', 'UnitFileState': 'enabled',
                 'ProtectSystem': 'strict', 'CapabilityBoundingSet': '', 'AmbientCapabilities': '',
                 'StandardOutput': 'null', 'StandardError': 'null', 'UMask': '0077',
-                'ReadWritePaths': '' if kind == 'ingestion' else '/var/lib/dragontools/' + kind}
+                'ReadWritePaths': '/run/dragontools-ingress' if kind == 'ingestion' else '/var/lib/dragontools/' + kind}
     expected.update({key: 'yes' for key in ('NoNewPrivileges', 'PrivateTmp', 'PrivateDevices', 'ProtectHome',
                      'ProtectKernelTunables', 'ProtectKernelModules', 'ProtectControlGroups', 'RestrictSUIDSGID', 'LockPersonality')})
     assert all(values.get(key) == value for key, value in expected.items())
     assert set(values['RestrictAddressFamilies'].split()) == {'AF_INET', 'AF_INET6', 'AF_UNIX'}
-    assert set(values.get('SupplementaryGroups', '').split()) == ({'systemd-journal'} if kind == 'vector' else set())
+    assert set(values.get('SupplementaryGroups', '').split()) == ({'systemd-journal'} if kind == 'vector' else {'dt-ingest'} if kind == 'caddy' else set())
+    if kind in ('caddy', 'ingestion'):
+        assert set(values.get('InaccessiblePaths', '').split()) == {
+            '/etc/dragontools/ingestion/pki', '/etc/dragontools/ingestion/clients', '/etc/dragontools/ingestion/server'}
+        assert values.get('LimitCORE') == '0'
+        if kind == 'caddy':
+            assert set(values.get('LoadCredential', '').split()) == {
+                name + ':/etc/dragontools/ingestion/server/' + name for name in ('ca.crt', 'server.crt', 'server.key')}
+        else:
+            assert values.get('RuntimeDirectory') == 'dragontools-ingress'
+            assert values.get('RuntimeDirectoryMode') == '0750'
     for path in ('/opt/dragontools', '/opt/dragontools/components', '/etc/dragontools', '/var/lib/dragontools', '/etc/dragontools/' + kind):
         st = os.lstat(path)
         assert stat.S_ISDIR(st.st_mode) and st.st_uid == st.st_gid == 0 and stat.S_IMODE(st.st_mode) == 0o755
@@ -66,25 +76,26 @@ def managed(spec):
 
 
 def runtime(spec):
-    unit = 'dragontools-' + spec['kind'] + '.service'
+    unit = 'dragontools-' + spec.get('service', spec['kind']) + '.service'
     props = properties(unit)
     pid = int(props.get('MainPID', '0'))
     listeners = output('ss', '-H', '-ltnp').splitlines()
-    allowed = spec['listener']
+    kind = spec['kind']
+    allowed = {'0.0.0.0:9443', '0.0.0.0:9444'} if kind == 'caddy' else set() if kind == 'ingestion' else {spec['listener']}
     # A public/foreign listener on the owned port fails immediately, even while
     # the expected process has not started.
-    port = allowed.rsplit(':', 1)[1]
+    ports = {address.rsplit(':', 1)[1] for address in allowed}
     owned = []
     for line in listeners:
         parts = line.split()
         if len(parts) < 5:
             raise ValueError('invalid listener record')
         address = parts[3]
-        if address.rsplit(':', 1)[-1] == port:
-            assert address == allowed and pid > 0 and 'pid=' + str(pid) + ',' in line
+        if address.rsplit(':', 1)[-1] in ports:
+            assert address in allowed and pid > 0 and 'pid=' + str(pid) + ',' in line
         if pid > 0 and 'pid=' + str(pid) + ',' in line:
-            assert address == allowed
-            owned.append(line)
+            assert address in allowed
+            owned.append(address)
     if pid == 0 or not os.path.isdir('/proc/' + str(pid)):
         sys.exit(75)
     base = '/proc/' + str(pid)
@@ -98,8 +109,29 @@ def runtime(spec):
     if spec['kind'] != 'ingestion':
         with open(base + '/exe', 'rb') as stream:
             assert hashlib.file_digest(stream, 'sha256').hexdigest() == spec['digest']
-    if props.get('ActiveState') != 'active' or not owned:
+    if kind == 'ingestion':
+        st = os.lstat('/run/dragontools-ingress')
+        assert stat.S_ISDIR(st.st_mode) and st.st_uid == account.pw_uid and st.st_gid == account.pw_gid and stat.S_IMODE(st.st_mode) == 0o750
+        expected = {'/run/dragontools-ingress/metrics.sock', '/run/dragontools-ingress/logs.sock'}
+        seen = set()
+        for line in output('ss', '-H', '-lxnp').splitlines():
+            if 'pid=' + str(pid) + ',' in line:
+                paths = set(line.split()) & expected
+                assert len(paths) == 1
+                seen.update(paths)
+        for path in expected:
+            if not os.path.lexists(path):
+                sys.exit(75)
+            st = os.lstat(path)
+            assert stat.S_ISSOCK(st.st_mode) and st.st_uid == account.pw_uid and st.st_gid == account.pw_gid and stat.S_IMODE(st.st_mode) == 0o660
+        if seen != expected:
+            sys.exit(75)
+    if props.get('ActiveState') != 'active' or set(owned) != allowed:
         sys.exit(75)
+    if kind == 'caddy':
+        for port in (9443, 9444):
+            with socket.create_connection(('127.0.0.1', port), timeout=3):
+                pass
 
 
 def health(spec):

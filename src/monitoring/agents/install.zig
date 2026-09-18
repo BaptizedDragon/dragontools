@@ -46,17 +46,32 @@ pub fn install(a: std.mem.Allocator, app: remote.Remote, station: remote.Remote,
     report.component = .station;
     try @import("helper.zig").ensure(a, station, report, station_machine.arch);
 
+    // The historical public Python gateway is retired. Never stop a working
+    // legacy service implicitly or overwrite it to free the Caddy ports.
+    _ = try @import("../readiness.zig").deterministic(a, station, &report.state, .legacy_ingress_conflict, "test ! -e /etc/systemd/system/dragontools-ingestion.service && test ! -L /etc/systemd/system/dragontools-ingestion.service && test \"$(systemctl show -p LoadState --value dragontools-ingestion.service)\" = not-found");
+
     // Safe preregistration before agent startup. No station backend, Grafana,
     // Alertmanager, firewall, or preexisting agent is restarted here.
     report.component = .ingestion;
     _ = try report.call(station, .user, try common.preflight(a, .ingestion));
     _ = try report.call(station, .directories, try common.directories(a, .ingestion));
     _ = try report.call(station, .credentials, try ingress.ensureCommand(a, registration.host, registration.station, try registration.json(a)));
-    _ = try report.call(station, .directories, "set -eu\npath=/opt/dragontools/ingestion\ntest ! -L \"$path\" || exit 43\nif test -e \"$path\"; then test -d \"$path\" && test \"$(stat -c '%u:%g:%a' \"$path\")\" = 0:0:755 || exit 40; printf unchanged; else install -d -o root -g root -m 755 \"$path\"; printf changed; fi");
+    _ = try report.call(station, .directories, "set -eu\npath=/opt/dragontools/ingress-auth\ntest ! -L \"$path\" || exit 43\nif test -e \"$path\"; then test -d \"$path\" && test \"$(stat -c '%u:%g:%a' \"$path\")\" = 0:0:755 || exit 40; printf unchanged; else install -d -o root -g root -m 755 \"$path\"; printf changed; fi");
     _ = try report.call(station, .config, try files.writeCommand(a, ingress.executable, ingress.program, ingress.marker));
     _ = try report.call(station, .unit, try files.writeCommand(a, try common.unitPath(a, .ingestion), try common.unit(a, .ingestion, try verify.commandLine(a, .ingestion, registration)), ingress.marker));
     _ = try report.call(station, .activate, common.activation(.ingestion));
     try verify.service(a, station, report, registration, station_machine.arch, .ingestion);
+    report.component = .caddy;
+    _ = try report.call(station, .user, try common.preflight(a, .caddy));
+    _ = try report.call(station, .directories, try common.directories(a, .caddy));
+    _ = try report.call(station, .binary, try @import("../../components/caddy.zig").binaryCommand(a, station_machine.arch));
+    _ = try report.call(station, .config, try files.writeCommand(a, @import("../../components/caddy.zig").config_path, @embedFile("Caddyfile"), try common.marker(a, .caddy)));
+    // systemd supplies the same three protected credentials at runtime. Native
+    // validation reads them locally; no certificate/key bytes cross SSH.
+    _ = try report.call(station, .config, "CREDENTIALS_DIRECTORY=/etc/dragontools/ingestion/server /opt/dragontools/components/caddy/current/caddy validate --config /etc/dragontools/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1");
+    _ = try report.call(station, .unit, try files.writeCommand(a, try common.unitPath(a, .caddy), try common.unit(a, .caddy, try verify.commandLine(a, .caddy, registration)), try common.marker(a, .caddy)));
+    _ = try report.call(station, .activate, common.activation(.caddy));
+    try verify.service(a, station, report, registration, station_machine.arch, .caddy);
 
     report.component = .journald;
     // The dedicated helper inspects effective values, retains stricter limits,
@@ -74,7 +89,7 @@ pub fn install(a: std.mem.Allocator, app: remote.Remote, station: remote.Remote,
         // a replacement; cryptographic parsing alone does not prove enrollment.
         // A staged migration already passed this check. Its consumers may now
         // use the candidate, whose rollout lease must be refreshed before probing.
-        try verify.secureEndpoint(a, app, report, try ingress.endpointCommand(a, registration.station, "vector", registration.host));
+        try verify.enrollmentEndpoints(a, app, report, registration, "vector");
     }
     const prepared = try ingress.parsePrepared(a, try report.call(app, .credentials, try ingress.prepareClientCommand(a, registration.host, registration.station, inspection)));
     if (prepared.recovered_key) _ = try report.state.accept(.{ .code = 0, .output = "changed" });
@@ -87,7 +102,7 @@ pub fn install(a: std.mem.Allocator, app: remote.Remote, station: remote.Remote,
         _ = try report.call(app, .credentials, try ingress.stageClientCommand(a, bundle));
         // Prove the candidate before stopping a working consumer. The old active
         // registration remains valid throughout the explicit rollover lease.
-        try verify.secureEndpoint(a, app, report, try ingress.endpointCommand(a, registration.station, "pending", registration.host));
+        try verify.enrollmentEndpoints(a, app, report, registration, "pending");
     } else {
         report.component = .ingestion;
         _ = try report.call(station, .credentials, try ingress.reconcileCommand(a, registration.host, registration.station, try registration.json(a)));
@@ -141,11 +156,14 @@ fn convergeAgents(a: std.mem.Allocator, app: remote.Remote, station: remote.Remo
     try prepare(a, app, report, registration, arch, .vector);
     report.configured = true;
     try verify.service(a, app, report, registration, arch, .vector);
-    // Once the authenticated end-to-end path works the gateway is independently
-    // finalized. Later vmagent failures never dirty a verified Vector or gateway.
-    _ = try report.call(station, .finalize, try common.finalize(a, .ingestion));
+    // Finalize station transport only after current-process telemetry proof.
+    // Preserve independent pending intent through any failed readiness check.
     try verify.signals(a, app, station, report, registration, "host");
     try verify.signals(a, app, station, report, registration, "logs");
+    report.component = .ingestion;
+    _ = try report.call(station, .finalize, try common.finalize(a, .ingestion));
+    report.component = .caddy;
+    _ = try report.call(station, .finalize, try common.finalize(a, .caddy));
     report.component = .vector;
     try verify.service(a, app, report, registration, arch, .vector);
     _ = try report.call(app, .finalize, try common.finalize(a, .vector));

@@ -130,7 +130,7 @@ fn vectorConfig(a: std.mem.Allocator, host_id: []const u8, station_hostname: []c
     try sinkPolicy(w);
     if (ordered.len != 0) {
         try w.writeAll("  logs:\n    type: http\n    inputs: [logs_identity, stream_identity]\n    uri: ");
-        const logs_url = try std.fmt.allocPrint(a, "https://{s}:9443/insert/jsonline", .{station_hostname});
+        const logs_url = try std.fmt.allocPrint(a, "https://{s}:9444/insert/jsonline", .{station_hostname});
         defer a.free(logs_url);
         try string(w, logs_url);
         try w.writeAll("\n    method: post\n    compression: none\n    encoding:\n      codec: json\n    framing:\n      method: newline_delimited\n");
@@ -369,4 +369,18 @@ test "application agents merge scopes with trusted labels and metrics-only edits
     try std.testing.expect(std.mem.indexOf(u8, host_only, "type: demo_logs") == null);
     try std.testing.expectEqual(@as(usize, 0), changed.metricsCount());
     try std.testing.expectError(error.NoMetricsTargets, renderVmagentRegistration(a, changed));
+}
+
+test "Vector and vmagent use separate fixed metrics and log ports with no trace edge" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const config = try renderVector(a, "host", "station.example", &.{"app.service"});
+    const arguments = try vmagentArguments(a, "station.example");
+    try std.testing.expect(std.mem.indexOf(u8, config, "https://station.example:9443/api/v1/write") != null);
+    try std.testing.expect(std.mem.indexOf(u8, config, "https://station.example:9444/insert/jsonline") != null);
+    try std.testing.expect(std.mem.indexOf(u8, arguments, "https://station.example:9443/api/v1/write") != null);
+    for ([_][]const u8{ config, arguments }) |value| {
+        for ([_][]const u8{ ":9443/insert", ":9444/api/v1/write", ":9445", "ingestion.service" }) |wrong| try std.testing.expect(std.mem.indexOf(u8, value, wrong) == null);
+    }
 }

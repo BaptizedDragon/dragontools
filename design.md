@@ -276,7 +276,7 @@ units, conflicting users and service drop-ins cause a safe refusal.
 
 The concrete hardened unit passes the fixed storage/retention flags and binds
 `-httpListenAddr=127.0.0.1:9428`. The raw backend has no authentication;
-external agents use the separate registered mTLS ingestion gateway. Private temporary/device namespaces are allowed, persistent writes
+external agents use separate Caddy mTLS metrics/log listeners with private registry authorization. Private temporary/device namespaces are allowed, persistent writes
 are limited to the data directory, and no capabilities are granted. The requested
 hardening directives have no intentional relaxation; no MemoryMax is selected
 without a workload-tested budget. Real systemd compatibility is an integration gate.
@@ -795,7 +795,7 @@ Operators must serialize applies per shared target/station; concurrent distribut
 transactions and automatic namespace migration are not implemented.
 
 Local plan prints administrative aliases, the distinct ingestion hostname and
-`https://hostname:9443` endpoint, signal selections, probes, alerts and app-owned paths;
+`https://hostname:9443` metrics and `https://hostname:9444` logs endpoints, signal selections, probes, alerts and app-owned paths;
 it does not inspect remote conflicts. Apply verifies actual ownership and recent
 signals before success. Probe target failures remain valid telemetry. Read-only
 commands do not export credentials, repair configuration, clear pending markers
@@ -812,7 +812,7 @@ collector, custom metrics alert engine or arbitrary configuration upload path.
 `monitoring agents install --ssh-host application --station monitoring
 --service app.service --metrics-target app=http://127.0.0.1:16000/metrics`
 uses two native OpenSSH connections. `--station` resolves an effective DNS/IPv4
-HostName locally with OpenSSH and uses fixed port 9443 for agent traffic. The
+HostName locally with OpenSSH and uses fixed ports 9443 for metrics and 9444 for logs. The
 application host must reach that address independently of controller SSH tunnels.
 All services and optional private HTTP/HTTPS targets are validated before SSH;
 remote selected units must exist with an exact canonical systemd `Id` and empty
@@ -881,20 +881,76 @@ host-label override. Its journald source was replaced with closed stdin; it is n
 a two-host systemd deployment or outage/recovery test.
 **Disposable-host integration not run.**
 
+### Caddy ingress pins and verification
+
+Official [Caddy v2.11.4 release](https://github.com/caddyserver/caddy/releases/tag/v2.11.4),
+reviewed 2026-09-18. Archive hashes below were compared to the official GitHub
+release API asset SHA-256 digests; binary hashes were derived from those verified
+archives. This trusts the reviewed release account, not an independently verified
+publisher signature. Installation uses committed pins, never latest metadata.
+
+| Linux architecture | Archive SHA-256 | Extracted caddy SHA-256 |
+| --- | --- | --- |
+| amd64 | `527fbf917c39189a1e3b31d34fa955601680b2d5c8055d2a87b8b9588dec7bb9` | `b7105518e3ed1c0761f232e44fc09345535533c9cb0abf0e12809416c7ac64d9` |
+| arm64 | `52d42ae12b3462097e9868da6dfed3c9648ae12edd3b3638102312af84cb6904` | `e1f904038fc11ca897ac5a12fdacfb2a7add02a8720c426d562a37f6fdad2afe` |
+
+`src/components/caddy.zig` installs into `/opt/dragontools/components/caddy/v2.11.4`
+with an atomic `current` link, private staging, archive/binary integrity checks
+and its own restart marker. Correct state returns before downloading. Caddyfile
+is generated, not user configurable, and validated with the pinned binary before
+activation. Systemd `LoadCredential` supplies three local copies: CA certificate,
+server certificate, server private key. Neither the CA private key nor app client
+private keys are accessible to Caddy. Both service units hide canonical PKI,
+legacy client and server storage with `InaccessiblePaths`; only Caddy receives
+server credentials. Their stdout/stderr and core dumps are disabled.
+
+The private Python authorization/normalization helper is retained because stock
+Caddy does not implement registry fingerprints/rollout leases or trusted log
+metadata rewriting. Caddy deletes incoming `X-DragonTools-*` headers before setting
+verified SHA-256 fingerprint, subject and SAN assertions. Root-owned registry
+records authorize each request. Private sockets are dt-ingest:dt-ingest 0660 in
+0750 RuntimeDirectory; only Caddy's service supplementary group grants access.
+The helper never terminates TLS or reads server keys. Local roots remain trusted.
+
+Base station install has no TLS hostname and remains app-independent. Application
+apply supplies explicit `station.hostname`, bootstraps PKI and verifies Caddy
+before client preparation. Runtime checks require exactly two IPv4 TCP listeners,
+no UDP/admin/trace listener, exact process/user/binary/config/unit/hardening, and
+both protected Unix sockets. Absence retries within 15 seconds; deterministic
+drift fails immediately. Per-signal native mTLS probes use 30 seconds, fresh
+station telemetry uses 45 seconds. No fixed startup sleep. Transport restart
+intent is cleared only after current-process host/log signal proof.
+
+`tools/fetch_caddy_fixture.py` explicitly fetches/checks a native fixture binary;
+normal builds/tests stay offline. Linux/macOS CI runs the same real-Caddy test
+with native fixture certificates, port isolation, forged headers, wrong purpose,
+expiry, SAN, registry rollout, request bounds and backend transformations. Loopback
+fixture ports and credential paths replace production bindings only. This does
+not prove Ubuntu systemd `LoadCredential`, Vector/vmagent forwarding or provider
+firewall behavior. Disposable-host integration remains required before claiming
+production deployment validation.
+
 ### mTLS ingestion and trust boundary
 
-A dedicated `dt-ingest` systemd service runs the checked-in Python standard-library
-ingestion program on IPv4 `0.0.0.0:9443`. TLS 1.2+ and a registered client
-certificate are mandatory. Only POST `/api/v1/write`, POST `/insert/jsonline`,
-and authenticated GET/HEAD `/health` are available. Requests cap at 4 MiB, decoded
+Caddy v2.11.4 runs as `dt-caddy` on IPv4 `0.0.0.0:9443` (metrics) and
+`0.0.0.0:9444` (logs), with TLS 1.2+ and client certificates required. Caddy has
+exactly one Unix-socket upstream per port. The private `dt-ingest` authorization
+helper has no TCP listener and exposes only POST `/api/v1/write` on metrics.sock,
+POST `/insert/jsonline` on logs.sock, plus authenticated GET/HEAD `/health` on both.
+It never routes a log request through the metrics port or vice versa. Caddy's
+admin API, auto HTTPS/ACME, config persistence and HTTP/2/3 are disabled. TCP 9445
+is reserved and closed; no trace source or direct trace protocol is configured. Requests cap at 4 MiB, decoded
 remote-write Snappy payloads at 16 MiB, 16 concurrent workers and a 10-second
 connection deadline. Each request checks the root-owned registry by machine
 CN, exact URI SAN and SHA-256 fingerprint; removed/changed registration takes effect without a proxy
 restart. Incoming query strings and headers are never forwarded, and backend
 destinations are fixed. Raw
 VM/VL/VT administrative listeners remain loopback, and no Grafana/Alertmanager
-route is added. No firewall is changed: operators allow TCP 9443 from monitored
-hosts and retain their existing SSH policy.
+route is added. No firewall is changed: operators allow TCP 9443 for metrics and
+TCP 9444 for selected logs from monitored hosts and retain their SSH policy.
+The original public Python gateway unit is never restored. A still-installed
+historical unit fails `legacy_ingress_conflict` without being stopped or deleted;
+an operator must coordinate that older port topology's cutover.
 
 The station root owns the preserved ten-year CA (root:root 0400) and station
 server key. The application host alone generates its P-256 client key. This mature
@@ -929,6 +985,11 @@ reports drift without repairing it. Empty pki/clients/registry parents remain a
 valid bootstrap starting point. An existing CA is never replaced on
 validation failure; missing CA material on an initialized station still requires
 explicit maintenance. Rerunning apply needs no manual cleanup of empty parents.
+
+The bounded native stdin decoder treats Zig 0.16 `error.EndOfStream` as normal
+request completion. It still rejects empty, malformed, oversized and unexpected
+JSON envelopes before dispatch; it never prints request bytes. This fixes fresh
+station enrollment failing before CA generation when the controller closes stdin.
 
 `ingestion.zig` invokes the installed native helper using a fixed command and
 bounded public JSON on stdin. SSH transports only public inspection, CSR and
@@ -996,7 +1057,7 @@ Enrollment/renewal is an explicit recoverable sequence:
    legacy station `clients/<host>/client.key`, and commit/clean the local generation.
    Finalization is repeatable if interrupted at either host.
 
-The gateway accepts only an active registered fingerprint or the explicit bounded
+The private authorization helper accepts only an active registered fingerprint or the explicit bounded
 rollout fingerprint, with the matching host SAN. A CA-signed unregistered client
 is rejected. Legacy CN-only acceptance is restricted to its exact existing active
 fingerprint while migration is pending; modern registrations require the URI SAN.
@@ -1049,7 +1110,7 @@ hostnames consistent to avoid changing the shared agents' destination repeatedly
 Client/server certificates last 365 days. With more than 30 days remaining,
 apply performs no CSR, signing, key regeneration, certificate rewrite, registry
 rewrite or agent restart. At 30 days or less it renews using the same local key;
-server-only renewal replaces only the server certificate and marks ingestion.
+server-only renewal replaces only the server certificate and marks Caddy.
 CA validity of 366 days or less causes `ca_maintenance`/`CaMaintenanceRequired`,
 leaving CA material unchanged and requiring future explicit rollover. This avoids
 issuing a full-year leaf beyond CA expiry. Read-only verify rejects expired
@@ -1059,10 +1120,12 @@ credentials and never renews or stages files.
 server chain/hostname, client authentication and authenticated health in order,
 after station service/listener verification. Fixed exit codes map to
 `dns_unresolved`, `tcp_unreachable`, `server_tls_invalid`,
-`client_certificate_rejected` and `ingestion_rejected`. DNS/TCP/request absence
+`client_certificate_rejected` and `ingestion_rejected`; the controller maps TCP
+and request failures to `tcp_metrics_unreachable`/`tcp_logs_unreachable` and
+`metrics_ingestion_rejected`/`logs_ingestion_rejected`. DNS/TCP/request absence
 uses the ordinary bounded readiness policy; certificate failures are deterministic.
 The helper never prints raw exceptions, commands or key material. Operators must
-make TCP 9443 reachable and manage DNS/provider firewalls themselves. No provider
+make TCP 9443 (metrics) and 9444 (selected logs) reachable and manage DNS/provider firewalls themselves. No provider
 API, DNS edit, public ACME certificate or firewall rule is added.
 
 The controller, station/application roots, OpenSSH configuration and CA are

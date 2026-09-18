@@ -1,5 +1,9 @@
 # Native PKI and maintenance validation — 2026-09-18
 
+> Historical transport evidence: these observations predate the separate-port
+> Caddy ingress. Use the current README/application gate and
+> [Caddy validation record](caddy-validation.md) for this iteration.
+
 This records local macOS arm64 tests and isolated Linux process/filesystem tests.
 It does not establish a real SSH/systemd deployment or a successful GitHub Actions
 run. **Disposable-host integration not run.** The two-host gate in README.md

@@ -17,7 +17,7 @@ const State = struct {
 const Fake = struct {
     allocator: std.mem.Allocator,
     report: *model.Report,
-    states: [8]State = @splat(.{}),
+    states: [@typeInfo(model.Component).@"enum".fields.len]State = @splat(.{}),
     now: i64 = 0,
     delayed: ?readiness.Check = null,
     fail: ?readiness.Check = null,
@@ -38,6 +38,7 @@ const Fake = struct {
     rollback_calls: usize = 0,
     finalize_calls: usize = 0,
     endpoint_failure: u8 = 0,
+    logs_endpoint_failure: u8 = 0,
     endpoint_attempts: usize = 0,
     registration_command: ?[]const u8 = null,
     timeout: bool = false,
@@ -101,6 +102,7 @@ const Fake = struct {
         }
         if (std.mem.indexOf(u8, command, " 'inspect' '") != null) return .{ .code = 0, .output = try std.fmt.allocPrint(self.allocator, "{{\"host\":\"dt-0123456789abcdef0123456789abcdef\",\"station\":\"{s}\",\"ca.crt\":\"PUBLIC-CA\",\"legacy\":{s},\"legacy_expired\":false,\"legacy_active\":{s},\"certificate_sha256\":\"{s}\",\"pending_certificate_sha256\":{s}}}", .{ self.station_hostname, if (self.legacy) "true" else "false", if (self.legacy) "true" else "false", if (self.committed_pending) "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" else "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", if (self.pending_registry) "\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"" else "null" }) };
         if (std.mem.indexOf(u8, command, " 'client-prepare' '") != null) {
+            try std.testing.expect(self.state(.caddy).active and self.state(.ingestion).active);
             if (self.enrolled and !self.renew and !self.legacy and !self.candidate) return .{ .code = 0, .output = "{\"action\":\"unchanged\",\"csr\":null,\"certificate_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}" };
             if (!self.candidate) {
                 self.enrollments += 1;
@@ -159,7 +161,7 @@ const Fake = struct {
         if (op == .status and std.mem.indexOf(u8, command, "ExecMainStartTimestampMonotonic") != null) return .{ .code = 0, .output = "1000" };
         if (op == .service_exists) return .{ .code = 0, .output = "loaded\n" };
         const current = self.state(self.report.component);
-        if (op == .directories and std.mem.indexOf(u8, command, "path=/opt/dragontools/ingestion") != null) {
+        if (op == .directories and std.mem.indexOf(u8, command, "path=/opt/dragontools/ingress-auth") != null) {
             if (self.ingestion_directory) return .{ .code = 0, .output = "unchanged" };
             self.ingestion_directory = true;
             self.mutations += 1;
@@ -171,6 +173,7 @@ const Fake = struct {
                     self.endpoint_attempts += 1;
                     if (self.pending_lease_expired) return .{ .code = 94 };
                     if (self.endpoint_failure != 0) return .{ .code = self.endpoint_failure };
+                    if (self.logs_endpoint_failure != 0 and std.mem.endsWith(u8, command, "'logs'")) return .{ .code = self.logs_endpoint_failure };
                 }
                 if (self.station_unreachable and check == .host_metrics_ready) return .{ .code = 255 };
                 if (self.fail == check) {
@@ -186,7 +189,7 @@ const Fake = struct {
         }
         if (op == .finalize) {
             // Finalizing ingestion happens after Vector's endpoint verification.
-            const target = if (std.mem.indexOf(u8, command, "ingestion-restart-required") != null) self.state(.ingestion) else current;
+            const target = if (std.mem.indexOf(u8, command, "ingress-auth-restart-required") != null) self.state(.ingestion) else current;
             target.pending = false;
             return .{ .code = 0 };
         }
@@ -204,7 +207,7 @@ const Fake = struct {
             return .{ .code = 0, .output = "changed" };
         }
         if (op == .binary and self.report.component == .vector and self.fail_vector_binary) return .{ .code = 1 };
-        if (op == .config and (std.mem.startsWith(u8, command, "runuser ") or std.mem.indexOf(u8, command, "dragontools-vmalert-dry-run") != null)) return .{ .code = 0 };
+        if (op == .config and (std.mem.startsWith(u8, command, "runuser ") or std.mem.startsWith(u8, command, "CREDENTIALS_DIRECTORY=") or std.mem.indexOf(u8, command, "dragontools-vmalert-dry-run") != null)) return .{ .code = 0 };
         const index = @intFromEnum(op);
         if (current.commands[index]) |existing| if (std.mem.eql(u8, existing, command)) return .{ .code = 0, .output = "unchanged" };
         const initial = current.commands[index] == null;
@@ -225,16 +228,18 @@ test "agents first install signals finalize and unchanged rerun performs no muta
     var fake: Fake = .{ .allocator = a, .report = &report };
     try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
     try std.testing.expect(report.state.changes > 0 and report.vmagent_installed);
-    try std.testing.expect(!fake.state(.vector).pending and !fake.state(.vmagent).pending and !fake.state(.ingestion).pending);
+    try std.testing.expect(!fake.state(.vector).pending and !fake.state(.vmagent).pending and !fake.state(.ingestion).pending and !fake.state(.caddy).pending);
     const before = fake.mutations;
     report = .{};
     try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
     try std.testing.expectEqual(@as(usize, 0), report.state.changes);
     try std.testing.expectEqual(before, fake.mutations);
-    for ([_]model.Component{ .vector, .vmagent, .ingestion }) |kind| {
+    for ([_]model.Component{ .vector, .vmagent, .ingestion, .caddy }) |kind| {
         try std.testing.expectEqual(@as(usize, 1), fake.state(kind).restarts);
-        if (kind != .ingestion) try std.testing.expectEqual(@as(usize, 1), fake.state(kind).credential_writes);
+        if (kind == .vector or kind == .vmagent) try std.testing.expectEqual(@as(usize, 1), fake.state(kind).credential_writes);
     }
+    try std.testing.expectEqual(@as(usize, 1), fake.enrollments);
+    try std.testing.expectEqual(@as(usize, 1), fake.state(.caddy).downloads);
 }
 test "registry permissions failure reports ingestion check without retry and recovers on apply" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -620,10 +625,10 @@ test "server-only restart intent never renews client or restarts agent consumers
     var report: model.Report = .{};
     var fake: Fake = .{ .allocator = a, .report = &report };
     try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
-    fake.state(.ingestion).pending = true;
+    fake.state(.caddy).pending = true;
     report = .{};
     try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
-    try std.testing.expectEqual(@as(usize, 2), fake.state(.ingestion).restarts);
+    try std.testing.expectEqual(@as(usize, 2), fake.state(.caddy).restarts);
     try std.testing.expectEqual(@as(usize, 1), fake.enrollments);
     for ([_]model.Component{ .vector, .vmagent }) |kind| try std.testing.expectEqual(@as(usize, 1), fake.state(kind).restarts);
 }
@@ -679,7 +684,7 @@ test "interrupted migration refreshes expired rollout authorization before endpo
     try std.testing.expectEqual(@as(usize, 0), report.state.changes);
 }
 
-test "hostname change restarts only ingestion and endpoint consumers then reruns unchanged" {
+test "hostname change restarts only Caddy and endpoint consumers then reruns unchanged" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -690,10 +695,10 @@ test "hostname change restarts only ingestion and endpoint consumers then reruns
     changed.station = "monitoring.baptizeddragon.com";
     fake.station_hostname = changed.station;
     // The native PKI fixture proves SAN reconciliation. Model its sole marker.
-    fake.state(.ingestion).pending = true;
+    fake.state(.caddy).pending = true;
     report = .{};
     try install.install(a, fake.asRemote(), fake.asRemote(), &report, changed);
-    for ([_]model.Component{ .ingestion, .vector, .vmagent }) |kind| try std.testing.expectEqual(@as(usize, 2), fake.state(kind).restarts);
+    for ([_]model.Component{ .caddy, .vector, .vmagent }) |kind| try std.testing.expectEqual(@as(usize, 2), fake.state(kind).restarts);
     try std.testing.expectEqual(@as(usize, 1), fake.state(.host_rules).restarts);
     try std.testing.expectEqual(@as(usize, 1), fake.enrollments);
     for ([_]model.Component{ .vector, .vmagent }) |kind| try std.testing.expectEqual(@as(usize, 1), fake.state(kind).credential_writes);
@@ -702,7 +707,7 @@ test "hostname change restarts only ingestion and endpoint consumers then reruns
     try install.install(a, fake.asRemote(), fake.asRemote(), &report, changed);
     try std.testing.expectEqual(@as(usize, 0), report.state.changes);
     try std.testing.expectEqual(mutations, fake.mutations);
-    for ([_]model.Component{ .ingestion, .vector, .vmagent }) |kind| try std.testing.expectEqual(@as(usize, 2), fake.state(kind).restarts);
+    for ([_]model.Component{ .caddy, .vector, .vmagent }) |kind| try std.testing.expectEqual(@as(usize, 2), fake.state(kind).restarts);
 }
 
 test "station ensure failure reports safe substage and preserves native semantic codes" {
@@ -756,4 +761,85 @@ test "silent or rejected native diagnostics still identify station ensure and ge
     var fake: Fake = .{ .allocator = a, .report = &report, .ensure_failure = .{ .code = 86 } };
     try std.testing.expectError(error.RemoteOperationFailed, install.install(a, fake.asRemote(), fake.asRemote(), &report, registration));
     try std.testing.expectEqualStrings("Stage: station_ensure\nDetail: agent_internal_error\n", try report.state.credentialDiagnostics(a));
+}
+
+test "Caddy listener retries precede enrollment and preserve restart intent on timeout" {
+    for ([_]bool{ false, true }) |timeout| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var report: model.Report = .{};
+        var fake: Fake = .{ .allocator = a, .report = &report, .delayed = .caddy_listener, .timeout = timeout };
+        if (timeout) {
+            try std.testing.expectError(error.ReadinessTimedOut, install.install(a, fake.asRemote(), fake.asRemote(), &report, registration));
+            try std.testing.expectEqual(readiness.Check.caddy_listener, report.state.check.?);
+            try std.testing.expectEqual(@as(usize, 0), fake.enrollments);
+            try std.testing.expect(fake.state(.caddy).pending and fake.state(.ingestion).pending);
+            fake.timeout = false;
+            report = .{};
+            try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
+        } else try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
+        try std.testing.expect(fake.attempts >= 3 and !fake.state(.caddy).pending);
+        const mutations = fake.mutations;
+        report = .{};
+        try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
+        try std.testing.expectEqual(mutations, fake.mutations);
+        try std.testing.expectEqual(@as(usize, 0), report.state.changes);
+    }
+}
+
+test "Caddy invariants and legacy public gateway conflicts fail once before client enrollment" {
+    for ([_]readiness.Check{ .caddy_service, .legacy_ingress_conflict }) |check| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var report: model.Report = .{};
+        var fake: Fake = .{ .allocator = a, .report = &report, .fail = check };
+        try std.testing.expectError(error.RemoteOperationFailed, install.install(a, fake.asRemote(), fake.asRemote(), &report, registration));
+        try std.testing.expectEqual(check, report.state.check.?);
+        try std.testing.expectEqual(@as(usize, 1), fake.attempts);
+        try std.testing.expectEqual(@as(usize, 0), fake.enrollments);
+        try std.testing.expectEqual(@as(usize, 0), fake.state(.vector).restarts);
+    }
+}
+
+test "Caddy config reconciliation restarts only Caddy and reruns unchanged" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var report: model.Report = .{};
+    var fake: Fake = .{ .allocator = a, .report = &report };
+    try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
+    fake.state(.caddy).commands[@intFromEnum(remote.Operation.config)] = null;
+    report = .{};
+    try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
+    for ([_]model.Component{ .ingestion, .vector, .vmagent }) |kind| try std.testing.expectEqual(@as(usize, 1), fake.state(kind).restarts);
+    try std.testing.expectEqual(@as(usize, 2), fake.state(.caddy).restarts);
+    try std.testing.expectEqual(@as(usize, 1), fake.enrollments);
+    report = .{};
+    try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
+    try std.testing.expectEqual(@as(usize, 0), report.state.changes);
+    try std.testing.expectEqual(@as(usize, 2), fake.state(.caddy).restarts);
+}
+
+test "per-signal endpoint diagnostics preserve bounded retries and skip unselected logs" {
+    for ([_]u8{ 92, 95 }) |code| {
+        for ([_]bool{ false, true }) |logs| {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var report: model.Report = .{};
+            var fake: Fake = .{ .allocator = a, .report = &report };
+            if (logs) fake.logs_endpoint_failure = code else fake.endpoint_failure = code;
+            try std.testing.expectError(error.ReadinessTimedOut, verify.enrollmentEndpoints(a, fake.asRemote(), &report, registration, "pending"));
+            try std.testing.expectEqual(if (code == 92) (if (logs) readiness.Check.tcp_logs_unreachable else .tcp_metrics_unreachable) else (if (logs) readiness.Check.logs_ingestion_rejected else .metrics_ingestion_rejected), report.state.check.?);
+            try std.testing.expect(fake.endpoint_attempts > 2 and fake.now <= readiness.http_ms);
+            if (logs) {
+                var host_only = registration;
+                host_only.services = &.{};
+                report = .{};
+                try verify.enrollmentEndpoints(a, fake.asRemote(), &report, host_only, "pending");
+            }
+        }
+    }
 }

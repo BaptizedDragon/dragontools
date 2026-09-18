@@ -43,20 +43,9 @@ fn entry(init: std.process.Init, enabled: *bool, stage: *diagnostics.Stage) !u8 
     }
     enabled.* = args.len == 4 and std.mem.eql(u8, args[1], "internal") and std.mem.eql(u8, args[2], "--stdin") and std.mem.eql(u8, args[3], "--diagnostics");
     try j.require(enabled.* or args.len == 3 and std.mem.eql(u8, args[1], "internal") and std.mem.eql(u8, args[2], "--stdin"));
-    const buffer = try a.alloc(u8, 512 * 1024 + 1);
-    var used: usize = 0;
-    while (used < buffer.len) {
-        const n = try std.Io.File.stdin().readStreaming(init.io, &.{buffer[used..]});
-        if (n == 0) break;
-        used += n;
-    }
-    try j.require(used < buffer.len);
-    const request = try j.parse(a, buffer[0..used], 512 * 1024);
-    try j.keys(request, &.{ "action", "args" });
-    const action = try j.field(request, "action");
-    const values = try j.array(try j.get(request, "args"), 4);
-    const arguments = try a.alloc([]const u8, values.len);
-    for (values, arguments) |value, *argument| argument.* = try j.text(value);
+    const request = try @import("agent/request.zig").read(a, init.io, std.Io.File.stdin());
+    const action = request.action;
+    const arguments = request.args;
     stage.* = .native_initialization;
     const root = try std.Io.Dir.openDirAbsolute(init.io, "/", .{});
     defer root.close(init.io);

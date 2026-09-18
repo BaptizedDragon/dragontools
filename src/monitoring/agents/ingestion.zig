@@ -4,11 +4,13 @@ const remote = @import("../../system/remote.zig");
 pub const program = @embedFile("ingestion.py");
 pub const checks_program = @embedFile("checks.py");
 pub const port = 9443;
+pub const logs_port = 9444;
+pub const reserved_traces_port = 9445;
 pub const user = "dt-ingest";
-pub const executable = "/opt/dragontools/ingestion/ingestion.py";
+pub const executable = "/opt/dragontools/ingress-auth/authorize.py";
 pub const directory = "/etc/dragontools/ingestion";
 pub const client_directory = "/etc/dragontools/monitoring-client";
-pub const marker = "/var/lib/dragontools/ingestion-restart-required";
+pub const marker = "/var/lib/dragontools/ingress-auth-restart-required";
 pub const Kind = enum { vector, vmagent };
 pub const Action = enum { unchanged, enroll, renew, migrate, reenroll };
 pub const Prepared = struct {
@@ -100,7 +102,11 @@ pub fn verifyCredentialsCommand(a: std.mem.Allocator, kind: Kind, host: []const 
     return request(a, &.{ "verify-agent", @tagName(kind), host, endpoint });
 }
 pub fn endpointCommand(a: std.mem.Allocator, endpoint: []const u8, kind: []const u8, host: []const u8) !remote.Input {
-    return request(a, &.{ "endpoint", endpoint, kind, host });
+    return endpointForSignal(a, endpoint, kind, host, .metrics);
+}
+pub const Signal = enum { metrics, logs };
+pub fn endpointForSignal(a: std.mem.Allocator, endpoint: []const u8, kind: []const u8, host: []const u8, signal: Signal) !remote.Input {
+    return request(a, &.{ "endpoint", endpoint, kind, host, @tagName(signal) });
 }
 pub fn verifyStationCommand(a: std.mem.Allocator, host: []const u8, endpoint: []const u8, registration_json: []const u8) !remote.Input {
     return request(a, &.{ "verify", host, endpoint, registration_json });
@@ -112,8 +118,8 @@ test "enrollment exchanges bounded public CSR and certificates with no private t
     const a = arena.allocator();
     try std.testing.expect(std.mem.startsWith(u8, program, "# Managed by DragonTools\n"));
     try std.testing.expectEqualStrings("{\"action\":\"client-install\",\"args\":[\"vector\",\"host\",\"station\"]}", (try installCredentialsCommand(a, .vector, "host", "station")).bytes);
-    try std.testing.expect(std.mem.indexOf(u8, program, "ssl.CERT_REQUIRED") != null);
-    try std.testing.expect(std.mem.indexOf(u8, program, "ssl.TLSVersion.TLSv1_2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, @embedFile("Caddyfile"), "mode require_and_verify") != null);
+    try std.testing.expect(std.mem.indexOf(u8, @embedFile("Caddyfile"), "protocols tls1.2 tls1.3") != null);
     try std.testing.expectError(error.InvalidEnrollmentResponse, parsePrepared(a, "PRIVATE KEY"));
     try std.testing.expectError(error.InvalidEnrollmentResponse, parsePrepared(a, "{\"action\":\"enroll\",\"csr\":null,\"certificate_sha256\":null}"));
 }
@@ -123,8 +129,8 @@ test "local mTLS ingestion fixtures enforce routes registration bounds and crede
     const result = try std.process.run(a, std.testing.io, .{ .argv = &.{ "python3", "-I", "-B", "tests/agent_ingestion_test.py" } });
     defer a.free(result.stdout);
     defer a.free(result.stderr);
-    try std.testing.expectEqual(@as(u8, 0), result.term.exited);
     try std.testing.expectEqualStrings("", result.stderr);
+    try std.testing.expectEqual(@as(u8, 0), result.term.exited);
 }
 
 // Native lifecycle/parity tests now run through build.zig test-agent.

@@ -1,5 +1,9 @@
 # Application agent validation — 2026-09-17
 
+> Historical transport evidence: these observations predate the separate-port
+> Caddy ingress. Use the current README/application gate and
+> [Caddy validation record](caddy-validation.md) for this iteration.
+
 This records local process evidence for the application-repository iteration.
 **Disposable-host integration not run.** No application or station SSH host was
 contacted. Actual systemd hardening, journald access, SSH installation and

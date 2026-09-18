@@ -8,7 +8,7 @@ Use disposable Ubuntu 24.04/26.04 station and application hosts with verified
 OpenSSH aliases `replace-me-monitoring` and `replace-me-application`, root or
 noninteractive sudo, normal prerequisites and synchronized clocks. Install the
 central station with its separate `station.toml`. Allow application-to-station TCP
-9443 in the operator-managed firewall; keep raw storage/admin ports private.
+9443 (metrics) and 9444 (logs) in the operator-managed firewall; 9445 stays closed; keep raw storage/admin ports private.
 Prepare canonical `app.service` with structured journal logs, a private Prometheus
 endpoint exposing a real application metric, and a reachable HTTP health URL.
 The Doers example is illustrative, not production discovery.
@@ -28,7 +28,14 @@ dragontool monitoring app-status
 dragontool monitoring apply
 ```
 
-1. Confirm plan makes no SSH connection. Expected first apply includes
+1. Confirm plan makes no SSH connection. The first apply must provision the
+   private auth sockets and Caddy before client enrollment, using station.hostname.
+   Check Caddy owns only IPv4 TCP 9443/9444, its admin API and ACME are disabled,
+   and the private auth helper has no TCP listener or private-key access.
+   Cross-port requests, absent/unregistered certificates and forged identity
+   headers must be rejected without backend writes. No historical public
+   dragontools-ingestion.service is installed.
+   Expected first apply includes
    `host metrics flowing`, `selected service logs flowing (quiet-service metadata included)`,
    `application metrics flowing`, `probes registered: 1` and
    `application alerts loaded`. Second apply must include `No changes required.`
@@ -85,13 +92,13 @@ checks, not results established by the local crypto/process fixtures:
 2. Verify actual host/app metrics and selected logs traverse mTLS, then record
    public cert fingerprints, file mtimes and service PIDs around an unchanged
    apply. Require `No changes required.`, no new CSR/signature, and stable
-   Vector/vmagent/ingestion identities.
+   Vector/vmagent/Caddy/private-auth identities.
 3. With fixture-only short-lived client certificates, simulate at most 30 days
    remaining. Apply must retain the client public key, replace its certificate,
    restart only actual credential consumers, verify fresh telemetry, finalize
    registry/local state, and become a no-op on rerun. Read-only app-verify must
    never renew. Independently shorten only the server certificate: its public
-   key stays the same and only ingestion restarts.
+   key stays the same and only Caddy restarts.
 4. Use a prior-version **disposable** installation with station-generated client
    credentials. Require a new host-generated key, old working credentials
    retained until the candidate path verifies, and station key unlink only after
@@ -103,7 +110,7 @@ checks, not results established by the local crypto/process fixtures:
    and read-only failure for expired credentials. Near-expiry CA must report
    maintenance and preserve the existing CA; no automatic rollover is allowed.
 6. Block DNS/TCP independently and inspect only semantic diagnostics. Expect
-   `dns_unresolved`/`tcp_unreachable` and the explicit DNS/provider-firewall
+   `dns_unresolved`/`tcp_metrics_unreachable`/`tcp_logs_unreachable` and the explicit DNS/provider-firewall
    guidance. Wrong station hostname and unregistered client must produce
    `server_tls_invalid`/`client_certificate_rejected`, with no raw stderr.
 
@@ -122,7 +129,7 @@ telemetry/diagnostics while administrative SSH still uses the alias.
 On disposable hosts only, change to another configured DNS name for the same
 station. Require the new DNS SAN, retained old SAN, identical CA/server/client
 keys, unchanged client certificate/files, updated Vector/vmagent destination and
-only ingestion/affected-agent restarts. Verify actual telemetry, then repeat
+only Caddy/affected-agent restarts. Verify actual telemetry, then repeat
 apply and require `No changes required.` with stable cert/config bytes and PIDs.
 Interrupt after server certificate publication and after one agent update;
 rerun must resume with restart intent intact. Exercise DNS/TCP failures and TLS

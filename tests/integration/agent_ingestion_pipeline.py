@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[2]
 PINS = {
     "victoria-metrics-prod": "d6fc7e82108e1352bf300cab5c7f2ea7a05c23f09c47e0b566b53c18c07406d1",
     "victoria-logs-prod": "2d279a10a3358f7bbad054a0210fb4cd8dbcf6aa2a601ce295146632a8bf615e",
+    "caddy": "e1f904038fc11ca897ac5a12fdacfb2a7add02a8720c426d562a37f6fdad2afe",
     "vmagent": "da7046c7310c39ce3a93dc67f8f9562fa77a7fc9ec3d95b0cf8d9dcb6321679d",
 }
 
@@ -129,7 +130,11 @@ def main():
     spec = importlib.util.spec_from_file_location("signals", ROOT / "src/monitoring/agents/signals.py")
     signals = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(signals)
+    spec = importlib.util.spec_from_file_location("ingress_proxy_fixture", ROOT / "tests/ingress_proxy_fixture.py")
+    proxy_fixture = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(proxy_fixture)
     children, servers = [], []
+    ingress = None
     with tempfile.TemporaryDirectory(prefix="dragontools-pipeline-") as temporary:
         temp = Path(temporary)
         registry = temp / "registry"
@@ -159,9 +164,8 @@ def main():
                    "-memory.allowedBytes=67108864"])
             until(lambda: request(8428, "GET", "/health") is not None)
             until(lambda: request(9428, "GET", "/health") is not None)
-            proxy = ingestion.Server(("127.0.0.1", 9443), ingestion.context(str(fixture / "certs")), str(registry))
-            servers.append(proxy)
-            threading.Thread(target=proxy.serve_forever, daemon=True).start()
+            ingress = proxy_fixture.Harness(temp, fixture / "certs", registry, ingestion,
+                dict(metrics=8428, logs=9428), str(fixture / "caddy"), ports=dict(metrics=9443, logs=9444))
             tls = ssl.create_default_context(cafile=str(fixture / "certs/ca.crt"))
             tls.load_cert_chain(str(fixture / "certs/client.crt"), str(fixture / "certs/client.key"))
             request(9443, "GET", "/health", context=tls)
@@ -179,6 +183,7 @@ def main():
             config = config[:begin] + "  journal:\n    type: stdin\n    decoding:\n      codec: json\n" + config[end:]
             config = config.replace("/var/lib/dragontools/vector", str(temp / "vector"))
             config = config.replace("/etc/dragontools/vector", str(fixture / "certs"))
+            config = config.replace("/opt/dragontools/agent/current/dragontool-agent", str(fixture / "dragontool-agent"))
             config = config.replace("monitor.example", "localhost")
             (temp / "vector").mkdir()
             (temp / "vector.yaml").write_text(config)
@@ -241,6 +246,8 @@ def main():
             print("PASS: real vmagent v1.152.0 application metrics traverse mTLS with trusted host identity", flush=True)
             print("PASS: production host/log/app signal queries accept fresh arrivals and reject pre-start samples", flush=True)
         finally:
+            if ingress is not None:
+                ingress.close()
             for child in reversed(children):
                 child.terminate()
             for child in reversed(children):

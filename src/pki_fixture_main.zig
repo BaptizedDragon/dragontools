@@ -59,6 +59,6 @@ fn run(init: std.process.Init) !void {
         if (result != 0) return error.TcpUnreachable;
         defer _ = std.c.close(fd);
         defer dragontools_network_cancel();
-        try @import("pki/tls.zig").health(a, fd, try read(a, init.io, args[3], "ca.crt"), try read(a, init.io, args[3], "client.crt"), try read(a, init.io, args[3], "client.key"), args[2], args[5], now);
+        try @import("pki/tls.zig").health(a, fd, try read(a, init.io, args[3], "ca.crt"), try read(a, init.io, args[3], "client.crt"), try read(a, init.io, args[3], "client.key"), args[2], port, args[5], now);
     } else return error.InvalidFixture;
 }

@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import socket
 import ssl
+import stat
 import sys
 import types
 import unittest
@@ -88,6 +89,65 @@ class Runtime(unittest.TestCase):
                 result, calls = self.run_runtime(scenario)
                 self.assertEqual(result, 1)
                 self.assertEqual(calls.count(('systemctl', 'show', 'dragontools-vector.service')), 1)
+
+
+class IngressRuntime(unittest.TestCase):
+    def run_ingress(self, kind, scenario='healthy'):
+        binary = b'pinned Caddy fixture'
+        command = 'caddy run --config fixed' if kind == 'caddy' else 'python3 -I -B authorize.py'
+        spec = dict(kind=kind, service='caddy' if kind == 'caddy' else 'ingress-auth',
+                    owner='dt-caddy' if kind == 'caddy' else 'dt-ingest', command=command,
+                    digest=hashlib.sha256(binary).hexdigest())
+        pid = 0 if scenario == 'absent' else 123
+        account = types.SimpleNamespace(pw_uid=120, pw_gid=120)
+        def output(argv, **_):
+            if argv[0] == 'systemctl':
+                return f'MainPID={pid}\nActiveState=active\n'.encode()
+            if argv == ('ss', '-H', '-ltnp'):
+                addresses = ['0.0.0.0:9443', '0.0.0.0:9444'] if kind == 'caddy' else []
+                if scenario in ('absent', 'missing'):
+                    addresses = addresses[:1] if scenario == 'missing' else []
+                if scenario == 'trace':
+                    addresses += ['0.0.0.0:9445']
+                if scenario == 'ipv6':
+                    addresses[0] = '[::]:9443'
+                peer = 456 if scenario == 'foreign' else 123
+                return ''.join(f'LISTEN 0 128 {address} *:* users:(("fixture",pid={peer},fd=12))\n' for address in addresses).encode()
+            if argv == ('ss', '-H', '-lunp'):
+                return b'UNCONN 0 0 *:9443 *:* users:(("fixture",pid=123,fd=13))\n' if scenario == 'udp' else b''
+            if argv == ('ss', '-H', '-lxnp'):
+                return ''.join(f'u_str LISTEN 0 32 /run/dragontools-ingress/{signal}.sock 0 * 0 users:(("python3",pid=123,fd=4))\n' for signal in ('metrics', 'logs')).encode()
+            raise AssertionError(argv)
+        def fixture_open(path, *_):
+            if path.endswith('/cmdline'):
+                return io.BytesIO((command + (' bad' if scenario == 'arguments' else '')).replace(' ', '\0').encode() + b'\0')
+            if path.endswith('/exe'):
+                return io.BytesIO(b'corrupt' if scenario == 'checksum' else binary)
+            raise AssertionError(path)
+        def metadata(path):
+            directory = not path.endswith('.sock')
+            mode = (stat.S_IFDIR | 0o750) if directory else (stat.S_IFSOCK | (0o666 if scenario == 'socket-mode' else 0o660))
+            if scenario == 'socket-symlink' and not directory:
+                mode = stat.S_IFLNK | 0o777
+            return types.SimpleNamespace(st_uid=121 if scenario == 'user' else 120, st_gid=120, st_mode=mode)
+        with patch('subprocess.check_output', side_effect=output), patch('pwd.getpwnam', return_value=account), \
+             patch('os.path.isdir', return_value=True), patch('os.stat', side_effect=metadata), \
+             patch('os.lstat', side_effect=metadata), patch('os.path.lexists', return_value=scenario != 'missing'), \
+             patch('socket.create_connection', return_value=contextlib.nullcontext()):
+            return entrypoint(CHECKS, ['checks.py', 'active', json.dumps(spec)], {'open': fixture_open})
+
+    def test_caddy_exact_tcp_listeners_and_private_auth_sockets(self):
+        for kind in ('caddy', 'ingestion'):
+            with self.subTest(kind=kind):
+                self.assertEqual(self.run_ingress(kind), 0)
+                for scenario in ('absent', 'missing'):
+                    self.assertEqual(self.run_ingress(kind, scenario), 75)
+                for scenario in ('trace', 'udp', 'arguments', 'user'):
+                    self.assertEqual(self.run_ingress(kind, scenario), 1)
+        for scenario in ('foreign', 'ipv6', 'checksum'):
+            self.assertEqual(self.run_ingress('caddy', scenario), 1)
+        for scenario in ('socket-mode', 'socket-symlink'):
+            self.assertEqual(self.run_ingress('ingestion', scenario), 1)
 
 
 class Signals(unittest.TestCase):

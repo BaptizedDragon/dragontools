@@ -12,7 +12,7 @@ fn rejection(ssl: *const c.mbedtls_ssl_context, fallback: anyerror) anyerror {
         else => fallback,
     };
 }
-pub fn health(a: std.mem.Allocator, fd: c_int, ca_pem: []const u8, cert_pem: []const u8, key_pem: []const u8, hostname: []const u8, host: []const u8, now: i64) !void {
+pub fn health(a: std.mem.Allocator, fd: c_int, ca_pem: []const u8, cert_pem: []const u8, key_pem: []const u8, hostname: []const u8, port: u16, host: []const u8, now: i64) !void {
     var ca = certs.Certificate.parse(a, ca_pem) catch return error.ServerTlsInvalid;
     defer ca.deinit();
     ca.validateCa(now) catch return error.ServerTlsInvalid;
@@ -51,7 +51,7 @@ pub fn health(a: std.mem.Allocator, fd: c_int, ca_pem: []const u8, cert_pem: []c
     defer server.deinit();
     server.verify(&ca, .server, hostname, now, false) catch return error.ServerTlsInvalid;
     dragontools_network_deadline(95);
-    const request = try std.fmt.allocPrint(a, "GET /health HTTP/1.1\r\nHost: {s}:9443\r\nConnection: close\r\n\r\n", .{hostname});
+    const request = try std.fmt.allocPrint(a, "GET /health HTTP/1.1\r\nHost: {s}:{d}\r\nConnection: close\r\n\r\n", .{ hostname, port });
     var sent: usize = 0;
     while (sent < request.len) {
         const n = c.mbedtls_ssl_write(&ssl, request[sent..].ptr, request.len - sent);

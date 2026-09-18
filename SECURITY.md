@@ -32,7 +32,7 @@ trusted. Strict host-key checks remain enabled in both modes. SSH private keys
 remain with the agent or OpenSSH identity file; 1Password itself is optional.
 
 Agent telemetry requires per-host registered mTLS certificates on the separate
-station ingestion listener :9443. Monitored hosts are trusted infrastructure; a
+Caddy listeners :9443 (metrics) and :9444 (logs); :9445 is reserved and closed. Monitored hosts are trusted infrastructure; a
 compromised registered host can submit arbitrary metric content for its own
 authenticated identity; the ingestion route enforces the host label. This does not provide
 hard multi-tenant isolation.
@@ -45,7 +45,7 @@ Blackbox exporter, Alertmanager, vmalert-logs and vmalert-metrics bind loopback 
 normally separate cluster listener. These administrative and probe APIs are
 reachable by target-local users and explicitly established SSH tunnels. The agent ingress listener requires TLS 1.2+ and registered clients, permits only
 fixed write routes plus authenticated health, and keeps raw backends private.
-Operators permit TCP 9443 from monitored hosts; DragonTools changes no firewall.
+Operators permit TCP 9443 (metrics) and 9444 (selected logs) from monitored hosts; DragonTools changes no firewall.
 
 
 Without configured administrator secret references, a fresh Grafana database uses
@@ -82,7 +82,7 @@ The station retains only its root-private CA key and local server key. Client
 P-256 keys are generated only on monitored hosts. The controller transports bounded
 public CSRs and signed certificates, never private keys. A root-private canonical
 machine identity supplies service-owned 0400 copies locally. Strict CSR policy
-fixes the machine CN/URI SAN, CA:FALSE, digitalSignature and clientAuth. The gateway
+fixes the machine CN/URI SAN, CA:FALSE, digitalSignature and clientAuth. The private authorization helper
 requires the exact registered fingerprint and machine identity in addition to TLS
 chain/purpose checks; CA-signed unregistered clients are denied.
 
@@ -214,9 +214,15 @@ run native PKI, malformed corpus, filesystem lifecycle and real local mTLS tests
 on Linux/macOS, cross-build all four controllers and both helpers, and release
 matching binaries. Do not infer trusted security decisions from scraped CVE prose.
 
-Native PKI has no Python/OpenSSL CLI/openssl.cnf dependency. The existing Python
-TLS ingestion gateway remains in its dedicated unprivileged service boundary.
-The helper has no listener; its internal interface accepts only fixed operations,
+Native PKI has no Python/OpenSSL CLI/openssl.cnf dependency. Pinned Caddy v2.11.4
+terminates mTLS; the private Python authorization/normalization helper uses only
+protected Unix sockets. It cannot read CA/server keys and does not terminate TLS.
+Caddy strips caller identity headers and replaces them with verified certificate
+assertions. Registry fingerprint/URI checks and trusted log labels remain enforced;
+CA signature alone is insufficient. Each port has exactly one socket/backend and
+no arbitrary proxy route, Caddy admin API, ACME or unconfigured trace listener.
+The historical public Python gateway is not installed or revived.
+The native enrollment helper has no listener; its internal interface accepts only fixed operations,
 bounded public envelopes and fixed managed paths, never arbitrary command text.
 It keeps CA/server keys on the station and client keys on the host, with root
 canonical state and service-local copies. Protected directories, exclusive private

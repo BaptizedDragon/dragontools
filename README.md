@@ -345,7 +345,7 @@ a safe semantic check, such as `self_scrape_ready`, without exposing remote stde
 or executable commands.
 
 Raw storage APIs have no configured authentication and must remain loopback-only.
-Local users on the target can reach them. Agent ingestion uses a separate authenticated mTLS endpoint on port 9443.
+Local users on the target can reach them. Agent ingestion uses Caddy with registered mTLS on TCP 9443 (metrics) and 9444 (logs). TCP 9445 is reserved and closed.
 There is no public Grafana TLS, firewall management or maintenance timer. Use a
 provider firewall as an outer layer; allow ingestion only from monitored hosts.
 
@@ -802,7 +802,7 @@ service names and instrumentation have not been inspected.
 | --- | --- |
 | `application.name`, `application.environment` | Both required; 1–63 ASCII letters/digits/`_`/`-`, starting with a letter/digit. Lower-case recommended. |
 | `target.ssh_host`, `station.ssh_host` | Required native OpenSSH aliases for administration; no connection credentials. |
-| `station.hostname` | Required DNS hostname for agent mTLS. No scheme, port, path, whitespace, wildcard or IP literal; port is always 9443. |
+| `station.hostname` | Required DNS hostname for agent mTLS. No scheme, port, path, whitespace, wildcard or IP literal; fixed ports are 9443 for metrics and 9444 for logs. |
 | `service.name`, `service.systemd` | Unique service identity and exact canonical `.service` unit; no globs, aliases or journal namespaces. |
 | `service.logs.enabled` | Optional boolean, defaults to `false`. Only enabled units are forwarded. |
 | `service.metrics.url` | Optional private/loopback literal-IP or localhost HTTP(S) URL; no arbitrary DNS, credentials, redirects, query or fragment. |
@@ -850,7 +850,7 @@ and app-side network diagnostics. Application commands never derive it from the
 alias or `ssh -G`: an alias may resolve to a management IP while agents use DNS.
 For example, `[station] ssh_host = "monitoring"` with
 `hostname = "monitoring.baptizeddragon.com"` sends administration through
-`ssh monitoring` and telemetry to `https://monitoring.baptizeddragon.com:9443`.
+`ssh monitoring`, metrics to `https://monitoring.baptizeddragon.com:9443`, and logs to `https://monitoring.baptizeddragon.com:9444`.
 Single-label names such as `monitoring` work only when supplied explicitly.
 Existing application configs must add `hostname`; omission fails before SSH.
 See the [hostname validation record](tests/integration/station-hostname-validation.md)
@@ -909,7 +909,7 @@ Its OpenSSH `HostName` must be a DNS name or IPv4 address reachable from the
 application host; a controller-only jump-host address does not provide an agent
 network route. DragonTools owns the fixed ingestion port. Both hosts require the
 normal station prerequisites (including Python 3 for non-PKI runtime checks); DragonTools does not install OS
-packages or change the firewall. Permit **TCP 9443** from the application host to
+packages or change the firewall. Permit **TCP 9443 for metrics and TCP 9444 for logs** from the application host to
 the station in the operator-managed network firewall.
 
 ```bash
@@ -964,17 +964,57 @@ errors or application traffic. These records are visible in Logs; filter on
 `type=application` for application-only results. Unchanged installer reruns do
 not emit an extra test event.
 
-The station installs a narrow DragonTools Python ingestion service as `dt-ingest`
-on IPv4 TCP **9443**. It requires a registered client certificate and TLS 1.2 or
-newer, and exposes only fixed metrics/log writes plus an authenticated health
-route. Raw VictoriaMetrics/VictoriaLogs stay on loopback; Grafana, Alertmanager and
-VictoriaTraces gain no public route. The station owns its CA and server private
+Application apply installs pinned **Caddy v2.11.4** as `dt-caddy` on IPv4 TCP
+**9443 for metrics** and **9444 for logs**, with TLS 1.2+ and required client
+certificates. Each port has one fixed private Unix-socket upstream. The private
+`dragontools-ingress-auth.service` (`dt-ingest`, Python standard library) checks
+registered fingerprints and exact host identity, normalizes trusted log metadata,
+and forwards only its fixed write route to the corresponding loopback backend.
+It has no TCP listener and cannot read CA/server key storage. This preserves the
+registry authorization that stock Caddy alone cannot enforce. The historical public
+`dragontools-ingestion.service` is not installed or revived. Raw VM/VL remain on
+loopback; Grafana, Alertmanager and VictoriaTraces gain no public route. **9445 is
+reserved for future traces and remains closed.** The station owns its CA and server private
 keys. Each application host generates its own **ECDSA P-256** client key; only a
 bounded public CSR and signed certificate cross SSH through the controller. The
 controller stores neither long-term private key nor a state database. PKI uses
 Zig with statically bundled Mbed TLS; no OpenSSL CLI, Python PKI implementation,
 system Mbed TLS or ambient openssl.cnf is used. Python remains necessary for the
-existing ingestion gateway and unrelated remote service checks.
+private authorization/normalization helper and unrelated remote service checks.
+
+### Caddy deployment and boundaries
+
+Base `monitoring install` installs the eight station components and native helper
+without requiring an application or a TLS hostname. The first `monitoring apply`
+uses explicit `station.hostname` to prepare the private CA/server certificate,
+install the private authorization helper, then install and verify Caddy **before
+client enrollment**. No hostname is inferred from the administrative SSH alias.
+No ACME, public certificate issuance, Caddy admin API, generic proxy path, or
+unconfigured tracing listener is enabled. DNS, provider firewalls and router/NAT
+remain operator prerequisites. Later apps share the same listeners and dynamic
+registry; adding a registration alone does not rewrite or restart Caddy.
+
+Caddy has its own binary/config/unit/certificate restart intent. It reads only
+systemd-provided copies of `ca.crt`, `server.crt`, `server.key`; the CA private key
+never leaves station root storage. Server renewal/hostname SAN updates retain the
+key and restart Caddy, not the private authorization process. Native PKI, Vector
+and vmagent retain their independent renewal/restart/finalization behavior.
+A verification timeout retains pending intent; an unchanged rerun reports
+`No changes required.` without downloads, credential writes or restarts.
+
+Existing historical public `dragontools-ingestion.service` units are refused as
+`legacy_ingress_conflict` and preserved. Migrating such an installation requires
+an operator-coordinated port cutover: the old gateway's logs used 9443 while the
+current logs endpoint is 9444. Do not delete CA/client state or stop a working
+legacy service casually. Existing native PKI and legacy client-key migration
+remain supported after the transport cutover; this command does not automate a
+zero-downtime gateway migration. A station where that historical unit is absent
+needs no legacy service cleanup.
+
+See [the Caddy design and pinned checksums](design.md#caddy-ingress-pins-and-verification)
+and [the two-host integration checklist](tests/integration/README.md).
+The local pinned-Caddy fixture covers mTLS, registry rollout, forged headers,
+fixed ports and request bounds; it is not an Ubuntu/systemd deployment test.
 
 ### Native helper and read-only maintenance
 
@@ -1115,7 +1155,7 @@ adds the requested DNS SAN to the server certificate only when missing, then
 updates agent destinations and verifies the new name. Previously issued DNS/IP
 SANs remain valid for other enrolled hosts (at most 16 managed names; removing
 old names requires a future explicit maintenance operation). A changed server
-certificate restarts ingestion; endpoint changes restart Vector and configured
+certificate restarts Caddy; endpoint changes restart Vector and configured
 vmagent, never unrelated station services. The gateway itself has no hostname
 routing configuration. Equal reruns rewrite no certificate, registration or agent
 configuration. Keep shared-host application configs on the same desired hostname
@@ -1155,24 +1195,25 @@ empty managed bootstrap parents remain safe to reuse.
 This is a private ingestion channel, so DragonTools intentionally uses its own
 CA rather than Let's Encrypt. The station certificate includes its configured
 DNS/IP SAN. Vector checks both certificate and hostname, and vmagent retains
-normal CA/hostname validation. **TCP 9443 must be reachable from monitored hosts.**
+normal CA/hostname validation. **TCP 9443 (metrics) and TCP 9444 (selected logs) must be reachable from monitored hosts.**
 DNS, provider firewalls and router/NAT setup are outside DragonTools. Verification
 checks station service/listener first, then app-side DNS, TCP, server TLS, client
 authentication and the authenticated request. Safe failures include
-`dns_unresolved`, `tcp_unreachable`, `server_tls_invalid`,
-`client_certificate_rejected` and `ingestion_rejected`; no raw remote stderr is
+`dns_unresolved`, `tcp_metrics_unreachable`, `tcp_logs_unreachable`,
+`server_tls_invalid`, `client_certificate_rejected`, `metrics_ingestion_rejected`
+and `logs_ingestion_rejected`; no raw remote stderr is
 printed. The legacy agents command reports the combined DNS/firewall guidance below.
 Application commands display the configured endpoint and distinguish DNS setup
-from TCP 9443/provider-firewall reachability:
+from per-port/provider-firewall reachability:
 
 ```text
-DragonTools does not manage DNS or provider firewalls. Ensure the station hostname resolves and TCP 9443 is allowed.
+DragonTools does not manage DNS or provider firewalls. Ensure the station hostname resolves and TCP 9443 (metrics) and, when logs are selected, TCP 9444 (logs) are allowed.
 ```
 
 The controller, station/application roots, local OpenSSH configuration and CA
 remain trusted. A compromised registered host can submit arbitrary metric content
 for its authenticated host; mTLS is not metric-content validation or hard tenant
-isolation. The gateway still overrides forged host labels and enforces registered
+isolation. The private helper overrides forged host labels and enforces registered
 log service/application identities.
 
 Vector uses two bounded disk buffers, **268435488 bytes per sink** (upstream's
@@ -1242,7 +1283,7 @@ crypto, controller and native-process evidence from that remaining host gate.
 | Telegram | Optional configured SecretRefs; explicit `notify-test`, never automatic tests |
 | Vector / vmagent | Implemented selected logs/host metrics and optional app metrics |
 | OTel Collector | Unavailable; traces agent deferred |
-| Agent ingestion | Registered client mTLS on station TCP 9443; fixed write routes only |
+| Caddy ingress | v2.11.4; registered mTLS on IPv4 9443 metrics / 9444 logs; private authorization helper; 9445 closed |
 | Monitoring firewall / public Grafana TLS | Unavailable |
 
 `--service` and `--metrics-target` are repeatable. Admin-IP, public TLS and 1Password private-key

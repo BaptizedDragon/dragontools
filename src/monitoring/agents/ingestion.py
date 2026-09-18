@@ -1,17 +1,21 @@
 # Managed by DragonTools
-"""Bounded mTLS ingestion only. No request, peer, payload or exception logging."""
-import hashlib
+"""Private Caddy authorization/normalization sockets, never a public TLS server.
+
+Caddy validates TLS and overwrites all identity headers. Socket directory 0750
+and sockets 0660 permit only dt-ingest and Caddy (supplementary dt-ingest group).
+No request, peer, payload or exception logging. Each socket has one fixed backend.
+"""
 import http.client
 import http.server
 import json
 import os
 import re
 import socket
-import ssl
 import stat
 import threading
 import time
 import urllib.parse
+import socketserver
 
 BASE = "/etc/dragontools/ingestion"
 BODY_LIMIT = 4 * 1024 * 1024
@@ -21,17 +25,24 @@ ROOT = 0
 REGISTRY_LIMIT = 393216
 
 
-def registered_peer(certificate, registry, peer):
-    # The TLS context has already verified chain, dates and clientAuth purpose.
-    # A private-CA signature alone is never application authorization.
-    fingerprint = hashlib.sha256(certificate).hexdigest()
-    subjects = [value for rdn in peer.get("subject", ()) for key, value in rdn if key == "commonName"]
-    if len(subjects) != 1 or not re.fullmatch(r"dt-[0-9a-f]{32}", subjects[0]):
-        raise ValueError("Unregistered identity")
-    host = subjects[0]
-    identity = "dragontools://hosts/" + host
-    sans = peer.get("subjectAltName", ())
-    modern_identity = tuple(sans) == (("URI", identity),)
+def registered_peer(headers, registry):
+    # Chain, validity and clientAuth have been checked by pinned Caddy. These
+    # headers are trusted only on our permission-protected Unix sockets; Caddy
+    # replaces every one (including empty SANs), never appends caller input.
+    def field(name):
+        values = headers.get_all('X-DragonTools-' + name, [])
+        if len(values) != 1 or len(values[0]) > 256:
+            raise ValueError('Invalid peer assertion')
+        return values[0]
+    subject, fingerprint = field('Subject'), field('Fingerprint')
+    if not re.fullmatch(r'CN=dt-[0-9a-f]{32}', subject) or not re.fullmatch(r'[0-9a-f]{64}', fingerprint):
+        raise ValueError('Invalid peer assertion')
+    host = subject[3:]
+    identity = 'dragontools://hosts/' + host
+    uri = field('URI')
+    extra = any(field(key) for key in ('Other-URI', 'DNS', 'IP', 'Email'))
+    modern_identity = uri == identity and not extra
+    legacy_identity = not uri and not extra
     # Direct lookup stays bounded even as host registrations grow. Entries are
     # root-owned; the unprivileged listener never mutates registration.
     path = os.path.join(registry, host + ".json")
@@ -59,7 +70,7 @@ def registered_peer(certificate, registry, peer):
         if "certificate_identity" in value:
             if value["certificate_identity"] == identity and modern_identity:
                 return value
-        elif not sans:
+        elif legacy_identity:
             # Exact active fingerprint plus the previous CN-only format is the
             # sole legacy exception. Enrollment replaces it after verification.
             return value
@@ -134,7 +145,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if self.path != "/health":
                 self.reply(405)
                 return
-            registered_peer(self.connection.getpeercert(binary_form=True), self.server.registry, self.connection.getpeercert())
+            registered_peer(self.headers, self.server.registry)
             self.reply(204)
         except Exception:
             self.reply(403)
@@ -150,7 +161,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         upstream = None
         try:
-            if self.path not in ("/api/v1/write", "/insert/jsonline"):
+            if self.path != self.server.route:
                 self.reply(404)
                 return
             if self.headers.get_all("Transfer-Encoding") or self.headers.get_all("Expect"):
@@ -164,7 +175,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not 0 < size <= BODY_LIMIT:
                 self.reply(413)
                 return
-            identity = registered_peer(self.connection.getpeercert(binary_form=True), self.server.registry, self.connection.getpeercert())
+            identity = registered_peer(self.headers, self.server.registry)
             body = self.rfile.read(size)
             if len(body) != size:
                 self.reply(400)
@@ -174,7 +185,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.reply(400)
                     return
                 body = log_body(body, identity)
-                port = self.server.logs_port
+                port = self.server.upstream_port
                 path = "/insert/jsonline?_stream_fields=" + ("application,environment,host,service" if identity.get("applications") else "host,service") + "&_time_field=timestamp&_msg_field=message"
                 headers = {"Content-Type": "application/stream+json"}
             else:
@@ -182,7 +193,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.reply(400)
                     return
                 bounded_snappy(body)
-                port = self.server.metrics_port
+                port = self.server.upstream_port
                 # v1.151.0 appends extra_labels after submitted labels and
                 # lib/storage/metric_name.go sortTags keeps the last duplicate.
                 # The station's default sortLabels=false preserves that order.
@@ -203,16 +214,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 upstream.close()
 
 
-class Server(http.server.ThreadingHTTPServer):
+class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     daemon_threads = True
     request_queue_size = 32
-    allow_reuse_address = True
+    slots = threading.BoundedSemaphore(CONCURRENCY)
 
-    def __init__(self, address, tls, registry, metrics_port=8428, logs_port=9428):
-        self.tls, self.registry = tls, registry
-        self.metrics_port, self.logs_port = metrics_port, logs_port
-        self.slots = threading.BoundedSemaphore(CONCURRENCY)
+    def __init__(self, address, registry, signal, upstream_port=None):
+        if signal not in ('metrics', 'logs'):
+            raise ValueError('Unsupported signal')
+        self.registry = registry
+        self.route = '/api/v1/write' if signal == 'metrics' else '/insert/jsonline'
+        self.upstream_port = upstream_port or (8428 if signal == 'metrics' else 9428)
+        # Never unlink an unexpected path. systemd owns and cleans RuntimeDirectory.
         super().__init__(address, Handler)
+        os.chmod(address, 0o660)
 
     def process_request(self, request, address):
         if not self.slots.acquire(blocking=False):
@@ -227,10 +242,7 @@ class Server(http.server.ThreadingHTTPServer):
     def process_request_thread(self, request, address):
         timer = None
         try:
-            # TLS handshake and a slow body both consume a bounded worker and
-            # share one wall-clock deadline; a slow trickle cannot extend it.
             request.settimeout(TIMEOUT)
-            request = self.tls.wrap_socket(request, server_side=True, do_handshake_on_connect=False)
             def expire():
                 try:
                     request.shutdown(socket.SHUT_RDWR)
@@ -239,7 +251,6 @@ class Server(http.server.ThreadingHTTPServer):
             timer = threading.Timer(TIMEOUT, expire)
             timer.daemon = True
             timer.start()
-            request.do_handshake()
             super().process_request_thread(request, address)
         except Exception:
             request.close()
@@ -252,18 +263,14 @@ class Server(http.server.ThreadingHTTPServer):
         pass
 
 
-def context(base):
-    tls = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-    tls.minimum_version = ssl.TLSVersion.TLSv1_2
-    tls.verify_mode = ssl.CERT_REQUIRED
-    tls.load_verify_locations(base + "/ca.crt")
-    tls.load_cert_chain(base + "/server.crt", base + "/server.key")
-    return tls
-
-
-if __name__ == "__main__":
-    # The systemd unit additionally discards both streams. No raw traceback escapes.
+if __name__ == '__main__':
+    # The service has no server/CA key access and no TCP listener. Only the two
+    # fixed Caddy upstream sockets exist; paths/ports cannot be supplied by users.
     try:
-        Server(("0.0.0.0", 9443), context(BASE + "/server"), BASE + "/registry").serve_forever()
+        metrics = Server('/run/dragontools-ingress/metrics.sock', BASE + '/registry', 'metrics')
+        logs = Server('/run/dragontools-ingress/logs.sock', BASE + '/registry', 'logs')
+        thread = threading.Thread(target=metrics.serve_forever, daemon=True)
+        thread.start()
+        logs.serve_forever()
     except Exception:
         raise SystemExit(1)

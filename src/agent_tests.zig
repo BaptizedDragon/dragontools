@@ -527,7 +527,7 @@ test "native backend accepts existing OpenSSL station and host bundles byte-for-
     try active.object.put(sc.store.a, "certificate_pem", j.string(cert));
     try active.object.put(sc.store.a, "certificate_identity", j.string(try pki.profile.identity(sc.store.a, host)));
     _ = try station.saveRegistry(sc, host, active);
-    try sc.store.unlink(f.state ++ "/ingestion-restart-required");
+    try sc.store.unlink(f.state ++ "/caddy-restart-required");
     try std.testing.expect(!try station.ensure(sc, value));
     try station.verify(sc, value);
     try std.testing.expectEqualStrings("unchanged", try j.field(try client.prepare(ac, host, "station.example", try station.inspect(sc, host, "station.example")), "action"));
@@ -536,7 +536,7 @@ test "native backend accepts existing OpenSSL station and host bundles byte-for-
     try std.testing.expectEqualStrings(@embedFile("pki/fixtures/openssl-ca.crt"), try bytes(sc, f.base ++ "/pki/ca/ca.crt"));
     try std.testing.expectEqualStrings(@embedFile("pki/fixtures/openssl-server.crt"), try bytes(sc, f.base ++ "/server/server.crt"));
     try std.testing.expect(f.equal(values, (try client_store.inspectRoot(ac, host, "station.example", false)).?));
-    try std.testing.expect(!try sc.store.exists(f.state ++ "/ingestion-restart-required"));
+    try std.testing.expect(!try sc.store.exists(f.state ++ "/caddy-restart-required"));
     try std.testing.expectEqual(@as(usize, 0), af.services.mutations);
 }
 
@@ -637,4 +637,8 @@ test "native CA maintenance retains exit 87 and existing root with diagnostics e
     try std.testing.expectEqual(@as(u8, 87), @import("agent/protocol.zig").exitCode(err));
     try std.testing.expectEqual(diagnostics.AgentError.CaMaintenanceRequired, diagnostics.failure(stage, err).reason);
     try std.testing.expect(f.equal(root, try station.loadCa(ctx)));
+}
+
+test {
+    _ = @import("agent/request.zig");
 }

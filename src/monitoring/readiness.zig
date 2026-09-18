@@ -5,6 +5,9 @@ const install = @import("install.zig");
 
 pub const Check = enum {
     managed_state,
+    caddy_listener,
+    caddy_service,
+    legacy_ingress_conflict,
     application_ownership,
     plugin_integrity,
     service_active,
@@ -23,6 +26,10 @@ pub const Check = enum {
     secure_endpoint,
     dns_unresolved,
     tcp_unreachable,
+    tcp_metrics_unreachable,
+    tcp_logs_unreachable,
+    metrics_ingestion_rejected,
+    logs_ingestion_rejected,
     server_tls_invalid,
     client_certificate_rejected,
     ingestion_rejected,

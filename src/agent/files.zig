@@ -245,7 +245,7 @@ pub const Store = struct {
         try self.syncDir(dir);
     }
     pub fn mark(self: Store, name: []const u8) !void {
-        try j.require(j.contains(&.{ "ingestion", "vector", "vmagent" }, name));
+        try j.require(j.contains(&.{ "caddy", "vector", "vmagent" }, name));
         const pathname = try std.fmt.allocPrint(self.a, state ++ "/{s}-restart-required", .{name});
         if (try self.exists(pathname)) _ = try self.read(pathname, self.root_owner, 0o600, 64) else try self.write(pathname, "", self.root_owner, 0o600);
     }

@@ -93,7 +93,8 @@ url = "https://orders.example.com/healthz"
     for item in ("doers", "production", "softwarelanding", "monitoring", "Vector", "vmagent",
                  "HighErrorRate", "web", "/etc/dragontools/apps/doers/",
                  "SSH alias: monitoring", "ingestion hostname: monitoring.baptizeddragon.com",
-                 "https://monitoring.baptizeddragon.com:9443"):
+                 "https://monitoring.baptizeddragon.com:9443", "https://monitoring.baptizeddragon.com:9444",
+                 "TCP 9445 is reserved and closed", "Traces: skipped (unsupported)"):
         assert item in implicit_plan, (item, implicit_plan)
     checked += 1
     hostname_line = 'hostname = "monitoring.baptizeddragon.com"'

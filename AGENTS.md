@@ -133,8 +133,19 @@ and named local/private credential-free HTTP(S) targets before SSH; disable scra
 redirects and do not auto-discover ports. Use the committed observed Vector metric
 contract for CPU/memory/filesystem/inode rules; never guess collector names.
 
-Agent ingestion uses the narrow managed mTLS service on IPv4 :9443, dedicated
-`dt-ingest`, fixed write routes and authenticated health only. Keep raw VM/VL and
+Agent ingress uses pinned Caddy v2.11.4 as `dt-caddy`, IPv4 :9443 metrics and
+:9444 logs, each with one fixed Unix-socket upstream. :9445 is reserved and closed
+while tracing is unavailable. No ACME/admin API or generic proxy routing.
+The private `dragontools-ingress-auth.service` as `dt-ingest` retains registered
+fingerprint/URI authorization and trusted metadata normalization; it has no TCP
+listener or CA/server key access. Caddy strips client identity headers and supplies
+verified peer assertions; dt-ingest-owned 0660 sockets provide the local trust boundary.
+Never recreate the historical public `dragontools-ingestion.service`. Existing
+historical units require a coordinated explicit cutover; refuse rather than stop
+them implicitly. First application apply uses explicit station.hostname to prepare
+PKI and verify Caddy before client enrollment; base station install stays independent
+of applications. DNS/provider firewalls/NAT are operator-managed. Fixed write
+routes and authenticated health only. Keep raw VM/VL and
 all administrative services loopback-only. Require a registered client identity;
 station root owns CA/server keys and monitored hosts generate their own P-256
 client keys. Only bounded public CSRs/certificates cross SSH; private client keys
@@ -146,7 +157,7 @@ legacy station client keys only after successful migration. Renew leaf certifica
 at 30 days using the same key; near-expiry CA requires explicit maintenance,
 never automatic rollover. Read-only verify never renews. Equal credentials and
 registration are no-ops.
-Preserve independent ingestion/Vector/vmagent restart intent. The controller and
+Preserve independent Caddy/private-authorization/Vector/vmagent restart intent. Server certificate changes mark only Caddy; registration changes do not restart it. The controller and
 host roots are trusted; this is not hard multi-tenant metric-content isolation.
 The ingestion route must enforce authenticated host identity even on forged input.
 Do not broaden firewall rules or imply automatic CA rollover.

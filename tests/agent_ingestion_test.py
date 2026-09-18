@@ -18,6 +18,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import argparse
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +36,7 @@ def load(name, file):
 
 ingestion = load('agent_ingestion', 'src/monitoring/agents/ingestion.py')
 native = load('native_pki', 'tests/native_pki.py')
+proxy = load('ingress_proxy_fixture', 'tests/ingress_proxy_fixture.py')
 
 
 class Endpoint:
@@ -96,8 +98,8 @@ def serve(server):
     return thread
 
 
-def main():
-    with tempfile.TemporaryDirectory(prefix='dragontools-agent-ingestion-') as temporary, contextlib.ExitStack() as stack:
+def main(binary=None):
+    with tempfile.TemporaryDirectory(prefix='dt-ingress-', dir='/tmp') as temporary, contextlib.ExitStack() as stack:
         root = Path(temporary)
         ca = root / 'station-ca'
         ca.mkdir(mode=0o700)
@@ -131,15 +133,14 @@ def main():
         stack.enter_context(patch.object(ingestion, 'ROOT', os.getuid()))
         backend = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Backend)
         backend_thread = serve(backend)
-        server = ingestion.Server(('127.0.0.1', 0), ingestion.context(str(server_files)), str(registry), metrics_port=backend.server_port, logs_port=backend.server_port)
-        server_thread = serve(server)
+        server = proxy.Harness(root, server_files, registry, ingestion, backend.server_port, binary)
         def tls_for(which):
             tls = ssl.create_default_context(cafile=str(ca / 'ca.crt'))
             if which is not None:
                 tls.load_cert_chain(str(clients[which] / 'client.crt'), str(clients[which] / 'client.key'))
             return tls
-        def request(method, route, body=b'', headers=None, which='active'):
-            connection = http.client.HTTPSConnection('localhost', server.server_port, context=tls_for(which), timeout=3)
+        def request(method, route, body=b'', headers=None, which='active', signal=None):
+            connection = http.client.HTTPSConnection('localhost', server.ports[signal or ('logs' if route.startswith('/insert/') else 'metrics')], context=tls_for(which), timeout=5)
             try:
                 connection.request(method, route, body, headers or {})
                 response = connection.getresponse()
@@ -153,10 +154,21 @@ def main():
                 unavailable.bind(('127.0.0.1', 0))
                 # Bound but not listening: refused without a race for a free port.
                 assert endpoint.check('localhost', str(clients['active']), unavailable.getsockname()[1]) == 92
-            assert request('GET', '/health') == 204
+            health_status = request('GET', '/health')
+            assert health_status == 204, health_status
+            assert request('GET', '/health', signal='logs') == 204
+            assert request('POST', '/insert/jsonline', b'{}', signal='metrics') == 404
+            assert request('POST', '/api/v1/write', b'test', signal='logs') == 404
             assert endpoint.check('localhost', str(clients['active']), server.server_port) == 0
+            assert endpoint.check('localhost', str(clients['active']), server.ports['logs']) == 0
             # CA signature alone, mismatched identities and extra identities fail.
             assert request('GET', '/health', which='unregistered') == 403
+            # Peer assertions come only from the TLS terminator. A client may
+            # neither impersonate a registered fingerprint nor replace its SAN.
+            forged_headers = {'X-DragonTools-Fingerprint': fingerprint(clients['active']),
+                              'X-DragonTools-Subject': 'CN=' + HOST, 'X-DragonTools-URI': IDENTITY}
+            assert request('GET', '/health', headers=forged_headers, which='unregistered') == 403
+            assert request('GET', '/health', headers={'X-DragonTools-URI': 'forged'}) == 204
             assert request('GET', '/health', which='other_host') == 403
             for which in ('wrong_san', 'extra_san'):
                 register(which)
@@ -212,18 +224,31 @@ def main():
             assert request('POST', '/api/v1/write', b'test', {'Content-Encoding': 'zstd'}) == 400
             assert request('POST', '/api/v1/write', b'\xff\xff\xff\xff\x0f', {'Content-Encoding': 'snappy'}) == 403
             assert request('PUT', '/health') == 405
-            assert request('POST', '/insert/jsonline', b'test', {'Content-Length': str(ingestion.BODY_LIMIT + 1)}) == 413
+            try:
+                payload = b'x' * (ingestion.BODY_LIMIT + 1) if binary else b'test'
+                status = request('POST', '/insert/jsonline', payload, {'Content-Length': str(ingestion.BODY_LIMIT + 1)})
+                # Caddy may receive the helper's early 413 or encounter its
+                # closed socket while forwarding the rejected body (502).
+                # Both must be immediate failures with zero backend writes.
+                assert status in (413, 502), status
+            except (BrokenPipeError, ConnectionResetError, ssl.SSLEOFError):
+                # An HTTP server may close immediately on rejecting this body.
+                # Timeout/success are never accepted, and no backend sees it.
+                pass
             assert len(Backend.requests) == count
-            for name, value in (('Content-Length', '4'), ('Transfer-Encoding', 'chunked')):
-                connection = http.client.HTTPSConnection('localhost', server.server_port, context=tls_for('active'), timeout=3)
+            for name, value in (('Content-Length', '5'), ('Transfer-Encoding', 'chunked')):
+                connection = http.client.HTTPSConnection('localhost', server.ports['logs'], context=tls_for('active'), timeout=5)
                 connection.putrequest('POST', '/insert/jsonline')
                 connection.putheader('Content-Length', '4')
                 connection.putheader(name, value)
-                connection.endheaders(b'test')
+                # Complete invalid chunk framing gives Caddy an immediate parse
+                # failure; an unfinished body would correctly await its deadline.
+                connection.endheaders(b'Z\r\ntest\r\n0\r\n\r\n' if name == 'Transfer-Encoding' else b'test')
                 response = connection.getresponse()
-                assert response.status == 400
+                assert response.status in (400, 502), (name, response.status)
                 response.read()
                 connection.close()
+            assert len(Backend.requests) == count
             app = dict(name='doers', environment='production', services=[dict(name='web', systemd='one.service', logs=True, metrics_url=None)])
             registered = dict(registration, services=['one.service'], applications=[app])
             forged = b'{"journal_unit":"one.service","service":"forged","application":"forged","environment":"forged","host":"forged"}'
@@ -232,14 +257,14 @@ def main():
             record.chmod(0o600)
             assert request('GET', '/health') == 403
         finally:
-            server.shutdown()
+            server.close()
             backend.shutdown()
-            server.server_close()
             backend.server_close()
-            server_thread.join()
             backend_thread.join()
-    print('Gateway real TLS identity/purpose/expiry/rollout, endpoint diagnostics and fixed-route fixtures passed.')
+    print('PASS: '+('pinned Caddy' if binary else 'TLS proxy fixture')+' + production private sockets: identity, purpose, expiry, rollout, endpoint diagnostics, fixed ports, bounds and trusted labels.')
 
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--caddy')
+    main(parser.parse_args().caddy)

@@ -65,7 +65,7 @@ pub fn renderWithCredentials(a: std.mem.Allocator, configured: bool) ![]const u8
         "Grafana access: SSH port forwarding only; public Grafana HTTPS/TLS and firewall management are unavailable.\n\n" ++
         "Safe rerun: inspect actual state, resume pending activation, and verify before finalization. Healthy unchanged services are not restarted; unchanged valid binaries are not downloaded. No controller state database.\n" ++
         "Host metric rules use verified Vector contracts; systemd-service state alerts remain deferred.\n" ++
-        "Application-host logs/metrics use monitoring agents with authenticated mTLS ingestion on station :9443; station install alone does not install agents.\n" ++
+        "Application monitoring apply adds Caddy mTLS :9443 metrics / :9444 logs using explicit station.hostname; :9445 stays closed. Station install alone does not install ingress or agents.\n" ++
         unavailable ++
         "No remote operations performed.\n", .{
         vm.version,

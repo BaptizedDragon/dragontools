@@ -1,7 +1,7 @@
 const std = @import("std");
 const targets = @import("targets.zig");
 const remote = @import("../../system/remote.zig");
-pub const Component = enum { application_host, station, ingestion, journald, vector, vmagent, signals, host_rules };
+pub const Component = enum { application_host, station, ingestion, journald, vector, vmagent, signals, host_rules, caddy };
 pub const Report = struct {
     component: Component = .application_host,
     state: @import("../install.zig").Report = .{},

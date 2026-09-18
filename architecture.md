@@ -104,8 +104,9 @@ HTTP/HTTPS targets <--- blackbox_exporter 0.28.0 [127.0.0.1:9115]
                               |
                          Telegram [optional outbound HTTPS]
 
-PUBLIC INBOUND: SSH :22 from administrators; agent ingestion :9443 from monitored
-hosts after agent registration (operator-managed firewall, mTLS required).
+PUBLIC INBOUND: SSH :22 from administrators; Caddy :9443 metrics / :9444 logs
+from registered monitored hosts (operator-managed firewall, mTLS required).
+Reserved :9445 remains closed; tracing agents are unavailable.
 ```
 
 The separate agent workflow adds the mTLS ingestion and logs/metrics path below.
@@ -435,7 +436,7 @@ Application configuration separates `station.ssh_host` (administrative OpenSSH
 alias) from required `station.hostname` (DNS-only network/TLS identity). Application
 dispatch never runs `ssh -G` to choose ingestion identity. Only the hostname enters
 registration, agent URLs, server SAN issuance and app-side network diagnostics;
-the port remains 9443. Plans and read-only status/verify show both identities.
+the fixed ports are 9443 for metrics and 9444 for logs. Plans and read-only status/verify show both identities.
 
 Each station namespace `/etc/dragontools/apps/<application>/` has an immutable
 application/environment/machine binding, an ownership manifest and generated
@@ -485,9 +486,12 @@ OpenSSH aliases ----------->   systemd + selected units          systemd
                                host_metrics + internal_metrics -+|
                                app /metrics -> vmagent v1.152.0 -+|
                                                                 v
-                                            ingestion [0.0.0.0:9443, mTLS]
-                                               /api/v1/write -> VM:8428
-                                               /insert/jsonline -> VL:9428
+                                            Caddy v2.11.4 [IPv4, mTLS]
+                                             :9443 -> metrics.sock -> VM:8428
+                                             :9444 -> logs.sock    -> VL:9428
+                                             :9445 CLOSED (traces unavailable)
+                                            sockets: private registry auth +
+                                            trusted identity normalization
 
 App-only listeners: Vector telemetry 127.0.0.1:8686; vmagent 127.0.0.1:8429.
 All station backends, Grafana and alert listeners remain loopback-only.
@@ -515,8 +519,8 @@ exporter exposes internal telemetry. vmagent exists only for explicit applicatio
 endpoints, scrapes itself for queue/failure telemetry, disables redirect following
 and uses trusted host/app labels. No port/process discovery or node_exporter exists.
 
-Dedicated accounts and separate restart markers isolate Vector, vmagent and the
-ingestion service. Binary publication is pinned, checksum verified and atomic.
+Dedicated accounts and separate restart markers isolate Vector, vmagent, Caddy
+and the private ingress authorization service. Binary publication is pinned, checksum verified and atomic.
 Unit/config/certificate changes mark only their consumer before publication.
 Actual configuration is checked on each run. Activation, read-only verification
 and finalization remain separate; timeout retains intent. Standalone verify and
@@ -529,14 +533,19 @@ The hosts need synchronized clocks because Vector supplies agent timestamps.
 These use the ordinary 45-second telemetry
 readiness budget, not fixed sleeps. Missing signals fail installation.
 
-The station ingestion service runs as `dt-ingest`, requires TLS 1.2+ and a
-registered client certificate, and permits fixed write routes plus authenticated
-health. It never forwards arbitrary methods, paths, URLs or request headers. Logs
+Caddy runs as `dt-caddy`, requires TLS 1.2+ and a trusted clientAuth certificate,
+and strips caller-supplied identity headers before setting verified certificate
+assertions. Its two fixed Unix-socket upstreams run as `dt-ingest` in the private
+`dragontools-ingress-auth.service`; each permits its own fixed write route and
+authenticated health only. The helper authorizes exact registered fingerprints,
+CN/URI SAN and bounded pending leases. It never forwards arbitrary methods, paths,
+URLs or request headers. Stock Caddy alone does not implement the dynamic registry.
+The helper has no TCP listener or access to private CA/server storage. Logs
 must name a registered service; host identity comes from registration. The metrics
 route supplies the authenticated host label. Raw storage/admin APIs remain on
 loopback, including VictoriaTraces with its extra gRPC listener disabled. Neither
-Grafana nor Alertmanager is exposed. The operator must allow TCP 9443 from
-monitored hosts; DragonTools performs no firewall mutation.
+Grafana nor Alertmanager is exposed. The operator must allow TCP 9443 (metrics)
+and 9444 (selected logs) from monitored hosts; DragonTools performs no firewall mutation.
 
 Private-key ownership follows the hosts, not the controller:
 
@@ -547,9 +556,9 @@ monitoring-client/client.key (P-256)          pki/ca/ca.key (root:root 0400)
   | local restrictive copies                  |
   +-> Vector / vmagent                        +-> narrow CSR signer
   |                                             ^ public CSR over SSH
-  +-- mTLS :9443 ----------------------------> registry + ingestion gateway
-       host CN + URI SAN                      |-> VM 127.0.0.1:8428
-       dragontools://hosts/dt-<machine-id>      +-> VL 127.0.0.1:9428
+  +-- mTLS :9443 / :9444 --------------------> Caddy -> private registry auth
+       host CN + URI SAN                      |-> VM 127.0.0.1:8428 (metrics)
+       dragontools://hosts/dt-<machine-id>      +-> VL 127.0.0.1:9428 (logs)
 
 CONTROLLER: public CSR/certificate orchestration; no long-term private keys
 ```
@@ -662,8 +671,9 @@ Controller + bundled Mbed TLS
   |      | maintenance JSON -> Vector exec -> existing metrics sink
   |      + Vector :8686 loopback; optional vmagent :8429 loopback
   +--> Station: dragontool-agent (local CA/server key, no listener)
-         ^ registered mTLS :9443 (existing Python gateway)
-         +--> VictoriaMetrics :8428 / VictoriaLogs :9428 loopback
+         Caddy :9443 metrics / :9444 logs (IPv4, mTLS; :9445 closed)
+           +--> private Unix-socket authorization/normalization helper
+                   +--> VictoriaMetrics :8428 / VictoriaLogs :9428 loopback
 ```
 
 Maintenance is read-only: Ubuntu numeric update counts, reboot marker, APT

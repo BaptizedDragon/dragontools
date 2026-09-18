@@ -57,7 +57,7 @@ pub fn execute(a: std.mem.Allocator, app: remote.Remote, station: remote.Remote,
         if (service.logs) logs += 1;
         if (service.metrics_url != null) metrics += 1;
     }
-    return std.fmt.allocPrint(a, "{s}{s}host metrics flowing\n{s}\n{s}\nprobes registered: {d}\napplication alerts loaded\nOTel traces: unavailable. No test notification sent.\n", .{
+    return std.fmt.allocPrint(a, "{s}{s}host metrics flowing\n{s}\n{s}\nprobes registered: {d}\napplication alerts loaded\nTraces: skipped (unsupported). No test notification sent.\n", .{
         if (command == .app_apply and report.state.changes == 0) "No changes required.\n" else "",
         report.enrollmentSummary(),
         if (logs > 0) "selected service logs flowing (quiet-service metadata included)" else "selected service logs: disabled",
@@ -67,7 +67,7 @@ pub fn execute(a: std.mem.Allocator, app: remote.Remote, station: remote.Remote,
 }
 
 pub fn stationSummary(a: std.mem.Allocator, value: config.Config) ![]const u8 {
-    return std.fmt.allocPrint(a, "Station:\n  SSH: {s}\n  ingestion: {s}:9443\n", .{ value.station_ssh_host, value.station_hostname });
+    return std.fmt.allocPrint(a, "Station:\n  SSH: {s}\n  metrics: https://{s}:9443\n  logs: https://{s}:9444\n", .{ value.station_ssh_host, value.station_hostname, value.station_hostname });
 }
 
 test "application station summary and SSH transport keep administrative alias separate" {
@@ -77,7 +77,7 @@ test "application station summary and SSH transport keep administrative alias se
     var value = try config.parse(a, config.example);
     defer value.deinit();
     const summary = try stationSummary(a, value);
-    try std.testing.expectEqualStrings("Station:\n  SSH: monitoring\n  ingestion: monitoring.baptizeddragon.com:9443\n", summary);
+    try std.testing.expectEqualStrings("Station:\n  SSH: monitoring\n  metrics: https://monitoring.baptizeddragon.com:9443\n  logs: https://monitoring.baptizeddragon.com:9444\n", summary);
     var ssh: Ssh = .{ .allocator = a, .io = std.testing.io, .options = .{ .command = .agents_install, .ssh_host = value.station_ssh_host } };
     const args = try ssh.argv("true");
     try std.testing.expectEqualStrings("monitoring", args[args.len - 2]);
@@ -105,6 +105,18 @@ pub fn run(init: std.process.Init, options: cli.Options) !void {
         else => unreachable,
     });
     print(init.io, try stationSummary(a, value));
+    if (options.command == .app_apply) {
+        var logs = false;
+        var metrics = false;
+        for (value.services) |service| {
+            logs = logs or service.logs;
+            metrics = metrics or service.metrics_url != null;
+        }
+        print(init.io, "Host metrics: configure Vector shipping through Caddy :9443\n");
+        print(init.io, if (metrics) "Metrics: configure vmagent scrape and mTLS remote write :9443\n" else "Application metrics: not configured\n");
+        print(init.io, if (logs) "Logs: configure Vector journald shipping through Caddy :9444\n" else "Logs: disabled\n");
+        print(init.io, "Traces: skipped (unsupported)\n");
+    }
     const output = execute(a, app.asRemote(), station.asRemote(), &report, value, options.command) catch |err| {
         print(init.io, try std.fmt.allocPrint(a, "Application monitoring failed. Component: {s}. Check: {s}. {s}\n", .{
             @tagName(report.component),
@@ -113,7 +125,11 @@ pub fn run(init: std.process.Init, options: cli.Options) !void {
         }));
         print(init.io, try report.state.credentialDiagnostics(a));
         if (report.state.check == .dns_unresolved) print(init.io, "Monitoring station hostname does not resolve. DragonTools does not manage DNS. Configure the DNS record and rerun the same command.\n");
-        if (report.state.check == .tcp_unreachable) print(init.io, "Monitoring ingestion is unreachable. DragonTools does not manage provider firewalls or network ACLs. Allow TCP 9443 from this monitored host and rerun.\n");
+        if (report.state.check == .tcp_metrics_unreachable or report.state.check == .tcp_logs_unreachable) {
+            const port: u16 = if (report.state.check == .tcp_logs_unreachable) 9444 else 9443;
+            print(init.io, try std.fmt.allocPrint(a, "Monitoring ingestion is not reachable: {s}:{d}.\nDragonTools does not manage DNS or provider firewalls. Ensure the hostname resolves and TCP {d} is permitted from this host.\n", .{ value.station_hostname, port, port }));
+        }
+        if (report.state.check == .legacy_ingress_conflict) print(init.io, "A historical public ingestion unit is still installed. It was preserved. Complete a coordinated migration to the separate Caddy metrics/log ports before applying this configuration.\n");
         if (report.state.check == .client_identity_inconsistent) print(init.io, "The managed client identity is inconsistent. Existing files were preserved; restore a verified local backup or correct conflicting metadata before retrying.\n");
         if (report.state.check == .ca_maintenance) print(init.io, "The private CA requires explicit maintenance. It was not rotated or replaced.\n");
         return err;

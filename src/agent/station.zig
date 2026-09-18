@@ -181,7 +181,7 @@ pub fn ensure(ctx: Context, value: j.Value) !bool {
     if (!try store.exists(server_path)) {
         const values = try newServer(ctx, root, null, endpoint, &.{try pki.San.endpoint(store.a, endpoint)});
         ctx.track(.server_publication);
-        try store.mark("ingestion");
+        try store.mark("caddy");
         try store.createBundle(server_path, ctx.ingestion, 0o750, values, f.marker);
         changed = true;
     }
@@ -208,7 +208,7 @@ pub fn ensure(ctx: Context, value: j.Value) !bool {
         }
         const renewed = try newServer(ctx, root, try f.item(current, "server.key"), origin, names[0..count]);
         ctx.track(.server_publication);
-        try store.mark("ingestion");
+        try store.mark("caddy");
         changed = try store.atomic(server_path ++ "/server.crt", try f.item(renewed, "server.crt"), ctx.ingestion, 0o400, f.base) or changed;
     }
     _ = try verifyServer(ctx, endpoint, false);
