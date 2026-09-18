@@ -859,6 +859,13 @@ for local checks and the remaining disposable-host gate.
 Plan is local and shows the SSH alias, ingestion hostname and full endpoint
 separately, followed by validated signals, probes, alerts and owned paths.
 Apply/verify/status display the configured alias and ingestion hostname/port. Apply verifies recent agent signals, loaded probes and loaded rules.
+Station install/verify require only the healthy station-owned base rule packs:
+`dragontools-probes` and `dragontools-hosts` for metrics, and `dragontools-logs`
+for logs. No registered applications, an absent `/etc/dragontools/apps`, an empty
+app rule glob, and zero rule samples are valid. `monitoring apply` and
+`monitoring app-verify` additionally require only the selected application's
+expected managed rules to be loaded and healthy. Rule readiness uses bounded
+retries after restart; it does not require an alert expression to match samples.
 A failing HTTP target is valid monitoring data; a broken probe pipeline fails.
 Verify/status never resolve station secrets or send test notifications. Live
 alert evaluation remains active independently.

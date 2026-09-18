@@ -1364,6 +1364,15 @@ without copying log messages, request IDs, or secret fields.
 The installed log group evaluates every minute. CriticalLogEvent has no `for:`
 delay and fires on the next matching evaluation; notification delivery remains
 asynchronous through Alertmanager.
+Station readiness checks only the base groups and their exact loaded policy,
+healthy evaluation and freshness. It never enumerates application rule files or
+requires positive `lastSamples`. The optional wildcard may match nothing, even
+when `/etc/dragontools/apps` does not exist. Application apply/app-verify check
+only their own expected managed rules separately. Missing groups or rules are
+retryable startup absence within the 45-second rule deadline; invalid policy is
+a deterministic failure. Application apply retains restart intent until its
+scoped rule readiness succeeds. Units, rule paths and alert definitions are
+unchanged by this separation.
 ErrorBurst avoids alerting for each ordinary error, though overlapping windows can
 keep an alert active. Alertmanager grouping/deduplication controls delivery.
 Generated log rules have stable `severity` and `source` labels and concise

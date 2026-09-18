@@ -2,6 +2,12 @@
 
 ## 0.1.0-dev — unreleased
 
+- Verify station vmalert readiness against its base rule packs independently of
+  application count. Include SecurityUpdatesPending and RebootRequired in the
+  expected host pack; empty app globs and zero samples are valid. Apply/app-verify
+  check only their own application rules with bounded readiness retries, and
+  apply retains evaluator restart intent until that scoped check succeeds.
+
 - Replace Python/OpenSSL CLI PKI with Zig and statically bundled Mbed TLS 4.2.0
   (TF-PSA-Crypto 1.2.0); pin official archive SHA-256
   `2bed9d713b4668f76553b097e72b8aa30bc8f112a940d7ae228d524bbde6ffea`.

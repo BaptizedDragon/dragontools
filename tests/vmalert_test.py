@@ -3,8 +3,11 @@
 import copy
 import datetime
 import importlib.util
+import json
 from pathlib import Path
+import tempfile
 import unittest
+from unittest.mock import patch
 
 path = Path(__file__).resolve().parents[1] / "src/monitoring/vmalert_rules.py"
 spec = importlib.util.spec_from_file_location("vmalert_rules", path)
@@ -46,6 +49,8 @@ def fixture(kind="metrics"):
             ("DiskWarning", '100 * host_filesystem_used_ratio{agent="vector"} >= 70', 300, "warning", "Disk warning on {{ $labels.host }}", "Filesystem {{ $labels.mountpoint }} is above the warning threshold."),
             ("DiskCritical", '100 * host_filesystem_used_ratio{agent="vector"} >= 80', 300, "critical", "Disk critical on {{ $labels.host }}", "Filesystem {{ $labels.mountpoint }} is above the critical threshold."),
             ("InodesCritical", '(100 * host_filesystem_inodes_used_ratio{agent="vector"} >= 90) and (host_filesystem_inodes_total{agent="vector"} > 0)', 300, "critical", "Inodes critical on {{ $labels.host }}", "Filesystem {{ $labels.mountpoint }} is above the inode threshold."),
+            ("SecurityUpdatesPending", 'dragontool_host_security_updates_pending{agent="vector"} > 0', 86400, "warning", "Security updates pending on {{ $labels.host }}", "Ubuntu reports pending security updates for at least 24 hours; review the host maintenance state."),
+            ("RebootRequired", 'dragontool_host_reboot_required{agent="vector"} == 1', 86400, "warning", "Reboot required on {{ $labels.host }}", "Ubuntu has requested a reboot for at least 24 hours; schedule maintenance."),
         ]
         for name, query, duration, severity, summary, description in rows:
             rule = copy.deepcopy(rules[0])
@@ -105,7 +110,7 @@ class Rules(unittest.TestCase):
         for missing in (0, 1):
             value = fixture()
             value["data"]["groups"].pop(missing)
-            with self.assertRaises(ValueError):
+            with self.assertRaises(helper.NotReady):
                 helper.validate(value, "metrics", NOW)
 
     def test_group_policy_and_duplicate_rules_fail(self):
@@ -119,6 +124,78 @@ class Rules(unittest.TestCase):
         value["data"]["groups"][0]["rules"][1] = copy.deepcopy(value["data"]["groups"][0]["rules"][0])
         with self.assertRaises(ValueError):
             helper.validate(value, "logs", NOW)
+
+    def test_zero_applications_and_zero_samples_are_healthy(self):
+        value = fixture()
+        self.assertEqual({g['name'] for g in value['data']['groups']}, {'dragontools-probes', 'dragontools-hosts'})
+        for group in value['data']['groups']:
+            for rule in group['rules']:
+                rule['lastSamples'] = 0
+        helper.validate(value, 'metrics', NOW)
+
+    def test_station_never_discovers_optional_application_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            apps = Path(temporary) / 'apps'
+            for state in ('absent', 'empty', 'one-app'):
+                with self.subTest(state=state):
+                    if state == 'empty':
+                        apps.mkdir()
+                    elif state == 'one-app':
+                        (apps / 'doers').mkdir()
+                        (apps / 'doers/metrics.rules.yml').write_text('{"groups": []}\n')
+                    self.assertEqual(len(list(apps.glob('*/metrics.rules.yml'))), int(state == 'one-app'))
+                    with patch.object(helper, 'APP_ROOT', str(apps), create=True), \
+                         patch.object(helper, 'app_all', side_effect=AssertionError('station readiness must not inspect apps'), create=True):
+                        helper.validate(fixture(), 'metrics', NOW)
+
+    def test_optional_app_group_present_missing_or_unhealthy_does_not_change_station_health(self):
+        for kind in ('logs', 'metrics'):
+            for present in (False, True):
+                value = fixture(kind)
+                if present:
+                    value['data']['groups'].append({'name': 'dragontools-app-doers-' + kind,
+                        'file': '/etc/dragontools/apps/doers/' + kind + '.rules.yml',
+                        'rules': [{'name': 'ServiceProbeFailed', 'health': 'err'}]})
+                helper.validate(value, kind, NOW)
+
+    def test_each_required_base_alert_must_be_present_and_healthy(self):
+        value = fixture()
+        names = {rule['name'] for group in value['data']['groups'] for rule in group['rules']}
+        self.assertEqual(names, {'ServiceProbeFailed', 'CPUHigh', 'MemoryPressure', 'DiskWarning',
+            'DiskCritical', 'InodesCritical', 'SecurityUpdatesPending', 'RebootRequired'})
+        for group_index, group in enumerate(value['data']['groups']):
+            for rule_index, rule in enumerate(group['rules']):
+                for condition in ('missing', 'err', 'unknown'):
+                    with self.subTest(alert=rule['name'], condition=condition):
+                        candidate = copy.deepcopy(value)
+                        rules = candidate['data']['groups'][group_index]['rules']
+                        if condition == 'missing':
+                            rules.pop(rule_index)
+                        else:
+                            rules[rule_index]['health'] = condition
+                        with self.assertRaises(helper.NotReady):
+                            helper.validate(candidate, 'metrics', NOW)
+
+    def test_api_startup_absence_is_retryable_and_success_is_silent(self):
+        class Connection:
+            status = 200
+            def request(self, method, route):
+                self_request.append((method, route))
+            def getresponse(self):
+                return self
+            def read(self, limit):
+                return json.dumps(value).encode()
+            def close(self):
+                pass
+        self_request = []
+        for count, expected in ((0, 75), (1, 75), (2, 0)):
+            value = fixture()
+            value['data']['groups'] = value['data']['groups'][:count]
+            with patch.object(helper.sys, 'argv', ['fixture', 'metrics']), \
+                 patch.object(helper.time, 'time', return_value=NOW), \
+                 patch.object(helper.http.client, 'HTTPConnection', return_value=Connection()):
+                self.assertEqual(helper.main(), expected)
+        self.assertEqual(self_request, [('GET', '/api/v1/rules?exclude_alerts=true')] * 3)
 
 
 if __name__ == "__main__":

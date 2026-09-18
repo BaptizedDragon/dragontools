@@ -136,6 +136,11 @@ fn shell(a: std.mem.Allocator, kind: Kind, script: []const u8) ![]const u8 {
     return remote.shell(a, &.{ "sh", "-eu", "-c", script, "dragontools-vmalert", name(kind) });
 }
 pub fn install(a: std.mem.Allocator, r: remote.Remote, report: *workflow.Report, arch: Arch, kind: Kind) !void {
+    return installWithRuleCheck(a, r, report, arch, kind, null);
+}
+/// Application callers add their own scoped readiness before restart intent is
+/// cleared. Ordinary station installation requires only station-owned rules.
+pub fn installWithRuleCheck(a: std.mem.Allocator, r: remote.Remote, report: *workflow.Report, arch: Arch, kind: Kind, application_check: ?[]const u8) !void {
     // Native file globs must never load an unproven application namespace, even
     // during a station upgrade before the final runtime verification.
     _ = try readiness.deterministic(a, r, report, .application_ownership, try remote.shell(a, &.{ "python3", "-I", "-B", "-c", @embedFile("apps/station_model.py") ++ "\nimport sys\ntry:\n app_all()\nexcept Exception:\n sys.exit(40)\n" }));
@@ -159,6 +164,7 @@ pub fn install(a: std.mem.Allocator, r: remote.Remote, report: *workflow.Report,
     _ = try report.call(r, .unit, try @import("../system/files.zig").writeCommand(a, try std.fmt.allocPrint(a, "/etc/systemd/system/dragontools-{s}.service", .{name(kind)}), try unit(a, kind), marker(kind)));
     _ = try report.call(r, .activate, if (kind == .logs) workflow.activation("vmalert-logs") else workflow.activation("vmalert-metrics"));
     try health(a, r, report, arch, kind);
+    if (application_check) |query| try rulesReady(a, r, report, arch, kind, query);
     _ = try report.call(r, .finalize, try remote.shell(a, &.{ "rm", "-f", marker(kind) }));
 }
 
@@ -222,8 +228,10 @@ pub fn health(a: std.mem.Allocator, r: remote.Remote, report: *workflow.Report, 
     _ = try readiness.deterministic(a, r, report, .managed_state, try remote.shell(a, &.{ "sh", "-eu", "-c", managed, "dragontools-vmalert-managed_state", name(kind), artifact.artifact(arch).binary_sha256, try unit(a, kind), try rules(a, kind), artifact.version }));
     try readiness.poll(a, r, report, .service_active, readiness.active_ms, try runtimeCommand(a, arch, kind, "true", .service_active), readiness.ready);
     try readiness.poll(a, r, report, .http_ready, readiness.http_ms, try runtimeCommand(a, arch, kind, "test -n \"$listeners\" || exit 75\ncurl --disable --noproxy '*' --fail --silent --max-time 5 \"http://127.0.0.1:$port/health\" >/dev/null || exit 75", .http_ready), readiness.ready);
-    const helper = @embedFile("apps/station_model.py") ++ "\n" ++ @embedFile("vmalert_rules.py");
-    const query = try remote.shell(a, &.{ "python3", "-I", "-B", "-c", helper, @tagName(kind) });
+    const query = try remote.shell(a, &.{ "python3", "-I", "-B", "-c", @embedFile("vmalert_rules.py"), @tagName(kind) });
+    try rulesReady(a, r, report, arch, kind, query);
+}
+pub fn rulesReady(a: std.mem.Allocator, r: remote.Remote, report: *workflow.Report, arch: Arch, kind: Kind, query: []const u8) !void {
     try readiness.poll(a, r, report, .rules_ready, readiness.telemetry_ms, try runtimeCommand(a, arch, kind, query, .rules_ready), readiness.ready);
 }
 

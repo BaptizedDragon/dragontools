@@ -275,6 +275,65 @@ class AppStationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.n['validate_application_group'](group, file, spec, NOW)
 
+    def rule_response(self, config, kind):
+        file = self.n['APP_ROOT'] + '/' + config['application'] + '/' + kind + '.rules.yml'
+        groups = []
+        for spec in json.loads(self.n['app_documents'](config)[kind + '.rules.yml'])['groups']:
+            group = dict(name=spec['name'], file=file, type=spec['type'], interval=30, rules=[])
+            for rule in spec['rules']:
+                group['rules'].append(dict(name=rule['alert'], file=file, type='alerting', datasourceType=spec['type'],
+                    query=rule['expr'], duration=self.n['app_duration'](rule['for']) if 'for' in rule else 0,
+                    labels=rule['labels'], annotations=rule['annotations'], health='ok', lastSamples=0,
+                    lastEvaluation=datetime.datetime.fromtimestamp(NOW - 3, datetime.timezone.utc).isoformat(), state='inactive'))
+            groups.append(group)
+        return dict(status='success', data=dict(groups=groups))
+
+    def test_app_verify_requires_own_rules_and_ignores_other_application_readiness(self):
+        self.n['app_publish'](self.config)
+        other = config('other')
+        self.n['app_publish'](other)
+        self.n['app_loader_config'] = lambda: ('matching-loader', 'matching-loader')
+        self.n['time'] = types.SimpleNamespace(time=lambda: NOW)
+        before = self.snapshot(Path(self.temp.name))
+        class Connection:
+            status = 200
+            def request(self, method, route):
+                assert (method, route) == ('GET', '/api/v1/rules?exclude_alerts=true')
+            def getresponse(self):
+                return self
+            def read(self, limit):
+                return json.dumps(response).encode()
+            def close(self):
+                pass
+        for kind in ('logs', 'metrics'):
+            for state, expected in (('ready', 0), ('other-unhealthy', 0), ('missing-group', 75),
+                                    ('missing-rule', 75), ('unhealthy', 75), ('wrong-query', 40)):
+                with self.subTest(kind=kind, state=state):
+                    response = self.rule_response(self.config, kind)
+                    if state == 'other-unhealthy':
+                        extra = self.rule_response(other, kind)['data']['groups'][0]
+                        extra['rules'][0]['health'] = 'err'
+                        response['data']['groups'].append(extra)
+                    elif state == 'missing-group':
+                        response['data']['groups'] = []
+                    elif state == 'missing-rule':
+                        response['data']['groups'][0]['rules'].pop()
+                    elif state == 'unhealthy':
+                        response['data']['groups'][0]['rules'][0]['health'] = 'unknown'
+                    elif state == 'wrong-query':
+                        response['data']['groups'][0]['rules'][0]['query'] = 'up == 0'
+                    with patch.object(sys, 'argv', ['fixture', 'rules-' + kind, json.dumps({'config': self.config})]), \
+                         patch.object(self.n['http'].client, 'HTTPConnection', return_value=Connection()):
+                        self.assertEqual(self.n['app_read_main'](), expected)
+        self.assertEqual(self.snapshot(Path(self.temp.name)), before)
+
+    def test_application_without_rules_accepts_no_application_groups(self):
+        value = config()
+        value['alerts'] = []
+        value['probes'] = []
+        for kind in ('logs', 'metrics'):
+            self.n['validate_application']({'status': 'success', 'data': {'groups': []}}, kind, value, NOW)
+
 
 if __name__ == '__main__':
     output = io.StringIO()

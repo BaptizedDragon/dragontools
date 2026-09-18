@@ -398,6 +398,16 @@ contract; logs evaluates the fixed structured-log pack against VictoriaLogs.
 Remote read/write stores alert state in local VictoriaMetrics, with an in-memory
 write queue and no persistent writable path for either evaluator.
 
+Station rule readiness selects only its fixed base groups, independent of the
+optional application glob. The metrics base requires ServiceProbeFailed plus
+CPUHigh, MemoryPressure, DiskWarning, DiskCritical, InodesCritical,
+SecurityUpdatesPending and RebootRequired. Every required rule must be healthy;
+zero samples and zero applications are valid. Apply/app-verify separately check
+the selected application's expected groups and rules, while preserving manifest
+ownership checks on native glob inputs. Missing groups/rules retry within the
+existing readiness deadline. Apply completes that scoped check before clearing
+the evaluator's restart marker; wrong loaded policy still fails deterministically.
+
 Alertmanager runs without clustering and has only its loopback HTTP listener.
 Without Telegram refs it uses a discard receiver. Configured install resolves the
 bot token/chat ID locally and uses a dedicated protected stdin/file consumer;

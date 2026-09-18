@@ -55,10 +55,10 @@ def app_probe_ready():
         raise NotReady()
 
 
-def app_rules_ready():
-    # Native rule API validator includes the fixed shared packs and all proven
-    # app files, so additional or stale rule groups cannot hide in the response.
-    for kind in ('logs', 'metrics'):
+def app_rules_ready(config, kinds=('logs', 'metrics')):
+    # Station packs are checked separately. Another application's missing or
+    # unhealthy runtime rules must not determine this application's readiness.
+    for kind in kinds:
         connection = http.client.HTTPConnection('127.0.0.1', 8880 if kind == 'logs' else 8881, timeout=5)
         try:
             connection.request('GET', '/api/v1/rules?exclude_alerts=true')
@@ -68,7 +68,7 @@ def app_rules_ready():
             app_require(response.status == 200)
             body = response.read(1048577)
             app_require(len(body) <= 1048576)
-            validate(json.loads(body), kind)
+            validate_application(json.loads(body), kind, config)
         finally:
             connection.close()
 
@@ -94,14 +94,14 @@ def app_read_main():
         elif mode == 'probes':
             app_managed(config)
             app_probe_ready()
-        elif mode == 'rules':
+        elif mode in ('rules-logs', 'rules-metrics'):
             app_managed(config)
-            app_rules_ready()
+            app_rules_ready(config, (mode.removeprefix('rules-'),))
         elif mode == 'status':
             app_managed(config)
             try:
                 app_probe_ready()
-                app_rules_ready()
+                app_rules_ready(config)
                 print('ready', end='')
             except (NotReady, OSError, http.client.HTTPException):
                 print('pending', end='')
@@ -111,6 +111,6 @@ def app_read_main():
     except NotReady:
         return 75
     except (OSError, http.client.HTTPException):
-        return 75 if mode in ('probes', 'rules') else 1
+        return 75 if mode in ('probes', 'rules-logs', 'rules-metrics') else 1
     except Exception:
         return 40
