@@ -233,13 +233,16 @@ def main(fixture):
             def alert_state():
                 group = next(g for g in rules('metrics')['data']['groups'] if g['name'] == 'dragontools-app-doers-metrics')
                 return group['rules'][0]
+            wait(lambda: alert_state()['state'] == 'inactive', 'healthy alert baseline', 90)
             app.shutdown(); app.server_close(); servers.remove(app)
+            # Observe pending first, before separate signal queries. Otherwise
+            # their polling can miss part of the hold on a loaded CI runner.
+            pending = wait(lambda: (r if (r := alert_state())['state'] == 'pending' else None), 'pending alert', 90)
+            assert pending['duration'] == 120 and pending['health'] == 'ok'
             wait(lambda: list(n['stored_states'](expected, True).values()) == ['unhealthy'], 'probe_success=0')
             wait(lambda: query('up' + selector + ' == 0'), 'vmagent failed scrape')
             assert signals.check('app', registration, vm_since)
             assert checked(lambda: n['app_probe_ready']())
-            pending = wait(lambda: (r if (r := alert_state())['state'] == 'pending' else None), 'pending alert', 65)
-            assert pending['duration'] == 120 and pending['health'] == 'ok'
             print('PASS: stopped fixture target has probe_success=0 and up=0; monitoring readiness passes, alert pending for 2m.', flush=True)
             firing = wait(lambda: (r if (r := alert_state())['state'] == 'firing' else None), 'firing alert after configured hold', 180)
             active = datetime.datetime.fromisoformat(firing['alerts'][0]['activeAt'].replace('Z', '+00:00')).timestamp()
