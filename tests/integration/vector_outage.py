@@ -17,7 +17,9 @@ def exercise(vector, caddy, data_dir, request, wait, logs):
     def buffer_size():
         text = request(8686, 'GET', '/metrics').decode()
         rows = [line for line in text.splitlines() if line.startswith('vector_buffer_size_bytes{') and 'component_id="logs"' in line]
-        return max((float(line.rsplit(' ', 1)[1]) for line in rows), default=0)
+        # Prometheus exposition may include a trailing millisecond timestamp.
+        # The value is the first token after the label block, never the last.
+        return max((float(line.split('}', 1)[1].split()[0]) for line in rows), default=0)
     # Keep each line bounded and ordinary info-level; it is synthetic fixture
     # traffic, never an application error or installer-generated event.
     event = dict(_SYSTEMD_UNIT='doers.service', PRIORITY='6', message=json.dumps(dict(
@@ -27,7 +29,7 @@ def exercise(vector, caddy, data_dir, request, wait, logs):
     os.set_blocking(descriptor, False)
     os.kill(caddy.pid, signal.SIGSTOP)
     offset = sent = 0
-    full_since = None
+    last_progress = time.monotonic()
     sizes = []
     deadline = time.monotonic() + 120
     try:
@@ -39,21 +41,25 @@ def exercise(vector, caddy, data_dir, request, wait, logs):
                     count = os.write(descriptor, payload[offset:])
                     sent += count
                     offset = (offset + count) % len(payload)
+                    if count:
+                        last_progress = time.monotonic()
                 except BlockingIOError:
                     pass
             now = time.monotonic()
             if not sizes or now - sizes[-1][0] >= 1:
                 size = buffer_size()
+                assert 0 <= size <= LIMIT + 65536, 'Unexpected buffer gauge value'
                 disk = sum(p.stat().st_size for p in Path(data_dir).rglob('*') if p.is_file())
                 # Two configured disk buffers plus bounded ledger/segment slack.
                 assert disk < 2 * LIMIT + 16 * 1024**2, 'Vector disk exceeded configured budget'
                 sizes.append((now, size, disk, sent))
-                if size >= LIMIT - 1024 * 1024 and full_since is None:
-                    full_since = now
-                if full_since is not None and now - full_since >= 5:
+                # Disk segments awaiting acknowledgement can stop writes below
+                # max_size. Prove a substantial queued backlog and sustained
+                # blocked input, without treating max_size as usable capacity.
+                if size >= LIMIT // 4 and now - last_progress >= 10:
                     # Source progress must stall while the full queue blocks.
                     assert sizes[-1][3] == sizes[-3][3], 'Full buffer did not backpressure stdin'
-                    print('PASS: Vector outage buffer saturated at ' + str(int(size)) +
+                    print('PASS: Vector outage backlog ' + str(int(size)) +
                           ' bytes; data files ' + str(disk) + ' bytes; source backpressure observed.', flush=True)
                     break
             if now >= deadline:

@@ -99,8 +99,38 @@ docker run --rm --network none --read-only --tmpfs /tmp:rw,exec,size=1g \
   python3 -I -B /work/tests/integration/doers_runtime.py /fixture
 ```
 
-All seven process gates above passed. All binaries and temporary localhost
-credentials were supplied read-only; writable state was disposable `/tmp`.
+All seven process gates above passed. The same seven gates also passed on
+Ubuntu 26.04 after changing the fixture to establish an inactive alert baseline
+and observe pending before its other signal queries. This avoids missing the
+pending window; the two-minute hold and production intervals are unchanged.
+All binaries and temporary localhost credentials were supplied read-only;
+writable state was disposable `/tmp`.
+
+The extra outage fixture uses `--outage-only` (baseline signals, then outage) or
+`--outage` (full alert cycle, then outage). It pauses only its local Caddy process,
+attempts continuous ordinary info-log input, and checks bounded data files plus
+sustained source backpressure. It reads the gauge value before an optional
+Prometheus timestamp. The configured maximum includes segment/acknowledgement
+headroom and is not assumed to equal usable queue capacity. Resumption must show
+source progress, a declining backlog and actual queued logs in VictoriaLogs;
+there is no fixed drain-throughput requirement.
+
+The corrected outage gate passed on Ubuntu 26.04 arm64 with this command:
+
+```sh
+docker run --rm --network none --read-only --tmpfs /tmp:rw,exec,size=2g \
+  -v "$PWD:/work:ro" -v /tmp/dragontools-caddy-pipeline:/fixture:ro \
+  -w /tmp dragontools-pki-test:ubuntu26.04 \
+  python3 -I -B /work/tests/integration/doers_runtime.py /fixture --outage-only
+```
+
+Observed backlog: **131,325,192 bytes**; Vector data files: **132,455,328 bytes**.
+Input stopped advancing under backpressure, then resumed with a declining queue
+and queued logs arriving after Caddy resumed, without an agent restart. Earlier
+outage attempts failed because the fixture parsed the optional metric timestamp
+as the gauge, then assumed all configured buffer bytes were usable. Those
+attempts are not counted as successful outage validation. The final Linux CI
+gate runs the full alert cycle and corrected outage check together (`--outage`).
 
 ## Deployment gate still required
 
