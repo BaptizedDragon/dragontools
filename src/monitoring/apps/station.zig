@@ -28,8 +28,15 @@ fn rulesCommand(a: std.mem.Allocator, config: Config, identity: []const u8, kind
 pub fn preflight(a: std.mem.Allocator, r: remote.Remote, report: *workflow.Report, config: Config, identity: []const u8) !void {
     _ = try readiness.deterministic(a, r, report, .application_ownership, try command(a, config, identity, "preflight", false));
 }
+fn mutate(r: remote.Remote, report: *workflow.Report, op: remote.Operation, check: readiness.Check, cmd: []const u8) !void {
+    _ = report.call(r, op, cmd) catch |err| {
+        // A fixed substage survives failures without forwarding remote output.
+        report.check = check;
+        return err;
+    };
+}
 pub fn apply(a: std.mem.Allocator, r: remote.Remote, report: *workflow.Report, arch: host.Arch, config: Config, identity: []const u8) !void {
-    _ = try report.call(r, .config, try command(a, config, identity, "publish", true));
+    try mutate(r, report, .config, .application_publish, try command(a, config, identity, "publish", true));
     // First integration updates generated units once. Exact fixed rule packs are
     // preserved, and each evaluator keeps its own restart/finalization boundary.
     for ([_]vmalert.Kind{ .logs, .metrics }) |kind| {
@@ -37,9 +44,9 @@ pub fn apply(a: std.mem.Allocator, r: remote.Remote, report: *workflow.Report, a
         try vmalert.installWithRuleCheck(a, r, report, arch, kind, try rulesCommand(a, config, identity, kind));
     }
     report.component = .victoriametrics;
-    _ = try report.call(r, .activate, try command(a, config, identity, "activate", true));
+    try mutate(r, report, .activate, .application_scrape_reload, try command(a, config, identity, "activate", true));
     try verify(a, r, report, arch, config, identity);
-    _ = try report.call(r, .finalize, try command(a, config, identity, "finalize", true));
+    try mutate(r, report, .finalize, .application_finalize, try command(a, config, identity, "finalize", true));
 }
 pub fn verify(a: std.mem.Allocator, r: remote.Remote, report: *workflow.Report, arch: host.Arch, config: Config, identity: []const u8) !void {
     _ = try readiness.deterministic(a, r, report, .managed_state, try command(a, config, identity, "managed", false));
@@ -151,4 +158,24 @@ test "station base readiness is independent while application rules gate verific
     try apply(a, fake.asRemote(), &report, .amd64, config, identity);
     try std.testing.expectEqual(@as(usize, 0), report.changes);
     try std.testing.expectEqual(restarts, fake.restarts);
+}
+
+test "application mutation failures retain semantic substage without raw output" {
+    const Fake = struct {
+        fn call(_: *anyopaque, _: remote.Operation, _: []const u8) !remote.Result {
+            return .{ .code = 1, .output = "PRIVATE fixture payload" };
+        }
+    };
+    var context: u8 = 0;
+    const r: remote.Remote = .{ .context = &context, .execute = Fake.call };
+    const operations = [_]remote.Operation{ .config, .activate, .finalize };
+    const checks = [_]readiness.Check{ .application_publish, .application_scrape_reload, .application_finalize };
+    for (operations, checks) |op, check| {
+        var report: workflow.Report = .{};
+        try std.testing.expectError(error.RemoteOperationFailed, mutate(r, &report, op, check, "fixed operation"));
+        try std.testing.expectEqual(check, report.check.?);
+        try std.testing.expectEqual(op, report.phase);
+        try std.testing.expectEqual(@as(usize, 0), report.changes);
+        try std.testing.expectEqualStrings("", try report.credentialDiagnostics(std.testing.allocator));
+    }
 }

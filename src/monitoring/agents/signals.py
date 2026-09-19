@@ -9,14 +9,17 @@ import urllib.parse
 
 def request(port, path, fields):
     conn = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
-    conn.request('POST', path, urllib.parse.urlencode(fields), {'Content-Type': 'application/x-www-form-urlencoded'})
-    response = conn.getresponse()
-    body = response.read(1024 * 1024 + 1)
-    if response.status in (500, 502, 503, 504):
-        raise ConnectionError()
-    if response.status != 200 or len(body) > 1024 * 1024:
-        raise ValueError('invalid query response')
-    return body
+    try:
+        conn.request('POST', path, urllib.parse.urlencode(fields), {'Content-Type': 'application/x-www-form-urlencoded'})
+        response = conn.getresponse()
+        body = response.read(1024 * 1024 + 1)
+        if response.status in (500, 502, 503, 504):
+            raise ConnectionError()
+        if response.status != 200 or len(body) > 1024 * 1024:
+            raise ValueError('invalid query response')
+        return body
+    finally:
+        conn.close()
 
 
 def metric(query):
@@ -31,6 +34,16 @@ def check(mode, registration, since=0):
     def fresh(selector):
         stamp = 'timestamp(' + selector + ')'
         return metric('(' + stamp + ' >= ' + str(float(since)) + ') and (' + stamp + ' > time()-90)')
+    def scrape_ready(labels):
+        # A fresh failed scrape proves vmagent -> station delivery while the
+        # application is down. Missing/stale/pre-restart samples prove nothing.
+        # A successful scrape must still contain real application payload.
+        up = 'up' + labels + '}'
+        if not fresh(up):
+            return False
+        if metric(up + ' == 1'):
+            return fresh(labels + ',__name__!~"up|scrape_.*"}')
+        return metric(up + ' == 0')
     applications = registration.get('applications', [])
     if applications:
         for application in applications:
@@ -60,7 +73,7 @@ def check(mode, registration, since=0):
                     if service['metrics_url'] is None:
                         continue
                     labels = '{host=' + host + ',agent="vmagent"' + identity + ',service=' + json.dumps(service['name'])
-                    if not metric('up' + labels + '} == 1') or not fresh(labels + ',__name__!~"up|scrape_.*"}'):
+                    if not scrape_ready(labels):
                         return False
             else:
                 raise ValueError('invalid signal check')
@@ -89,9 +102,7 @@ def check(mode, registration, since=0):
     if mode == 'app':
         for target in registration['metrics_targets']:
             labels = '{host=' + host + ',agent="vmagent",app=' + json.dumps(target['name'])
-            if not metric('up' + labels + '} == 1'):
-                return False
-            if not fresh(labels + ',__name__!~"up|scrape_.*"}'):
+            if not scrape_ready(labels):
                 return False
         return True
     raise ValueError('invalid signal check')

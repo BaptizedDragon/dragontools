@@ -841,3 +841,40 @@ test "per-signal endpoint diagnostics preserve bounded retries and skip unselect
         }
     }
 }
+
+test "Doers reference enrollment rerun preserves agents certificates and station ingress" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var value = try @import("../../config/application.zig").load(a, std.testing.io, "examples/doers-monitoring.toml");
+    defer value.deinit();
+    try std.testing.expectEqualStrings("softwarelanding", value.target_ssh_host);
+    try std.testing.expectEqualStrings("monitoring", value.station_ssh_host);
+    try std.testing.expectEqualStrings("monitoring.baptizeddragon.com", value.station_hostname);
+    try std.testing.expectEqualStrings("doers", value.application.name);
+    try std.testing.expectEqualStrings("production", value.application.environment);
+    try std.testing.expectEqualStrings("doers.service", value.services[0].systemd);
+    try std.testing.expect(value.services[0].logs);
+    try std.testing.expectEqualStrings("http://127.0.0.1:16005/metrics", value.services[0].metrics_url.?);
+    try std.testing.expectEqualStrings("https://doers.business/healthz", value.probes[0].url);
+    const scopes = [_]model.ApplicationScope{try @import("../apps/dispatch.zig").scope(a, value)};
+    const reference: model.Registration = .{ .host = registration.host, .station = value.station_hostname, .services = &.{"doers.service"}, .metrics_targets = &.{}, .applications = &scopes };
+    var report: model.Report = .{ .application = value.application.name };
+    var fake: Fake = .{ .allocator = a, .report = &report, .station_hostname = value.station_hostname };
+    try install.install(a, fake.asRemote(), fake.asRemote(), &report, reference);
+    const before = fake.mutations;
+    report = .{ .application = value.application.name };
+    try install.install(a, fake.asRemote(), fake.asRemote(), &report, reference);
+    try std.testing.expectEqual(@as(usize, 0), report.state.changes);
+    try std.testing.expectEqual(before, fake.mutations);
+    try std.testing.expectEqual(@as(usize, 1), fake.enrollments);
+    for ([_]model.Component{ .vector, .vmagent }) |kind| {
+        try std.testing.expectEqual(@as(usize, 1), fake.state(kind).restarts);
+        try std.testing.expectEqual(@as(usize, 1), fake.state(kind).credential_writes);
+        try std.testing.expect(!fake.state(kind).pending);
+    }
+    for ([_]model.Component{ .caddy, .ingestion, .host_rules }) |kind| {
+        try std.testing.expectEqual(@as(usize, 0), fake.state(kind).restarts);
+        for (fake.state(kind).commands) |command| try std.testing.expect(command == null);
+    }
+}

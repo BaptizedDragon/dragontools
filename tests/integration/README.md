@@ -613,8 +613,7 @@ zig build
 
 Expected status includes Vector `active`, `enabled`, `log forwarding healthy
 (recent stream identity)`, `host metrics flowing`; configured vmagent reports
-`active`, `enabled`, `configured targets: 1` and `remote write healthy (recent
-application metrics)`. Treat these as expected outputs until observed.
+`active`, `enabled`, `configured targets: 1` and `remote write healthy (fresh scrape telemetry; target may be down)`. Treat these as expected outputs until observed.
 
 1. Query stored station metrics/logs for the machine-ID-derived `dt-<32 hex>`
    host. Inspect the actual CPU/memory/filesystem/inode metric names against

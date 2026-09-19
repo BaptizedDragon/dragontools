@@ -4,6 +4,7 @@ Certificates are generated in this fixture's client directories. No station
 helper receives client private keys and no SSH/real monitoring host is used.
 """
 import contextlib
+import email.message
 import hashlib
 import http.client
 import http.server
@@ -18,6 +19,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import types
 import argparse
 from unittest.mock import patch
 
@@ -99,7 +101,42 @@ def serve(server):
     return thread
 
 
+def early_proxy_rejection():
+    """Force the body-write race, independent of socket scheduling or OS."""
+    for status in (404, 204):
+        handler = object.__new__(proxy.Proxy)
+        handler.connection = types.SimpleNamespace(getpeercert=lambda binary_form=False: b'public fixture' if binary_form else {
+            'subject': ((('commonName', HOST),),), 'subjectAltName': (('URI', IDENTITY),)})
+        handler.headers = email.message.Message()
+        handler.headers['Content-Length'] = '4'
+        handler.rfile = io.BytesIO(b'test')
+        handler.server = types.SimpleNamespace(upstream='fixture.sock')
+        handler.command, handler.path = 'POST', '/rejected'
+        statuses, closed = [], []
+        handler.send_response = statuses.append
+        handler.send_header = lambda *_: None
+        handler.end_headers = lambda: None
+        def rejected(_):
+            raise BrokenPipeError('upstream already replied')
+        connection = types.SimpleNamespace(putrequest=lambda *_: None, putheader=lambda *_: None,
+            endheaders=rejected, getresponse=lambda: types.SimpleNamespace(status=status, read=lambda: b''),
+            close=lambda: closed.append(True))
+        with patch.object(proxy, 'UnixConnection', return_value=connection):
+            if status == 404:
+                handler.forward()
+                assert statuses == [404]
+            else:
+                try:
+                    handler.forward()
+                except BrokenPipeError:
+                    pass
+                else:
+                    raise AssertionError('Broken body write accepted as success')
+        assert closed == [True]
+
+
 def main(binary=None):
+    early_proxy_rejection()
     with tempfile.TemporaryDirectory(prefix='dt-ingress-', dir='/tmp') as temporary, contextlib.ExitStack() as stack:
         root = Path(temporary)
         ca = root / 'station-ca'

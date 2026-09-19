@@ -41,7 +41,7 @@ dragontool monitoring apply
    dragontools-ingestion.service is installed.
    Expected first apply includes
    `host metrics flowing`, `selected service logs flowing (quiet-service metadata included)`,
-   `application metrics flowing`, `probes registered: 1` and
+   `application metrics pipeline verified (fresh scrape telemetry; target may be down)`, `probes registered: 1` and
    `application alerts loaded`. Second apply must include `No changes required.`
    Record PIDs/start timestamps, cert/config hashes and pending markers before and
    after; unchanged apply must not restart services or rewrite credentials.

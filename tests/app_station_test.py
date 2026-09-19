@@ -92,6 +92,32 @@ class AppStationTests(unittest.TestCase):
         self.assertFalse(self.n['app_publish'](self.config))
         self.assertEqual(before, self.snapshot(Path(self.temp.name)))
 
+    def test_probe_removal_changes_only_own_scrape_and_metrics_rules_then_noop(self):
+        self.n['app_publish'](self.config)
+        self.n['app_publish'](config('other'))
+        root = Path(self.temp.name)
+        manual = root / 'manual-probes.yml'
+        rules = root / 'manual.rules.yml'
+        manual.write_text('administrator probe outside app namespaces\n')
+        rules.write_text('administrator rule outside app namespaces\n')
+        station = root / 'prometheus.yml'
+        station.write_text('existing station probes\n')
+        for path in self.n['APP_PENDING'].values():
+            if os.path.exists(path):
+                os.unlink(path)
+        before = self.snapshot(root)
+        self.config['probes'] = []
+        self.assertTrue(self.n['app_publish'](self.config))
+        after = self.snapshot(root)
+        changed = {path for path in before if before[path] != after[path]}
+        self.assertEqual(changed, {'apps/doers/manifest.json', 'apps/doers/scrape.yml', 'apps/doers/metrics.rules.yml'})
+        self.assertEqual(json.loads(self.app_path('scrape.yml').read_bytes()), [])
+        self.assertEqual(json.loads(self.app_path('metrics.rules.yml').read_bytes()), {'groups': []})
+        self.assertEqual({key for key, path in self.n['APP_PENDING'].items() if os.path.exists(path)}, {'metrics.rules.yml', 'scrape.yml'})
+        self.assertEqual(set(Path(self.n['APP_ROOT']).iterdir()), {self.app_path('manifest.json').parent, self.app_path('manifest.json', 'other').parent})
+        self.assertFalse(self.n['app_publish'](self.config))
+        self.assertEqual(after, self.snapshot(root))
+
     def test_alert_probe_and_endpoint_edits_only_dirty_affected_consumers(self):
         self.n['app_publish'](self.config)
         for path in self.n['APP_PENDING'].values():

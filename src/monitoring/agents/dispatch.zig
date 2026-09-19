@@ -90,6 +90,6 @@ pub fn run(init: std.process.Init, options: cli.Options) !void {
     print(init.io, report.enrollmentSummary());
     if (options.command == .agents_install and report.state.changes == 0) print(init.io, "No changes required.\n");
     print(init.io, "Vector\n  active; enabled\n  host metrics flowing\n  selected log stream identities flowing (quiet-service metadata included)\n");
-    print(init.io, if (registration.metrics_targets.len > 0) "vmagent\n  active; enabled\n  application metrics flowing\n" else "vmagent\n  not required (no application metrics targets)\n");
+    print(init.io, if (registration.metrics_targets.len > 0) "vmagent\n  active; enabled\n  application metrics pipeline verified (fresh scrape telemetry; target may be down)\n" else "vmagent\n  not required (no application metrics targets)\n");
     print(init.io, "OTel traces: unavailable. No test errors or notifications generated.\n");
 }

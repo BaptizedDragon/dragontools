@@ -189,6 +189,9 @@ class Signals(unittest.TestCase):
                     body = b'x' * (1024 * 1024 + 1)
                 return types.SimpleNamespace(status=status, read=lambda limit: body[:limit])
 
+            def close(self):
+                pass
+
         with patch('http.client.HTTPConnection', Connection):
             result = entrypoint(SIGNALS, ['signals.py', mode, json.dumps(REGISTRATION), str(SINCE)])
         return result, queries
@@ -208,10 +211,10 @@ class Signals(unittest.TestCase):
             self.assertIn('agent="vector"', query)
         result, queries = self.run_signal('app')
         self.assertEqual(result, 0)
-        self.assertEqual(len(queries), 2)
+        self.assertEqual(len(queries), 3)
         self.assertIn('up{', queries[0])
-        self.assertIn('__name__!~"up|scrape_.*"', queries[1])
-        self.assertIn('agent="vmagent",app="software"', queries[1])
+        self.assertIn('__name__!~"up|scrape_.*"', queries[2])
+        self.assertIn('agent="vmagent",app="software"', queries[2])
 
     def test_station_unavailable_retries_but_invalid_responses_fail_deterministically(self):
         for status in (500, 502, 503, 504):
@@ -237,6 +240,28 @@ class ApplicationSignals(unittest.TestCase):
     def registration(self):
         return dict(REGISTRATION, services=['doers.service'], metrics_targets=[], applications=[dict(name='doers', environment='production', services=[dict(name='web', systemd='doers.service', logs=True, metrics_url='http://127.0.0.1:16005/metrics')])])
 
+    def test_failed_scrape_is_valid_but_stale_absent_and_empty_success_are_not(self):
+        for registration in (REGISTRATION, self.registration()):
+            for up, fresh_up, payload, expected in (
+                    (0, True, False, True), (1, True, True, True),
+                    (1, True, False, False), (0, False, True, False),
+                    (1, False, True, False), (None, False, False, False),
+                    (2, True, True, False)):
+                with self.subTest(application=bool(registration.get('applications')), up=up,
+                                  fresh_up=fresh_up, payload=payload):
+                    functions = self.module()
+                    def metric(query):
+                        if query.startswith('(timestamp(up{'):
+                            self.assertIn(' >= ' + str(float(SINCE)), query)
+                            self.assertIn(' > time()-90)', query)
+                            return fresh_up
+                        if query.startswith('up{'):
+                            return up == (1 if query.endswith(' == 1') else 0)
+                        self.assertIn('__name__!~"up|scrape_.*"', query)
+                        return payload
+                    functions['metric'] = metric
+                    self.assertEqual(functions['check']('app', registration, SINCE), expected)
+
     def test_all_checks_scope_application_environment_and_service(self):
         functions = self.module()
         metrics, logs = [], []
@@ -249,7 +274,7 @@ class ApplicationSignals(unittest.TestCase):
         registration = self.registration()
         for mode in ('host', 'logs', 'app'):
             self.assertTrue(functions['check'](mode, registration, SINCE))
-        self.assertEqual(len(metrics), 5)
+        self.assertEqual(len(metrics), 6)
         self.assertEqual(len(logs), 1)
         for query in metrics:
             self.assertIn('application="doers"', query)

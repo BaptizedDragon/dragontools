@@ -24,6 +24,16 @@ jobs:
           python3 -I -B tools/fetch_caddy_fixture.py --output "$RUNNER_TEMP/dragontools-caddy-2.11.4"
           python3 -I -B tests/agent_ingestion_test.py --caddy "$RUNNER_TEMP/dragontools-caddy-2.11.4"
       - run: python3 -I -B tests/release_test.py
+      - name: Doers reference signals and alert recovery (isolated Linux processes)
+        if: runner.os == 'Linux'
+        timeout-minutes: 12
+        run: |
+          fixture="$RUNNER_TEMP/dragontools-doers"
+          python3 -I -B tests/integration/render_doers.py "$fixture"
+          python3 -I -B tools/fetch_doers_fixture.py --output "$fixture"
+          cp zig-out/bin/dragontool-agent "$fixture/dragontool-agent"
+          python3 -I -B tests/integration/agent_ingestion_pipeline.py --prepare-credentials "$fixture"
+          sudo unshare --net sh -c 'ip link set lo up; exec python3 -I -B tests/integration/doers_runtime.py "$1"' fixture "$fixture"
       - name: Linux helper filesystem lifecycle (temporary paths only)
         if: runner.os == 'Linux'
         run: sudo python3 -I -B tests/helper_install_test.py --fixture "$PWD/zig-out/bin/dragontool-pki-fixture" --agent "$PWD/zig-out/bin/dragontool-agent"

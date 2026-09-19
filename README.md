@@ -875,6 +875,13 @@ app rule glob, and zero rule samples are valid. `monitoring apply` and
 expected managed rules to be loaded and healthy. Rule readiness uses bounded
 retries after restart; it does not require an alert expression to match samples.
 A failing HTTP target is valid monitoring data; a broken probe pipeline fails.
+The same distinction applies to vmagent: fresh `up=0` proves scrape reporting and
+remote delivery while the target is down. Success reports pipeline readiness,
+not application availability. An `up=1` target still needs fresh application payload.
+The [Doers reference validation](tests/integration/doers-validation.md) records
+isolated signal, alert recovery, namespace and rerun evidence and remaining host
+checks. Publication/reload failures identify `application_publish`,
+`application_scrape_reload` or `application_finalize` without raw remote output.
 Verify/status never resolve station secrets or send test notifications. Live
 alert evaluation remains active independently.
 
@@ -1262,8 +1269,10 @@ and the main journald configuration remain untouched. Conflicting later override
 are refused. These bounds do not cover applications writing their own log files.
 
 Install verifies service/configuration/hardening, the secured endpoint, recent
-host metrics, every selected log stream, and each app target's successful scrape
-and recent non-scrape metric. Install/verify require samples newer than the current
+host metrics, every selected log stream, and fresh scrape telemetry for each app
+target. A target reporting `up=1` must also supply a recent non-scrape metric.
+Fresh `up=0` is valid monitoring while the application is down; missing/stale
+`up`, missing payload from an `up=1` target, or an unreachable station still fail. Install/verify require samples newer than the current
 agent process start as well as their freshness windows (90 seconds for metrics,
 two minutes for logs), preventing old data from proving a changed URL works. Keep
 both hosts' clocks synchronized because Vector timestamps originate on the agent.

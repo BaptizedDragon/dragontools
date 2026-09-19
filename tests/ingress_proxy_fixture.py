@@ -61,8 +61,18 @@ class Proxy(http.server.BaseHTTPRequestHandler):
             # Oversize/ambiguous frames are rejected by the real helper before
             # reading. Forward only the header to avoid a blind fixture read.
             body = b'' if size > 4 * 1024 * 1024 or len(self.headers.get_all('Content-Length', [])) > 1 or 'Transfer-Encoding' in self.headers else self.rfile.read(size)
-            connection.endheaders(body)
+            # A real reverse proxy can receive an early route/auth rejection
+            # before finishing its upstream body write. macOS exposes this race
+            # reliably; retain and forward the actual rejection response. An
+            # absent response or a successful status still fails the fixture.
+            write_error = None
+            try:
+                connection.endheaders(body)
+            except BrokenPipeError as error:
+                write_error = error
             response = connection.getresponse()
+            if write_error is not None and response.status < 400:
+                raise write_error
             response.read()
             self.send_response(response.status)
             self.send_header('Content-Length', '0')

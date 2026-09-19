@@ -1173,8 +1173,9 @@ Deterministic binary/configuration/user/hardening/argument/listener errors fail
 without retry. Runtime checks use the common bounded readiness policy (15 seconds
 active, 30 seconds HTTP, 45 seconds signal checks; 500ms first retry then one
 second). Station queries require host samples within 90 seconds, selected log
-streams within two minutes, and each application's `up=1` plus a recent real
-non-scrape metric. Install/verify require these samples to postdate the current
+streams within two minutes, and each application's fresh scrape result. `up=0`
+is valid target-down telemetry; `up=1` additionally requires a recent real
+non-scrape metric. Missing/stale scrape results and empty successful targets fail. Install/verify require these samples to postdate the current
 agent process start, so stale data cannot prove a changed target URL works. Both
 host clocks must be synchronized; Vector uses agent-side timestamps. Install never
 claims success for only local configuration.

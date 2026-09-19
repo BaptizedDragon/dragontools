@@ -471,7 +471,10 @@ The shared Vector host rules preserve application/environment/host grouping;
 application log rules use exact scoped fields and bounded counts/windows. Each
 probe has one default alert or one explicit override. Native probe telemetry with
 `probe_success=0` is a successful monitoring mechanism, not apply failure.
-No notification tests or synthetic application errors run during apply/verify.
+Fresh vmagent `up=0` likewise proves delivery while the target is down; `up=1`
+requires both a fresh scrape result and application payload. Missing/stale samples
+and station outages fail bounded readiness. No notification tests or synthetic
+application errors run during apply/verify.
 
 Dashboards remain unimplemented. Future generated dashboards must use folder
 `DragonTools / <application>` and deterministic UIDs, with explicit ownership.

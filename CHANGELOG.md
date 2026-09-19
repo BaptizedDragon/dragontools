@@ -2,6 +2,17 @@
 
 ## 0.1.0-dev — unreleased
 
+- Accept fresh vmagent failed-scrape telemetry when the application is down;
+  require fresh non-scrape payload on successful targets and reject stale/missing
+  data. Report pipeline readiness independently of application availability.
+- Give app publication, scraper reload and finalization fixed semantic check IDs;
+  do not suggest reinstalling ingress for app namespace/rule failures.
+- Add the production-rendered Doers reference process gate: zero-app station,
+  real pinned Caddy/Vector/vmagent/blackbox/VM/VL/vmalert, quiet logs and trusted
+  labels, the real two-minute alert hold and recovery, scoped probe removal and
+  unchanged publication. Add the isolated Linux gate to CI, retaining shared
+  Linux/macOS tests and a fixture-only early HTTP rejection portability fix.
+
 - Move station CA/server PKI, Caddy and private ingress authorization ownership to
   `monitoring install`. Add `--ingress-hostname` / `[ingress].hostname`, independent
   of SSH; reuse an existing managed endpoint when omitted. Install/verify/status

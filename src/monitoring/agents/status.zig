@@ -33,5 +33,5 @@ fn statusSelected(a: std.mem.Allocator, app: remote.Remote, station: remote.Remo
     const vm_active = try state(a, app, "dragontools-vmagent.service", "is-active");
     const vm_enabled = try state(a, app, "dragontools-vmagent.service", "is-enabled");
     const flowing = try signal(a, station, selected, "app");
-    return std.fmt.allocPrint(a, "{s}vmagent\n  {s}\n  {s}\n  configured targets: {d}\n  remote write {s}\nOTel traces: unavailable.\n", .{ vector, if (vm_active) "active" else "inactive", if (vm_enabled) "enabled" else "disabled", selected.metricsCount(), if (flowing) "healthy (recent application metrics)" else "unverified (targets or station unavailable)" });
+    return std.fmt.allocPrint(a, "{s}vmagent\n  {s}\n  {s}\n  configured targets: {d}\n  remote write {s}\nOTel traces: unavailable.\n", .{ vector, if (vm_active) "active" else "inactive", if (vm_enabled) "enabled" else "disabled", selected.metricsCount(), if (flowing) "healthy (fresh scrape telemetry; target may be down)" else "unverified (no recent telemetry or station unavailable)" });
 }
