@@ -229,6 +229,10 @@ def main(fixture):
             assert not query('fixture_requests_total{application="forged"}')
             assert not signals.check('app', registration, time.time() + 3600)
             print('PASS: Vector host/logs and vmagent metrics traverse real Caddy with trusted labels; quiet logs need no fake error.', flush=True)
+            if '--outage-only' in sys.argv:
+                load('vector_outage', ROOT / 'tests/integration/vector_outage.py').exercise(
+                    vector, ingress.process, root / 'vector', request, wait, logs)
+                return
 
             def alert_state():
                 group = next(g for g in rules('metrics')['data']['groups'] if g['name'] == 'dragontools-app-doers-metrics')

@@ -5,6 +5,8 @@
 - Accept fresh vmagent failed-scrape telemetry when the application is down;
   require fresh non-scrape payload on successful targets and reject stale/missing
   data. Report pipeline readiness independently of application availability.
+- Read the post-handshake TLS client-auth alert before sending HTTP, avoiding
+  OpenSSL write-side EOF races without accepting EOF/timeouts as proof of mTLS.
 - Give app publication, scraper reload and finalization fixed semantic check IDs;
   do not suggest reinstalling ingress for app namespace/rule failures.
 - Add the production-rendered Doers reference process gate: zero-app station,

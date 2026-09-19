@@ -28,13 +28,17 @@ def tls(server, hostname, ports):
         try:
             with socket.create_connection(('127.0.0.1', port), timeout=3) as raw:
                 with context.wrap_socket(raw, server_hostname=hostname) as conn:
-                    conn.sendall(b'GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n')
-                    conn.recv(1)  # TLS 1.3's client-auth alert follows its handshake.
+                    # TLS 1.3's client-auth alert follows the handshake. Read
+                    # it before writing HTTP data: OpenSSL can otherwise expose
+                    # a write-side EOF instead of the authenticated TLS alert.
+                    # A silent peer, ordinary EOF or application data never
+                    # proves mandatory client authentication.
+                    conn.recv(1)
         except ssl.SSLCertVerificationError:
             raise
         except ssl.SSLError as error:
             # TLS 1.3 and TLS 1.2 names are stable SSL alert semantics, not text.
-            if error.reason not in ('TLSV13_ALERT_CERTIFICATE_REQUIRED', 'SSLV3_ALERT_HANDSHAKE_FAILURE'):
+            if getattr(error, 'reason', None) not in ('TLSV13_ALERT_CERTIFICATE_REQUIRED', 'SSLV3_ALERT_HANDSHAKE_FAILURE'):
                 raise
         else:
             raise ValueError('Client authentication not enforced')

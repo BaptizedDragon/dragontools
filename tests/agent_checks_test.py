@@ -231,6 +231,31 @@ class Signals(unittest.TestCase):
         self.assertEqual(self.run_signal('host', oversized=True)[0], 1)
 
 
+class StationTlsProof(unittest.TestCase):
+    def test_only_explicit_client_certificate_alert_proves_mtls(self):
+        namespace = {'__name__': 'fixture'}
+        exec(compile((ROOT / 'src/monitoring/ingress_health.py').read_text(), 'ingress_health.py', 'exec'), namespace)
+        class Alert(ssl.SSLError):
+            reason = 'TLSV13_ALERT_CERTIFICATE_REQUIRED'
+        class WrongAlert(ssl.SSLError):
+            reason = 'TLSV1_ALERT_INTERNAL_ERROR'
+        for outcome in (Alert(), WrongAlert(), ssl.SSLEOFError(), ssl.SSLCertVerificationError(), TimeoutError(), b'', b'H'):
+            with self.subTest(outcome=type(outcome).__name__):
+                def receive(_):
+                    if isinstance(outcome, Exception):
+                        raise outcome
+                    return outcome
+                peer = types.SimpleNamespace(recv=receive, sendall=lambda _: self.fail('write can obscure TLS 1.3 alert'))
+                context = types.SimpleNamespace(wrap_socket=lambda raw, server_hostname: contextlib.nullcontext(peer))
+                with patch('ssl.create_default_context', return_value=context), \
+                     patch('socket.create_connection', return_value=contextlib.nullcontext()):
+                    if isinstance(outcome, Alert):
+                        namespace['tls'](Path('/public-fixture'), 'localhost', (9443, 9444))
+                    else:
+                        with self.assertRaises((ssl.SSLError, TimeoutError, ValueError)):
+                            namespace['tls'](Path('/public-fixture'), 'localhost', (9443, 9444))
+
+
 class ApplicationSignals(unittest.TestCase):
     def module(self):
         namespace = {'__name__': 'fixture'}

@@ -75,13 +75,20 @@ python3 -I -B tests/integration/render_doers.py /tmp/dragontools-caddy-pipeline
 python3 -I -B tools/fetch_doers_fixture.py --output /tmp/dragontools-caddy-pipeline --arch arm64
 ```
 
-Results: **390/390 Zig tests**, **269 CLI checks** (Fish unavailable), **9 signal/
+Results: **390/390 Zig tests**, **269 CLI checks** (Fish unavailable), **10 signal/
 runtime**, **17 app station**, **9 journald lifecycle**, **2 release** tests; vendor
 integrity and version/diagnostic checks passed. The first full macOS run exposed a
 pre-existing race in the test-only TLS proxy: an upstream route rejection can
 arrive before its body write completes. The fixture now reads and requires the
 actual rejection response. Broken writes cannot count as success. Empty stderr
-assertions and production ingress are unchanged.
+assertions and production ingress routing are unchanged.
+
+Linux Actions also exposed a TLS 1.3 write-side EOF in station health: the server
+has already rejected the certificate-less handshake when the verifier writes its
+HTTP request. Health now reads the post-handshake alert first; only the explicit
+certificate-required/handshake-failure alerts count. Ordinary EOF, unexpected
+alerts, a silent peer or application data still fail. Real Caddy and the TLS
+stand-in pass on Ubuntu 24.04 and macOS with this change.
 
 The following ran against an existing local Ubuntu 24.04 arm64 fixture image:
 

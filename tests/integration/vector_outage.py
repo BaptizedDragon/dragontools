@@ -53,16 +53,29 @@ def exercise(vector, caddy, data_dir, request, wait, logs):
                 if full_since is not None and now - full_since >= 5:
                     # Source progress must stall while the full queue blocks.
                     assert sizes[-1][3] == sizes[-3][3], 'Full buffer did not backpressure stdin'
+                    print('PASS: Vector outage buffer saturated at ' + str(int(size)) +
+                          ' bytes; data files ' + str(disk) + ' bytes; source backpressure observed.', flush=True)
                     break
             if now >= deadline:
                 raise AssertionError('Vector buffer saturation deadline')
     finally:
         os.kill(caddy.pid, signal.SIGCONT)
-        os.set_blocking(descriptor, True)
     # Finish a partial source line after backpressure releases; stdin stays open.
-    if offset:
-        vector.stdin.write(payload[offset:]); vector.stdin.flush()
-    wait(lambda: buffer_size() < LIMIT // 2, 'Vector buffer drains after station recovery', 90)
+    def finish_line():
+        nonlocal offset
+        if offset:
+            try:
+                offset = (offset + os.write(descriptor, payload[offset:])) % len(payload)
+            except BlockingIOError:
+                return False
+        return offset == 0
+    try:
+        wait(finish_line, 'Vector source resumes after station recovery', 90)
+    finally:
+        os.set_blocking(descriptor, True)
+    # Prove resumed consumption, not an arbitrary throughput benchmark against
+    # shared CI CPUs. Retrying connections and exporter refresh remain bounded.
+    wait(lambda: buffer_size() < sizes[-1][1] - 1024 * 1024, 'Vector buffer drains after station recovery', 90)
     wait(lambda: logs('request_id:="outage-fixture" | limit 1'), 'queued logs arrive after outage', 45)
     assert vector.poll() is None and caddy.poll() is None
     print('PASS: station outage saturates bounded Vector buffer, blocks source reads, and resumes delivery without agent restart.', flush=True)
