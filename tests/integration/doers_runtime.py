@@ -241,7 +241,11 @@ def main(fixture):
             app.shutdown(); app.server_close(); servers.remove(app)
             # Observe pending first, before separate signal queries. Otherwise
             # their polling can miss part of the hold on a loaded CI runner.
-            pending = wait(lambda: (r if (r := alert_state())['state'] == 'pending' else None), 'pending alert', 90)
+            # vmalert's default 30s evaluation delay, 30s query-time alignment
+            # and next 30s evaluation tick can add up to 90s after a sample.
+            # Stopping the target also waits for the next 30s scrape. Keep all
+            # production timings and poll within those bounds plus 15s margin.
+            pending = wait(lambda: (r if (r := alert_state())['state'] == 'pending' else None), 'pending alert', 135)
             assert pending['duration'] == 120 and pending['health'] == 'ok'
             wait(lambda: list(n['stored_states'](expected, True).values()) == ['unhealthy'], 'probe_success=0')
             wait(lambda: query('up' + selector + ' == 0'), 'vmagent failed scrape')
@@ -253,7 +257,7 @@ def main(fixture):
             assert time.time() - active >= 120
             app = application()
             wait(lambda: list(n['stored_states'](expected, True).values()) == ['healthy'], 'probe recovery')
-            wait(lambda: alert_state()['state'] == 'inactive', 'alert resolution', 75)
+            wait(lambda: alert_state()['state'] == 'inactive', 'alert resolution', 105)
             wait(lambda: query('up' + selector + ' == 1') and signals.check('app', registration, vm_since), 'metrics recovery')
             print('PASS: ServiceProbeFailed fired after the real 2m hold, then resolved after target recovery.', flush=True)
 

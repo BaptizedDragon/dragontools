@@ -106,6 +106,15 @@ pending window; the two-minute hold and production intervals are unchanged.
 All binaries and temporary localhost credentials were supplied read-only;
 writable state was disposable `/tmp`.
 
+An Actions run then exposed an undersized recovery deadline in the fixture.
+The pinned evaluator applies a 30-second query delay, aligns query time to the
+30-second group interval, then evaluates on its next tick. That can require up
+to 90 seconds after a recovery sample. The fixture now polls for 105 seconds
+(90 plus 15 seconds of runner margin), and 135 seconds for pending because a
+stopped target must also wait for its next scrape. No production timeout, rule,
+hold duration or evaluation setting changed. See the pinned
+[vmalert scheduling implementation](https://github.com/VictoriaMetrics/VictoriaMetrics/blob/v1.152.0/app/vmalert/rule/group.go).
+
 The extra outage fixture uses `--outage-only` (baseline signals, then outage) or
 `--outage` (full alert cycle, then outage). It pauses only its local Caddy process,
 attempts continuous ordinary info-log input, and checks bounded data files plus
