@@ -55,6 +55,14 @@ pub fn status(a: std.mem.Allocator, r: remote.Remote, report: *install.Report) !
         const result = try report.call(r, .status, "systemctl show dragontools-" ++ entry[1] ++ ".service --property=LoadState,ActiveState,SubState,UnitFileState --no-pager");
         try out.writer.print("{s}: loopback:{d}\n  state: {s}\n  enabled: {s}\n", .{ entry[0].name(), entry[2], state(result), enabled(result) });
     }
+    inline for (.{
+        .{ install.Component.ingress_auth, "ingress-auth", "private Unix sockets" },
+        .{ install.Component.caddy, "caddy", "IPv4 0.0.0.0:9443 metrics / 0.0.0.0:9444 logs" },
+    }) |entry| {
+        report.component = entry[0];
+        const result = try report.call(r, .status, "systemctl show dragontools-" ++ entry[1] ++ ".service --property=LoadState,ActiveState,SubState,UnitFileState --no-pager");
+        try out.writer.print("{s}: {s}\n  state: {s}\n  enabled: {s}\n", .{ entry[0].name(), entry[2], state(result), enabled(result) });
+    }
     try out.writer.writeAll(try @import("scrape.zig").status(a, r, report));
     return out.toOwnedSlice();
 }

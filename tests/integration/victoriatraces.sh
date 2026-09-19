@@ -2,6 +2,7 @@
 # Opt-in lifecycle checks for a disposable supported Ubuntu VM. Never use production.
 set -euo pipefail
 : "${VM_HOST:?Set VM_HOST to a disposable Ubuntu VM}"
+: "${INGRESS_HOSTNAME:?Set the disposable station TLS DNS name (not an SSH alias)}"
 VM_USER="${VM_USER:-root}"
 TOOL="${TOOL:-./zig-out/bin/dragontool}"
 
@@ -83,7 +84,7 @@ REMOTE
 }
 
 install() {
-  "$TOOL" monitoring install --host "$VM_HOST" --user "$VM_USER"
+  "$TOOL" monitoring install --host "$VM_HOST" --user "$VM_USER" --ingress-hostname "$INGRESS_HOSTNAME"
 }
 
 verify() {

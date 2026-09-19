@@ -13,7 +13,8 @@ ssh_host = "softwarelanding"
 [station]
 ssh_host = "monitoring"
 # DNS/firewall are operator-managed: TCP 9443 metrics, 9444 logs; 9445 stays closed.
-# The first apply provisions Caddy with this TLS identity before enrolling clients.
+# Provision this TLS identity with station monitoring install first.
+# Application apply verifies existing Caddy, then enrolls the client.
 hostname = "monitoring.baptizeddragon.com"
 
 [[service]]

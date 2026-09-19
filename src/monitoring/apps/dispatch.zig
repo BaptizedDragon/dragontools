@@ -124,6 +124,7 @@ pub fn run(init: std.process.Init, options: cli.Options) !void {
             if (options.command == .app_apply) "Completed changes may remain; pending intent is preserved. Correct the cause and rerun the same application config." else "This command is read-only; no configuration or restart intent was changed.",
         }));
         print(init.io, try report.state.credentialDiagnostics(a));
+        if (report.component == .ingestion or report.component == .caddy or report.component == .station) print(init.io, "Station ingress is owned by monitoring install. Run monitoring install on the station with its configured --ingress-hostname, then retry. Application apply does not bootstrap or repair base ingress.\n");
         if (report.state.check == .dns_unresolved) print(init.io, "Monitoring station hostname does not resolve. DragonTools does not manage DNS. Configure the DNS record and rerun the same command.\n");
         if (report.state.check == .tcp_metrics_unreachable or report.state.check == .tcp_logs_unreachable) {
             const port: u16 = if (report.state.check == .tcp_logs_unreachable) 9444 else 9443;

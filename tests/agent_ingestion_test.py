@@ -37,6 +37,7 @@ def load(name, file):
 ingestion = load('agent_ingestion', 'src/monitoring/agents/ingestion.py')
 native = load('native_pki', 'tests/native_pki.py')
 proxy = load('ingress_proxy_fixture', 'tests/ingress_proxy_fixture.py')
+station_health = load('station_ingress_health', 'src/monitoring/ingress_health.py')
 
 
 class Endpoint:
@@ -129,7 +130,7 @@ def main(binary=None):
             value.update(fields)
             record.write_text(json.dumps(value))
             record.chmod(0o640)
-        register()
+        # Start the station with an empty registry, before any application.
         stack.enter_context(patch.object(ingestion, 'ROOT', os.getuid()))
         backend = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Backend)
         backend_thread = serve(backend)
@@ -149,6 +150,15 @@ def main(binary=None):
             finally:
                 connection.close()
         try:
+            assert not list(registry.iterdir())
+            station_health.authorization([root / 'metrics.sock', root / 'logs.sock'])
+            station_health.tls(server_files, 'localhost', tuple(server.ports.values()))
+            refused(lambda: station_health.tls(server_files, 'wrong.example', tuple(server.ports.values())))
+            assert request('GET', '/health', which='active') == 403
+            register()
+            # Enrollment changes no Caddy config or listener; station health is
+            # still independent of the new registered client.
+            station_health.tls(server_files, 'localhost', tuple(server.ports.values()))
             assert endpoint.check('/', str(clients['active']), server.server_port) == 91
             with socket.socket() as unavailable:
                 unavailable.bind(('127.0.0.1', 0))

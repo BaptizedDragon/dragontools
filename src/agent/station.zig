@@ -136,11 +136,30 @@ fn newServer(ctx: Context, ca_values: f.Files, existing_key: ?[]const u8, origin
     try values.put(ctx.store.a, "endpoint", origin);
     return values;
 }
+/// Enrollment preparation is read-only: only station install owns CA/server PKI.
 pub fn ensure(ctx: Context, value: j.Value) !bool {
-    const store = ctx.store;
     ctx.track(.station_registration_prepare);
-    try s.registration(store.a, value, null, null);
-    const endpoint = try j.field(value, "station");
+    try s.registration(ctx.store.a, value, null, null);
+    _ = try verifyServer(ctx, try j.field(value, "station"), false);
+    if (try registry(ctx, try j.field(value, "host"), true)) |previous| try s.sameMode(previous, value);
+    return false;
+}
+/// An omitted hostname may reuse only a proven managed server bundle, never SSH.
+pub fn stationEndpoint(ctx: Context, requested: ?[]const u8) ![]const u8 {
+    if (requested) |name| {
+        try s.endpoint(name);
+        return name;
+    }
+    if (!try ctx.store.exists(server_path)) return error.IngressHostnameRequired;
+    const values = try ctx.store.managed(server_path, ctx.ingestion, 0o750, &.{ "ca.crt", "server.crt", "server.key", "endpoint" }, f.marker, true);
+    const name = try f.item(values, "endpoint");
+    try s.endpoint(name);
+    return name;
+}
+pub fn ensureStation(ctx: Context, hostname: ?[]const u8) !bool {
+    const store = ctx.store;
+    ctx.track(.server_state);
+    const endpoint = try stationEndpoint(ctx, hostname);
     ctx.track(.managed_directories);
     _ = try store.directory(f.base, store.root_owner, 0o755, false);
     ctx.track(.registry_prepare);
@@ -148,8 +167,6 @@ pub fn ensure(ctx: Context, value: j.Value) !bool {
     ctx.track(.managed_directories);
     changed = try store.directory(f.base ++ "/pki", store.root_owner, 0o700, true) or changed;
     changed = try store.directory(f.base ++ "/clients", store.root_owner, 0o700, true) or changed;
-    ctx.track(.station_registration_prepare);
-    if (try registry(ctx, try j.field(value, "host"), true)) |previous| try s.sameMode(previous, value);
     ctx.track(.ca_state);
     if (!try store.exists(ca_path)) {
         if (try store.exists(server_path) or (try store.names(f.base ++ "/clients")).len != 0 or (try store.names(f.base ++ "/registry")).len != 0) return error.CaMaintenanceRequired;

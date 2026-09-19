@@ -31,7 +31,9 @@ VictoriaMetrics keeps 90-day metrics with a disk reserve; VictoriaLogs and
 VictoriaTraces keep disk-bound history with native cleanup. Healthy unchanged
 processes remain running on reruns. External HTTP probes are scraped locally and
 evaluated by vmalert-metrics; a separate vmalert-logs evaluates the fixed log pack.
-Alertmanager optionally delivers grouped Telegram notifications. The separate
+Alertmanager optionally delivers grouped Telegram notifications. Station install also
+provisions its CA/server certificate, Caddy mTLS ingress on IPv4 9443/9444, and
+the private authorization service; no registered clients are required. The separate
 `monitoring apply` workflow installs Vector for selected journal logs and host
 metrics, plus vmagent for explicitly selected application metrics. Host alerts use
 verified Vector metrics. OTel traces agents, service-state alerts and dashboards
@@ -93,13 +95,13 @@ configured authentication for install, verification, rerun, and the tunnel:
 zig build -Doptimize=ReleaseSafe
 zig build test
 
-./zig-out/bin/dragontool monitoring install --ssh-host monitoring --plan
-./zig-out/bin/dragontool monitoring install --ssh-host monitoring
+./zig-out/bin/dragontool monitoring install --ssh-host monitoring --ingress-hostname monitoring.example.com --plan
+./zig-out/bin/dragontool monitoring install --ssh-host monitoring --ingress-hostname monitoring.example.com
 ./zig-out/bin/dragontool monitoring verify --ssh-host monitoring
 ./zig-out/bin/dragontool monitoring status --ssh-host monitoring
 
 # Deliberate safe rerun: healthy unchanged services keep running.
-./zig-out/bin/dragontool monitoring install --ssh-host monitoring
+./zig-out/bin/dragontool monitoring install --ssh-host monitoring --ingress-hostname monitoring.example.com
 
 # Keep this SSH session open while using Grafana.
 ssh -L 127.0.0.1:3000:127.0.0.1:3000 monitoring
@@ -110,8 +112,11 @@ laptop listener to loopback too. Grafana is not public. Do not add
 port 3000 to the Hetzner firewall; no Cloudflare change is needed. This is temporary
 pre-TLS access. A later slice will place `monitoring.baptizeddragon.com` in front
 of Grafana over HTTPS; it is not configured now. Intended public inbound remains
-**TCP 22 from the administrator IP only**; DragonTools changes no firewall rule
-and adds no 80/443/3000 rule.
+**TCP 22 from the administrator IP and TCP 9443/9444 from monitored hosts**;
+DragonTools changes no firewall rule and adds no 80/443/3000 rule. Replace
+`monitoring.example.com` with the station TLS DNS name; it is independent of the
+OpenSSH alias. Station install checks ingress locally and does not require this
+name to resolve yet; app enrollment verifies DNS and reachability from the app host.
 
 Grafana credentials are optional managed inputs. Without credential references,
 existing installation behavior remains supported and output explicitly warns that
@@ -126,7 +131,7 @@ while anonymous access, auth proxy and signup stay disabled.
 
 `--config` reads one explicit, small TOML file for monitoring `install`, `verify`,
 `status`, and `notify-test`. There is no implicit file discovery. The version-1
-schema accepts an OpenSSH alias, Grafana/Telegram secret references and bounded
+schema accepts an OpenSSH alias, an ingress TLS DNS hostname, Grafana/Telegram secret references and bounded
 named HTTP/HTTPS probes; component tuning, literal passwords, unknown keys and
 duplicate keys are rejected.
 
@@ -138,6 +143,9 @@ version = 1
 
 [connection]
 ssh_host = "monitoring"
+
+[ingress]
+hostname = "monitoring.example.com"
 
 [grafana]
 username = { op = "op://BaptizedDragon/Grafana/username" }
@@ -326,7 +334,7 @@ DragonTools never assumes a default password or enables anonymous access. Metric
 and Traces checks establish backend reachability, not queries through Grafana's
 query engine. Save & test/Explore in the browser remains a disposable-host gate.
 
-`status` reports all eight service states, expected datasource mappings, and stored
+`status` reports all ten service states, expected datasource mappings, and stored
 external-probe state from VictoriaMetrics. It does not trigger fresh target requests
 or resolve credentials. Use `verify` for full station verification; a recorded failed
 probe means the target is down, while missing/stale data is reported as unknown.
@@ -645,13 +653,13 @@ dragontool
 Choose installation, agent setup, verification, status, firewall guidance, the
 information-only architecture overview, or command-line help. The overview and
 command preview are local: they do not connect to a host or resolve credentials.
-The current installer provides the eight station components listed above. Use
+The current installer provides the ten station services listed above. Use
 monitoring TOML for probes and optional Telegram references. Roadmap inputs
 such as public domain/TLS, IP allowlists, and firewall configuration
 remain explicitly unavailable and fail before SSH, including in plan mode.
 Station setup asks for host, SSH user/port, and authentication, then offers optional
 roadmap settings with a default of no. Accepting that default produces a usable
-eight-component install command. Metrics retention stays fixed at 90 days with a 20%
+ten-service install command. Metrics retention stays fixed at 90 days with a 20%
 capacity reserve. Logs and traces use a logical 100-year limit and native 75%
 partition budgets, as detailed below. Agent setup asks for application/station
 OpenSSH aliases, repeated validated `.service` names and optional private metrics
@@ -964,7 +972,7 @@ errors or application traffic. These records are visible in Logs; filter on
 `type=application` for application-only results. Unchanged installer reruns do
 not emit an extra test event.
 
-Application apply installs pinned **Caddy v2.11.4** as `dt-caddy` on IPv4 TCP
+Station install installs pinned **Caddy v2.11.4** as `dt-caddy` on IPv4 TCP
 **9443 for metrics** and **9444 for logs**, with TLS 1.2+ and required client
 certificates. Each port has one fixed private Unix-socket upstream. The private
 `dragontools-ingress-auth.service` (`dt-ingest`, Python standard library) checks
@@ -984,15 +992,31 @@ private authorization/normalization helper and unrelated remote service checks.
 
 ### Caddy deployment and boundaries
 
-Base `monitoring install` installs the eight station components and native helper
-without requiring an application or a TLS hostname. The first `monitoring apply`
-uses explicit `station.hostname` to prepare the private CA/server certificate,
-install the private authorization helper, then install and verify Caddy **before
-client enrollment**. No hostname is inferred from the administrative SSH alias.
-No ACME, public certificate issuance, Caddy admin API, generic proxy path, or
-unconfigured tracing listener is enabled. DNS, provider firewalls and router/NAT
-remain operator prerequisites. Later apps share the same listeners and dynamic
-registry; adding a registration alone does not rewrite or restart Caddy.
+See the [station ingress validation record](tests/integration/station-ingress-validation.md)
+for local test evidence and remaining deployment checks.
+
+`monitoring install` owns all ten station services, including Caddy and private
+registry authorization, plus the native helper and station PKI. A fresh station
+requires `--ingress-hostname DNS` or `[ingress].hostname` in the central station
+config. The CLI flag overrides the file. Without either, an existing exactly
+managed server bundle supplies its saved identity; a fresh station fails with
+`ingress_hostname_required`. The SSH alias never supplies the TLS hostname.
+The wizard prompts for the same option and retains explicit default-No approval.
+
+Station install/verify need no application namespace, client key or registry entry.
+They verify the CA/server profile and key pairing, exact service state/listeners,
+private-socket unauthorized rejection, server CA/hostname verification and mandatory
+client-certificate authentication. A registry with zero clients is healthy. Startup
+absence uses bounded retries. No client certificate is generated just to check health.
+
+Application apply verifies the existing station ingress, then owns client enrollment,
+registration, its namespace, agents, probes/rules/scrapes. It never writes base Caddy
+configuration, downloads its binary, restarts it, renews the server certificate or
+clears station restart markers. Missing/drifted/unfinished station ingress fails
+before enrollment: run station install, then retry apply. Adding registrations does
+not restart Caddy. No ACME, public certificate issuance, Caddy admin API, generic
+proxy path or tracing listener is enabled. DNS, provider firewalls and router/NAT
+remain operator prerequisites.
 
 Caddy has its own binary/config/unit/certificate restart intent. It reads only
 systemd-provided copies of `ca.crt`, `server.crt`, `server.key`; the CA private key
@@ -1150,9 +1174,10 @@ an exactly recognized public identity can re-enroll with a new local key and
 full mTLS/telemetry verification. Unprovable state is refused. Do not delete pending
 identity state to bypass a failed verification.
 
-Changing `station.hostname` preserves the CA, server key and client keys. Apply
-adds the requested DNS SAN to the server certificate only when missing, then
-updates agent destinations and verifies the new name. Previously issued DNS/IP
+To change `station.hostname`, first run station install with the new
+`--ingress-hostname`. It preserves the CA/server key and adds the DNS SAN only
+when missing. Then update the application config and apply to change agent
+destinations and verify the new name; client keys remain unchanged. Previously issued DNS/IP
 SANs remain valid for other enrolled hosts (at most 16 managed names; removing
 old names requires a future explicit maintenance operation). A changed server
 certificate restarts Caddy; endpoint changes restart Vector and configured
@@ -1170,7 +1195,7 @@ and performs strict server hostname verification using `station.hostname`.
 Enrollment failures identify the controller stage: `station_ensure`,
 `client_prepare`, `station_stage`, `client_stage`, `agent_credential_install` or
 `credential_verify` (also registration/finalization/rollback where applicable).
-For example, a CA key-generation failure during `dragontool monitoring apply`
+For example, a CA key-generation failure during `dragontool monitoring install`
 adds these safe fields to the existing component/check failure:
 
 ```text
@@ -1189,7 +1214,8 @@ and exit-code detail still remain. CA/server stages distinguish managed director
 inspection, key/certificate generation, validation (including key/SAN checks),
 and publication. No private key, CSR/certificate contents, paths, raw errors or
 stack traces are printed. A diagnostic does not authorize deleting or rotating
-CA state. Correct the reported cause and rerun the same application config;
+CA state. Correct the reported cause and rerun station install for base PKI/ingress,
+or the same application config for client enrollment;
 empty managed bootstrap parents remain safe to reuse.
 
 This is a private ingestion channel, so DragonTools intentionally uses its own
@@ -1263,8 +1289,8 @@ crypto, controller and native-process evidence from that remaining host gate.
 | `wizard` / no arguments in a TTY | Local interactive frontend to the same commands |
 | `completion bash/zsh/fish` | Print local shell completion scripts |
 | `host install-oh-my-zsh` | Install missing shell tooling; explicit options for exact managed-config migration and login-shell changes |
-| `monitoring install` | Eight concrete station services, local HTTP probes and fixed alert rules |
-| `monitoring verify` | All eight checked; failed targets are valid telemetry; read-only |
+| `monitoring install` | Ten station services including mTLS ingress/PKI, local probes and fixed alert rules |
+| `monitoring verify` | All ten checked; failed targets are valid telemetry; read-only |
 | `monitoring status` | Service states and stored external-probe results |
 | `monitoring notify-test` | Explicit test alert through Alertmanager; requires installed Telegram configuration |
 | `monitoring agents install/verify/status` | Vector logs/host metrics, optional vmagent app metrics; station signal verification |
@@ -1329,7 +1355,7 @@ the pinned Vector metric contract; no host alert fires without matching agent
 metrics. Service-state rules remain unavailable.
 
 For example, `dragontool monitoring install --host monitor.example.com --plan`
-prints all eight implemented component installations and their retention/listener
+prints all ten implemented service installations and their retention/listener
 settings, then lists unavailable components. It performs no SSH. DragonTools owns
 versions, paths, retention, binding, and hardening; no component-specific
 configuration or new CLI options are needed for normal installation.

@@ -16,8 +16,9 @@ Native macOS fixture binaries are pinned separately in
 The production Caddyfile has two IPv4 TCP listeners: metrics 9443 -> metrics.sock,
 logs 9444 -> logs.sock. The private authorization/normalization helper has one
 backend per socket (VM 8428, VL 9428). Tracing 9445 is reserved and closed.
-First app apply uses explicit station.hostname to install/verify these services
-before client preparation. Base station install is independent of app identity.
+At the time of this validation, first app apply owned ingress setup. The later
+[station ingress ownership validation](station-ingress-validation.md) moves that
+setup and independent zero-client health to station install.
 The old public Python gateway unit is not restored; existing historical units
 are refused for an operator-coordinated transport cutover.
 

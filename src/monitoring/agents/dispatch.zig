@@ -81,6 +81,7 @@ pub fn run(init: std.process.Init, options: cli.Options) !void {
     result catch |err| {
         print(init.io, try std.fmt.allocPrint(a, "Agent verification/install failed. Component: {s}. Check: {s}. {s}\n", .{ @tagName(report.component), if (report.state.check) |check| @tagName(check) else @tagName(report.state.phase), if (report.configured) "Configuration was applied; signal delivery has not been fully verified. Pending restart intent remains; rerun the same command." else "Later steps were not attempted. Completed changes may remain; rerun after correcting the cause." }));
         print(init.io, try report.state.credentialDiagnostics(a));
+        if (report.component == .ingestion or report.component == .caddy or report.component == .station) print(init.io, "Station ingress is owned by monitoring install. Run monitoring install on the station with its configured --ingress-hostname, then retry. Application apply does not bootstrap or repair base ingress.\n");
         if (@import("verify.zig").networkFailure(report.state.check)) print(init.io, @import("verify.zig").network_guidance);
         if (report.state.check == .client_identity_inconsistent) print(init.io, "The managed client identity is inconsistent. Existing files were preserved; restore a verified local backup or correct conflicting metadata before retrying.\n");
         if (report.state.check == .ca_maintenance) print(init.io, "The private CA requires explicit maintenance. It was not rotated or replaced.\n");

@@ -42,17 +42,21 @@ const Fixture = struct {
 fn registration(a: std.mem.Allocator) !j.Value {
     return j.parse(a, "{\"version\":1,\"host\":\"" ++ host ++ "\",\"station\":\"station.example\",\"services\":[\"one.service\"],\"metrics_targets\":[]}", 4096);
 }
+// Existing PKI lifecycle fixtures exercise the station-owned bootstrap API.
+fn bootstrap(ctx: state.Context, value: j.Value) !bool {
+    return station.ensureStation(ctx, try j.field(value, "station"));
+}
 test "native station bootstraps empty parents migrates registry and preserves exact valid PKI" {
     var fixture = try Fixture.init();
     defer fixture.deinit();
     const ctx = fixture.context();
     const value = try registration(ctx.store.a);
     for ([_][]const u8{ "pki", "clients", "registry" }) |name| _ = try ctx.store.directory(try ctx.store.path(f.base, name), ctx.store.root_owner, 0o700, true);
-    try std.testing.expect(try station.ensure(ctx, value));
+    try std.testing.expect(try bootstrap(ctx, value));
     try std.testing.expect(!try ctx.store.registry(ctx.ingestion.gid, false));
     const root = try station.loadCa(ctx);
     const server = try ctx.store.read(f.base ++ "/server/server.crt", ctx.ingestion, 0o400, 16384);
-    try std.testing.expect(!try station.ensure(ctx, value));
+    try std.testing.expect(!try bootstrap(ctx, value));
     const repeated = try station.loadCa(ctx);
     try std.testing.expect(f.equal(root, repeated));
     try std.testing.expectEqualStrings(server, try ctx.store.read(f.base ++ "/server/server.crt", ctx.ingestion, 0o400, 16384));
@@ -66,7 +70,7 @@ test "native station resumable public CSR signing finalization and unchanged reg
     defer fixture.deinit();
     const ctx = fixture.context();
     const value = try registration(ctx.store.a);
-    _ = try station.ensure(ctx, value);
+    _ = try bootstrap(ctx, value);
     var key = try pki.Key.generate();
     defer key.deinit();
     const csr = try pki.createClientCsr(ctx.store.a, &key, host);
@@ -79,7 +83,7 @@ test "native station resumable public CSR signing finalization and unchanged reg
     try std.testing.expect(try station.finalize(ctx, host, fp));
     try station.verify(ctx, value);
     try std.testing.expect(!try station.finalize(ctx, host, fp));
-    try std.testing.expect(!try station.ensure(ctx, value));
+    try std.testing.expect(!try bootstrap(ctx, value));
     try std.testing.expect(!try station.stageRegistration(ctx, value));
     try std.testing.expect(try j.equal(ctx.store.a, response, try station.stage(ctx, value, fresh_csr)));
     try std.testing.expect(!try ctx.store.exists(f.base ++ "/clients/" ++ host));
@@ -90,7 +94,7 @@ test {
 }
 fn enroll(station_ctx: state.Context, app_ctx: state.Context) !j.Value {
     const value = try registration(station_ctx.store.a);
-    _ = try station.ensure(station_ctx, value);
+    _ = try bootstrap(station_ctx, value);
     const inspection = try station.inspect(station_ctx, host, "station.example");
     const prepared = try client.prepare(app_ctx, host, "station.example", inspection);
     const response = try station.stage(station_ctx, value, try j.field(prepared, "csr"));
@@ -138,7 +142,7 @@ test "native host same-key renewal supports rollback resume and final no-op" {
     sc.now += 340 * 86400;
     ac.now = sc.now;
     const value = try registration(sc.store.a);
-    _ = try station.ensure(sc, value);
+    _ = try bootstrap(sc, value);
     const prepared = try client.prepare(ac, host, "station.example", try station.inspect(sc, host, "station.example"));
     try std.testing.expectEqualStrings("renew", try j.field(prepared, "action"));
     try std.testing.expectEqualStrings(original_key, try ac.store.read(client_store.pending_path ++ "/client.key", ac.store.root_owner, 0o400, 4096));
@@ -206,7 +210,7 @@ const Fault = struct {
 fn prepareStage(sc: state.Context, ac: state.Context, endpoint: []const u8) !j.Value {
     var value = try registration(sc.store.a);
     try value.object.put(sc.store.a, "station", j.string(endpoint));
-    _ = try station.ensure(sc, value);
+    _ = try bootstrap(sc, value);
     const prepared = try client.prepare(ac, host, endpoint, try station.inspect(sc, host, endpoint));
     const response = try station.stage(sc, value, try j.field(prepared, "csr"));
     _ = try client.stage(ac, response);
@@ -226,11 +230,11 @@ test "native failed CA validation and private publication leave clean bootstrap 
         const ctx = fixture.context();
         const value = try registration(ctx.store.a);
         var fault: Fault = .{ .event = event, .path = f.base ++ "/pki/ca" };
-        try std.testing.expectError(error.InjectedInterruption, station.ensure(fault.context(ctx), value));
+        try std.testing.expectError(error.InjectedInterruption, bootstrap(fault.context(ctx), value));
         try std.testing.expect(fault.fired);
         try std.testing.expectEqual(@as(usize, 0), (try ctx.store.names(f.base ++ "/pki")).len);
-        try std.testing.expect(try station.ensure(ctx, value));
-        try std.testing.expect(!try station.ensure(ctx, value));
+        try std.testing.expect(try bootstrap(ctx, value));
+        try std.testing.expect(!try bootstrap(ctx, value));
     }
 }
 test "native CA corruption missing roots and near-expiry require repair without rotation" {
@@ -238,17 +242,17 @@ test "native CA corruption missing roots and near-expiry require repair without 
     defer fixture.deinit();
     var ctx = fixture.context();
     const value = try registration(ctx.store.a);
-    _ = try station.ensure(ctx, value);
+    _ = try bootstrap(ctx, value);
     const root = try station.loadCa(ctx);
     ctx.now += 3300 * 86400;
-    try std.testing.expectError(error.CaMaintenanceRequired, station.ensure(ctx, value));
+    try std.testing.expectError(error.CaMaintenanceRequired, bootstrap(ctx, value));
     try std.testing.expect(f.equal(root, try station.loadCa(ctx)));
     ctx.now -= 3300 * 86400;
     _ = try ctx.store.atomic(f.base ++ "/pki/ca/ca.crt", "broken certificate", ctx.store.root_owner, 0o400, f.base ++ "/pki");
-    if (station.ensure(ctx, value)) |_| return error.ExpectedFailure else |_| {}
+    if (bootstrap(ctx, value)) |_| return error.ExpectedFailure else |_| {}
     try std.testing.expectEqualStrings("broken certificate", try bytes(ctx, f.base ++ "/pki/ca/ca.crt"));
     try ctx.store.rename(f.base ++ "/pki/ca", f.base ++ "/pki/saved-ca", false);
-    try std.testing.expectError(error.CaMaintenanceRequired, station.ensure(ctx, value));
+    try std.testing.expectError(error.CaMaintenanceRequired, bootstrap(ctx, value));
     try std.testing.expect(!try ctx.store.exists(f.base ++ "/pki/ca"));
 }
 test "native registry read-only metadata rejection and owned directory migration" {
@@ -256,7 +260,7 @@ test "native registry read-only metadata rejection and owned directory migration
     defer fixture.deinit();
     const ctx = fixture.context();
     const value = try registration(ctx.store.a);
-    _ = try station.ensure(ctx, value);
+    _ = try bootstrap(ctx, value);
     const dir = try fixture.temp.dir.openDir(std.testing.io, "etc/dragontools/ingestion/registry", .{});
     defer dir.close(std.testing.io);
     try dir.setPermissions(std.testing.io, .fromMode(0o700));
@@ -268,7 +272,7 @@ test "native registry read-only metadata rejection and owned directory migration
     try std.testing.expectError(error.RegistryPermissions, wrong_owner.registry(ctx.ingestion.gid, true));
     try std.testing.expect(try ctx.store.registry(ctx.ingestion.gid, true));
     try std.testing.expect(!try ctx.store.registry(ctx.ingestion.gid, true));
-    try std.testing.expect(!try station.ensure(ctx, value));
+    try std.testing.expect(!try bootstrap(ctx, value));
     try std.testing.expectError(error.CredentialStateRefused, ctx.store.directory("/tmp/registry", ctx.store.root_owner, 0o750, true));
 }
 test "native registry refuses files and symlink escape without modifying targets" {
@@ -280,7 +284,7 @@ test "native registry refuses files and symlink escape without modifying targets
             try fixture.temp.dir.createDir(std.testing.io, "outside", .fromMode(0o700));
             try fixture.temp.dir.symLink(std.testing.io, "../../../outside", "etc/dragontools/ingestion/registry", .{ .is_directory = true });
         } else try ctx.store.write(f.base ++ "/registry", "untouched", ctx.store.root_owner, 0o400);
-        try std.testing.expectError(error.RegistryPermissions, station.ensure(ctx, try registration(ctx.store.a)));
+        try std.testing.expectError(error.RegistryPermissions, bootstrap(ctx, try registration(ctx.store.a)));
         if (!link) try std.testing.expectEqualStrings("untouched", try bytes(ctx, f.base ++ "/registry"));
     }
 }
@@ -298,9 +302,9 @@ test "native hostname change keeps CA server key client identity and registratio
     var value = try registration(sc.store.a);
     try value.object.put(sc.store.a, "station", j.string("new.example"));
     var fault: Fault = .{ .event = "after_publish", .path = f.base ++ "/server/server.crt" };
-    try std.testing.expectError(error.InjectedInterruption, station.ensure(fault.context(sc), value));
+    try std.testing.expectError(error.InjectedInterruption, bootstrap(fault.context(sc), value));
     const cert = try bytes(sc, f.base ++ "/server/server.crt");
-    try std.testing.expect(!try station.ensure(sc, value));
+    try std.testing.expect(!try bootstrap(sc, value));
     try std.testing.expectEqualStrings(cert, try bytes(sc, f.base ++ "/server/server.crt"));
     try std.testing.expectEqualStrings(server_key, try bytes(sc, f.base ++ "/server/server.key"));
     try std.testing.expect(f.equal(ca, try station.loadCa(sc)));
@@ -356,7 +360,7 @@ test "native renewal resumes after a long interrupted completed-generation clean
     sc.now += 340 * 86400;
     ac.now = sc.now;
     const value = try registration(sc.store.a);
-    _ = try station.ensure(sc, value);
+    _ = try bootstrap(sc, value);
     const prepared = try client.prepare(ac, host, "station.example", try station.inspect(sc, host, "station.example"));
     try std.testing.expectEqualStrings("renew", try j.field(prepared, "action"));
     try std.testing.expect(!try ac.store.exists(f.canonical ++ "/.completed"));
@@ -405,7 +409,7 @@ test "native pending lease expiration and reissue after failed public publicatio
     try std.testing.expectError(error.CredentialStateRefused, station.finalize(sc, host, try j.field(first, "certificate_sha256")));
     sc.now += 370 * 86400;
     ac.now = sc.now;
-    _ = try station.ensure(sc, try registration(sc.store.a));
+    _ = try bootstrap(sc, try registration(sc.store.a));
     const prepared = try client.prepare(ac, host, "station.example", try station.inspect(sc, host, "station.example"));
     const second = try station.stage(sc, try registration(sc.store.a), try j.field(prepared, "csr"));
     var fault: Fault = .{ .event = "after_publish", .path = client_store.pending_path ++ "/client.crt" };
@@ -425,7 +429,7 @@ fn installConsumerFixture(ctx: state.Context, kind: []const u8, values: f.Files)
 }
 fn legacyFixture(sc: state.Context, ac: state.Context) !f.Files {
     const value = try registration(sc.store.a);
-    _ = try station.ensure(sc, value);
+    _ = try bootstrap(sc, value);
     const ca = try station.loadCa(sc);
     var ca_key = try pki.Key.parse(sc.store.a, try f.item(ca, "ca.key"));
     defer ca_key.deinit();
@@ -489,7 +493,7 @@ test "native expired legacy credentials migrate and retain working material unti
     const old = try legacyFixture(sc, ac);
     sc.now += 367 * 86400;
     ac.now = sc.now;
-    _ = try station.ensure(sc, try registration(sc.store.a));
+    _ = try bootstrap(sc, try registration(sc.store.a));
     const inspection = try station.inspect(sc, host, "station.example");
     try std.testing.expect(try j.flag(try j.get(inspection, "legacy_expired")));
     if (client.verify(ac, "vector", host, "station.example")) |_| return error.ExpectedFailure else |_| {}
@@ -512,7 +516,7 @@ test "native backend accepts existing OpenSSL station and host bundles byte-for-
     sc.now = try ca.validFrom() + 120;
     ac.now = sc.now;
     const value = try registration(sc.store.a);
-    _ = try station.ensure(sc, value);
+    _ = try bootstrap(sc, value);
     inline for (.{ "ca.crt", "ca.key" }) |name| _ = try sc.store.atomic(f.base ++ "/pki/ca/" ++ name, @embedFile("pki/fixtures/openssl-" ++ name), sc.store.root_owner, 0o400, f.base ++ "/pki");
     inline for (.{ "server.crt", "server.key" }) |name| _ = try sc.store.atomic(f.base ++ "/server/" ++ name, @embedFile("pki/fixtures/openssl-" ++ name), sc.ingestion, 0o400, f.base);
     _ = try sc.store.atomic(f.base ++ "/server/ca.crt", @embedFile("pki/fixtures/openssl-ca.crt"), sc.ingestion, 0o400, f.base);
@@ -528,7 +532,7 @@ test "native backend accepts existing OpenSSL station and host bundles byte-for-
     try active.object.put(sc.store.a, "certificate_identity", j.string(try pki.profile.identity(sc.store.a, host)));
     _ = try station.saveRegistry(sc, host, active);
     try sc.store.unlink(f.state ++ "/caddy-restart-required");
-    try std.testing.expect(!try station.ensure(sc, value));
+    try std.testing.expect(!try bootstrap(sc, value));
     try station.verify(sc, value);
     try std.testing.expectEqualStrings("unchanged", try j.field(try client.prepare(ac, host, "station.example", try station.inspect(sc, host, "station.example")), "action"));
     for (client_store.kinds) |kind| try std.testing.expect(!try client.install(ac, kind, host, "station.example"));
@@ -544,7 +548,7 @@ const diagnostics = @import("agent/diagnostics.zig");
 fn ensureFailure(ctx: state.Context, value: j.Value, stage: *diagnostics.Stage) !struct { err: anyerror } {
     var tracked = ctx;
     tracked.diagnostic_stage = stage;
-    if (station.ensure(tracked, value)) |_| return error.ExpectedFailure else |err| return .{ .err = err };
+    if (bootstrap(tracked, value)) |_| return error.ExpectedFailure else |err| return .{ .err = err };
 }
 test "native bootstrap diagnostics identify CA and server failures without changing recovery" {
     const Case = struct { event: []const u8, path: []const u8, stage: diagnostics.Stage, reason: diagnostics.AgentError, ca_published: bool = false };
@@ -583,8 +587,8 @@ test "native bootstrap diagnostics identify CA and server failures without chang
         try std.testing.expect(!try ctx.store.exists(server_path));
         const saved_ca: ?f.Files = if (case.ca_published) try station.loadCa(ctx) else null;
         if (saved_ca == null) try std.testing.expectEqual(@as(usize, 0), (try ctx.store.names(f.base ++ "/pki")).len);
-        try std.testing.expect(try station.ensure(ctx, value));
-        try std.testing.expect(!try station.ensure(ctx, value));
+        try std.testing.expect(try bootstrap(ctx, value));
+        try std.testing.expect(!try bootstrap(ctx, value));
         if (saved_ca) |root| try std.testing.expect(f.equal(root, try station.loadCa(ctx)));
     }
 }
@@ -593,7 +597,7 @@ test "native CA validation diagnostic never echoes key bytes or replaces invalid
     defer fixture.deinit();
     const ctx = fixture.context();
     const value = try registration(ctx.store.a);
-    _ = try station.ensure(ctx, value);
+    _ = try bootstrap(ctx, value);
     const key = try bytes(ctx, f.base ++ "/pki/ca/ca.key");
     // Malformed certificate deliberately contains actual private material.
     _ = try ctx.store.atomic(f.base ++ "/pki/ca/ca.crt", key, ctx.store.root_owner, 0o400, f.base ++ "/pki");
@@ -628,7 +632,7 @@ test "native CA maintenance retains exit 87 and existing root with diagnostics e
     defer fixture.deinit();
     var ctx = fixture.context();
     const value = try registration(ctx.store.a);
-    _ = try station.ensure(ctx, value);
+    _ = try bootstrap(ctx, value);
     const root = try station.loadCa(ctx);
     ctx.now += 3300 * 86400;
     var stage: diagnostics.Stage = .request;
@@ -641,4 +645,23 @@ test "native CA maintenance retains exit 87 and existing root with diagnostics e
 
 test {
     _ = @import("agent/request.zig");
+}
+
+test "station install bootstraps and verifies with zero clients and enrollment cannot bootstrap" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    const ctx = fixture.context();
+    const protocol = @import("agent/protocol.zig");
+    try std.testing.expectError(error.IngressHostnameRequired, station.ensureStation(ctx, null));
+    try std.testing.expectError(error.FileNotFound, station.ensure(ctx, try registration(ctx.store.a)));
+    try std.testing.expect(!try ctx.store.exists(f.base ++ "/pki/ca"));
+    try std.testing.expectEqualStrings("changed", try protocol.dispatch(ctx, "station-ensure", &.{"station.example"}));
+    const ca = try station.loadCa(ctx);
+    const server = try bytes(ctx, f.base ++ "/server/server.crt");
+    for ([_][]const u8{ "registry", "clients" }) |name| try std.testing.expectEqual(@as(usize, 0), (try ctx.store.names(try ctx.store.path(f.base, name))).len);
+    try std.testing.expectEqualStrings("unchanged", try protocol.dispatch(ctx, "station-verify", &.{"station.example"}));
+    try std.testing.expectEqualStrings("unchanged", try protocol.dispatch(ctx, "station-ensure", &.{""}));
+    try std.testing.expect(!try station.ensure(ctx, try registration(ctx.store.a)));
+    try std.testing.expect(f.equal(ca, try station.loadCa(ctx)));
+    try std.testing.expectEqualStrings(server, try bytes(ctx, f.base ++ "/server/server.crt"));
 }

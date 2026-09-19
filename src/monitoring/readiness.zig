@@ -6,6 +6,9 @@ const install = @import("install.zig");
 pub const Check = enum {
     managed_state,
     caddy_listener,
+    ingress_tls_ready,
+    ingress_hostname_required,
+    station_ingress_required,
     caddy_service,
     legacy_ingress_conflict,
     application_ownership,

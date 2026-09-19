@@ -2,11 +2,20 @@
 
 ## 0.1.0-dev — unreleased
 
+- Move station CA/server PKI, Caddy and private ingress authorization ownership to
+  `monitoring install`. Add `--ingress-hostname` / `[ingress].hostname`, independent
+  of SSH; reuse an existing managed endpoint when omitted. Install/verify/status
+  include ten station services. Empty registries are healthy; bounded TLS checks
+  require server CA/hostname and mandatory client authentication without enrollment.
+- Make application apply inspect base ingress read-only and request station install
+  for missing/drifted/pending infrastructure. Keep independent station restart
+  intent and client/agent enrollment recovery; adding apps never configures Caddy.
+
 - Add pinned Caddy v2.11.4 for registered mTLS on separate IPv4 ports: 9443 metrics,
   9444 logs. Keep 9445 closed until tracing is supported. Preserve fingerprint,
   rollout and trusted-label checks in a private Unix-socket authorization helper;
   do not restore the historical public Python gateway. Raw backends stay loopback.
-- Provision/verify ingress before app client enrollment using explicit
+- Verify station-owned ingress before app client enrollment using explicit
   station.hostname. Keep independent Caddy/auth/agent restart intent; registration
   edits alone do not restart Caddy. Add per-signal reachability diagnostics and
   preserve native PKI/key locality/renewal/legacy identity migration.

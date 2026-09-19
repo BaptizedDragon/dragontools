@@ -241,7 +241,7 @@ fn menu(input: Input) !?[]const []const u8 {
     }
 }
 
-const Step = enum { config, host, user, port, authentication, credential, extras, domain, tls, cloudflare, admin, agents, telegram, telegram_token, telegram_channel, station, services, metrics_targets, firewall_admin, firewall_agents, review };
+const Step = enum { config, host, user, port, authentication, credential, ingress_hostname, extras, domain, tls, cloudflare, admin, agents, telegram, telegram_token, telegram_channel, station, services, metrics_targets, firewall_admin, firewall_agents, review };
 const Answers = struct {
     command: spec.Command,
     config_path: []const u8 = "./monitoring.toml",
@@ -251,6 +251,7 @@ const Answers = struct {
     authentication: []const u8 = "1",
     credential: []const u8 = "",
     extras: bool = false,
+    ingress_hostname: []const u8 = "",
     domain: []const u8 = "",
     tls: []const u8 = "none",
     cloudflare: []const u8 = "",
@@ -271,6 +272,7 @@ const Answers = struct {
             try args.appendSlice(a, &.{ "--config", self.config_path });
             return args.toOwnedSlice(a);
         }
+        if (self.ingress_hostname.len > 0) try args.appendSlice(a, &.{ "--ingress-hostname", self.ingress_hostname });
         if (self.command == .agents_install) {
             try args.appendSlice(a, &.{ "--ssh-host", self.host });
         } else {
@@ -304,7 +306,7 @@ const Answers = struct {
 
     fn afterConnection(self: Answers) Step {
         return switch (self.command) {
-            .install => .extras,
+            .install => .ingress_hostname,
             .agents_install => .station,
             .firewall => .firewall_admin,
             else => .review,
@@ -317,7 +319,7 @@ fn workflow(input: Input, command: spec.Command) !?[]const []const u8 {
     var step: Step = if (spec.applicationCommand(command)) .config else .host;
     var history: std.ArrayList(Step) = .empty;
     defer history.deinit(input.a);
-    if (command == .install) try input.write(std.fmt.comptimePrint("\nThis release installs eight loopback services: VictoriaMetrics, VictoriaLogs, VictoriaTraces, Grafana, blackbox exporter, Alertmanager and two vmalert instances.\nMetrics retention is {d} days, with a {d}% data filesystem reserve.\nLogs retain as much history as fits, with a {s} logical limit and a {d}%\nfilesystem-capacity partition budget.\nTraces use a {s} logical limit and a {d}% filesystem-capacity partition budget.\nBoth budgets exclude other writers and preserve the newest two partitions.\nCleanup is periodic; adequate capacity/headroom is required. These defaults are fixed.\nConfigure application hosts separately with monitoring agents. Reruns inspect actual state,\nresume pending activation, and leave healthy unchanged services running.\n", .{ policy.metrics.retention_days, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent, policy.traces.retention, policy.traces.cleanup_usage_percent }));
+    if (command == .install) try input.write(std.fmt.comptimePrint("\nThis release installs Caddy mTLS ingress on IPv4 9443/9444, private authorization, and eight loopback services: VictoriaMetrics, VictoriaLogs, VictoriaTraces, Grafana, blackbox exporter, Alertmanager and two vmalert instances.\nMetrics retention is {d} days, with a {d}% data filesystem reserve.\nLogs retain as much history as fits, with a {s} logical limit and a {d}%\nfilesystem-capacity partition budget.\nTraces use a {s} logical limit and a {d}% filesystem-capacity partition budget.\nBoth budgets exclude other writers and preserve the newest two partitions.\nCleanup is periodic; adequate capacity/headroom is required. These defaults are fixed.\nConfigure application hosts separately with monitoring agents. Reruns inspect actual state,\nresume pending activation, and leave healthy unchanged services running.\n", .{ policy.metrics.retention_days, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent, policy.traces.retention, policy.traces.cleanup_usage_percent }));
     if (command == .agents_install) try input.write("\nInstall Vector for selected journald services and host metrics. Optional\nprivate application endpoints enable vmagent. The installer must inspect and bound\njournald and verify station signal arrival before reporting success.\nUse configured OpenSSH aliases for both hosts; no secret is requested here.\nOTel traces agents remain unavailable.\n");
     if (command == .firewall) try input.write("\nFirewall management is unavailable; even --plan is rejected before SSH.\nIntended policy: admin IPs may access SSH and Grafana; agent IPs may submit\ntelemetry only. DragonTools will manage monitoring-related rules only and\nmust preserve unrelated administrator configuration. This helper previews\nfuture configuration; it cannot claim that access restrictions are applied.\n");
     while (true) {
@@ -411,8 +413,12 @@ fn answerStep(input: Input, answers: *Answers, step: Step) !Step {
             answers.credential = try input.prompt(if (eq(answers.authentication, "5")) "1Password private-key reference" else if (eq(answers.authentication, "3")) "Identity file (absolute path)" else "SSH agent socket (absolute path)", null, false, flag, "For 1Password agent mode, use the socket path configured in 1Password. Never paste a private key or token.");
             return answers.afterConnection();
         },
+        .ingress_hostname => {
+            answers.ingress_hostname = try input.prompt("Station ingress TLS hostname (required for first install; Enter reuses managed identity)", null, true, "--ingress-hostname", "Explicit DNS name for the station certificate. Never inferred from SSH. An empty answer fails on a fresh station. No DNS or firewall changes are made.");
+            return .extras;
+        },
         .extras => {
-            answers.extras = try input.yesNo("Collect roadmap-only domain/TLS/IP/Telegram settings?", "Choose no for the working eight-service station. Configure probes and Telegram separately with CLI --config. Supplying roadmap flags makes the CLI reject the operation before SSH, even in plan mode.");
+            answers.extras = try input.yesNo("Collect roadmap-only domain/TLS/IP/Telegram settings?", "Choose no for the working ten-service station. Configure probes and Telegram separately with CLI --config. Supplying roadmap flags makes the CLI reject the operation before SSH, even in plan mode.");
             if (answers.extras) try input.write("These optional integrations are unavailable. Any supplied roadmap flags\nwill be validated, then rejected before SSH, including in --plan mode.\n");
             return if (answers.extras) .domain else .review;
         },
@@ -558,7 +564,7 @@ test "wizard defaults generate the same supported install plan as regular CLI" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var script: Script = .{ .a = a, .lines = &.{ "1", "monitor.example.com", "", "", "", "", "1" } };
+    var script: Script = .{ .a = a, .lines = &.{ "1", "monitor.example.com", "", "", "", "", "", "1" } };
     const args = (try run(a, script.io())).?;
     const expected = [_][]const u8{ "monitoring", "install", "--host", "monitor.example.com", "--user", "root", "--port", "22", "--plan" };
     try std.testing.expectEqual(expected.len, args.len);
@@ -578,7 +584,7 @@ test "wizard retries required, malformed and oversized input with authoritative 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var script: Script = .{ .a = a, .oversized_at = 2, .lines = &.{ "1", "", "oversized", "bad;host", "monitor.example.com", "bad user", "ops", "0", "2222", "9", "3", "relative", "/tmp/key", "", "1" } };
+    var script: Script = .{ .a = a, .oversized_at = 2, .lines = &.{ "1", "", "oversized", "bad;host", "monitor.example.com", "bad user", "ops", "0", "2222", "9", "3", "relative", "/tmp/key", "", "", "1" } };
     const args = (try run(a, script.io())).?;
     var options = try parse.parse(a, args);
     defer options.deinit(a);
@@ -598,11 +604,11 @@ test "wizard applying requires explicit yes and Enter cancels without a command"
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var no: Script = .{ .a = a, .lines = &.{ "1", "monitor.example.com", "", "", "", "", "2", "" } };
+    var no: Script = .{ .a = a, .lines = &.{ "1", "monitor.example.com", "", "", "", "", "", "2", "" } };
     try std.testing.expect((try run(a, no.io())) == null);
     try std.testing.expect(no.contains("Continue? [y/N]"));
     try std.testing.expect(no.contains("Cancelled. No operation was started."));
-    var yes: Script = .{ .a = a, .lines = &.{ "1", "monitor.example.com", "", "", "", "", "2", "yes" } };
+    var yes: Script = .{ .a = a, .lines = &.{ "1", "monitor.example.com", "", "", "", "", "", "2", "yes" } };
     var options = try parse.parse(a, (try run(a, yes.io())).?);
     defer options.deinit(a);
     try std.testing.expect(!options.plan);
@@ -619,7 +625,7 @@ test "wizard quit, EOF, Ctrl+C and default action cancel cleanly" {
     try std.testing.expect((try run(a, eof.io())) == null);
     var interrupt: Script = .{ .a = a, .cancel_at = 1, .lines = &.{"1"} };
     try std.testing.expect((try run(a, interrupt.io())) == null);
-    var action: Script = .{ .a = a, .lines = &.{ "1", "monitor.example.com", "", "", "", "", "" } };
+    var action: Script = .{ .a = a, .lines = &.{ "1", "monitor.example.com", "", "", "", "", "", "" } };
     try std.testing.expect((try run(a, action.io())) == null);
 }
 
@@ -627,7 +633,7 @@ test "wizard back revisits previous field and contextual help uses shared metada
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var script: Script = .{ .a = a, .lines = &.{ "1", "old.example.com", "back", "?", "new.example.com", "", "", "", "", "1" } };
+    var script: Script = .{ .a = a, .lines = &.{ "1", "old.example.com", "back", "?", "new.example.com", "", "", "", "", "", "1" } };
     var options = try parse.parse(a, (try run(a, script.io())).?);
     defer options.deinit(a);
     try std.testing.expectEqualStrings("new.example.com", options.host);
@@ -640,7 +646,7 @@ test "wizard roadmap credentials remain references and command preview is shell 
     defer arena.deinit();
     const a = arena.allocator();
     const reference = "op://Infrastructure/Cloudflare's $(literal)/token";
-    var script: Script = .{ .a = a, .lines = &.{ "1", "monitor.example.com", "", "", "4", "/tmp/agent.sock", "yes", "monitor.example.com", "cloudflare", "plaintext-token", reference, "999.1.1.1", "203.0.113.20", "", "203.0.113.30", "", "yes", "op://Infrastructure/Telegram/token", "bad-id", "-1234", "1" } };
+    var script: Script = .{ .a = a, .lines = &.{ "1", "monitor.example.com", "", "", "4", "/tmp/agent.sock", "", "yes", "monitor.example.com", "cloudflare", "plaintext-token", reference, "999.1.1.1", "203.0.113.20", "", "203.0.113.30", "", "yes", "op://Infrastructure/Telegram/token", "bad-id", "-1234", "1" } };
     const args = (try run(a, script.io())).?;
     var options = try parse.parse(a, args);
     defer options.deinit(a);
@@ -659,7 +665,7 @@ test "wizard manual TLS skips Cloudflare and disabled Telegram skips reference p
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var script: Script = .{ .a = a, .lines = &.{ "1", "monitor.example.com", "", "", "", "yes", "", "manual", "", "", "", "1" } };
+    var script: Script = .{ .a = a, .lines = &.{ "1", "monitor.example.com", "", "", "", "", "yes", "", "manual", "", "", "", "1" } };
     var options = try parse.parse(a, (try run(a, script.io())).?);
     defer options.deinit(a);
     try std.testing.expectEqualStrings("manual", options.tls.?);
@@ -674,7 +680,7 @@ test "wizard hides non-ASCII references in previews without changing CLI argumen
     defer arena.deinit();
     const a = arena.allocator();
     const reference = "op://Infrastructure/\xe2\x80\xaeKey/private_key";
-    var script: Script = .{ .a = a, .lines = &.{ "1", "monitor.example.com", "", "", "5", reference, "", "1" } };
+    var script: Script = .{ .a = a, .lines = &.{ "1", "monitor.example.com", "", "", "5", reference, "", "", "1" } };
     var options = try parse.parse(a, (try run(a, script.io())).?);
     defer options.deinit(a);
     try std.testing.expectEqualStrings(reference, options.ssh_op_path.?);
@@ -771,4 +777,17 @@ test "application wizard previews regular config CLI with local plan and default
     const apply = (try run(a, confirmed.io())).?;
     try std.testing.expectEqual(@as(usize, 4), apply.len);
     try std.testing.expectEqualStrings("examples/doers-monitoring.toml", apply[3]);
+}
+
+test "wizard station TLS name uses shared flag and default-No approval" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var script: Script = .{ .a = a, .lines = &.{ "1", "ssh.example", "", "", "", "https://bad.example", "tls.example", "", "1" } };
+    var options = try parse.parse(a, (try run(a, script.io())).?);
+    defer options.deinit(a);
+    try std.testing.expectEqualStrings("tls.example", options.ingress_hostname.?);
+    try std.testing.expect(script.contains("'--ingress-hostname' 'tls.example'"));
+    try std.testing.expect(!script.contains("https://bad.example"));
+    try std.testing.expect(options.plan);
 }

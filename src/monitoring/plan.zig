@@ -14,7 +14,7 @@ pub fn renderStation(a: std.mem.Allocator, grafana_configured: bool, telegram_co
     defer a.free(core);
     const without_footer = try std.mem.replaceOwned(u8, a, core, unavailable ++ "No remote operations performed.\n", "");
     defer a.free(without_footer);
-    const station_core = try std.mem.replaceOwned(u8, a, without_footer, "Plan: install VictoriaMetrics, VictoriaLogs, VictoriaTraces and Grafana.\n", "Plan: install the monitoring station (eight services).\n");
+    const station_core = try std.mem.replaceOwned(u8, a, without_footer, "Plan: install VictoriaMetrics, VictoriaLogs, VictoriaTraces and Grafana.\n", "Plan: install the monitoring station (ten services).\n");
     defer a.free(station_core);
     return std.fmt.allocPrint(a, "{s}\nExternal HTTP probes: {d} configured (GET, HTTP 2xx, verified TLS, 30s interval / 5s scrape timeout).\n" ++
         "Blackbox exporter {s}: loopback:9115; dedicated dt-blackbox; HTTP/1.1 only.\n" ++
@@ -65,7 +65,7 @@ pub fn renderWithCredentials(a: std.mem.Allocator, configured: bool) ![]const u8
         "Grafana access: SSH port forwarding only; public Grafana HTTPS/TLS and firewall management are unavailable.\n\n" ++
         "Safe rerun: inspect actual state, resume pending activation, and verify before finalization. Healthy unchanged services are not restarted; unchanged valid binaries are not downloaded. No controller state database.\n" ++
         "Host metric rules use verified Vector contracts; systemd-service state alerts remain deferred.\n" ++
-        "Application monitoring apply adds Caddy mTLS :9443 metrics / :9444 logs using explicit station.hostname; :9445 stays closed. Station install alone does not install ingress or agents.\n" ++
+        "Station install owns CA/server PKI, Caddy v2.11.4 mTLS 0.0.0.0:9443 metrics / 0.0.0.0:9444 logs and private ingress authorization. Use --ingress-hostname or [ingress].hostname for a fresh station; reruns may reuse the managed server identity. Zero registered clients is healthy; :9445 stays closed. Application apply enrolls clients and installs agents only after station ingress verification.\n" ++
         unavailable ++
         "No remote operations performed.\n", .{
         vm.version,

@@ -11,10 +11,17 @@ fn changed(value: bool) []const u8 {
     return if (value) "changed" else "unchanged";
 }
 pub fn stationAction(action: []const u8) bool {
-    return j.contains(&.{ "ensure", "inspect", "stage", "stage-registration", "finalize", "registration", "verify" }, action);
+    return j.contains(&.{ "station-ensure", "station-verify", "ensure", "inspect", "stage", "stage-registration", "finalize", "registration", "verify" }, action);
 }
 pub fn dispatch(ctx: s.Context, action: []const u8, args: []const []const u8) ![]const u8 {
     for (args) |arg| try j.require(arg.len <= s.f.limit and std.mem.indexOfScalar(u8, arg, 0) == null);
+    if (j.contains(&.{ "station-ensure", "station-verify" }, action)) {
+        try count(args, 1);
+        const requested = if (args[0].len == 0) null else args[0];
+        if (std.mem.eql(u8, action, "station-ensure")) return changed(try station.ensureStation(ctx, requested));
+        _ = try station.verifyServer(ctx, try station.stationEndpoint(ctx, requested), false);
+        return "unchanged";
+    }
     if (std.mem.eql(u8, action, "endpoint")) {
         try count(args, 4);
         try @import("endpoint.zig").check(ctx, args[0], args[1], args[2], args[3]);
@@ -72,6 +79,7 @@ pub fn exitCode(err: anyerror) u8 {
         error.CaMaintenanceRequired => 87,
         error.ClientIdentityInconsistent => 88,
         error.RegistryPermissions => 89,
+        error.IngressHostnameRequired => 90,
         else => 86,
     };
 }

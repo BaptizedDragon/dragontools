@@ -2,10 +2,10 @@
 
 ## Current milestone: station and monitored-host logs/metrics implemented
 
-The monitoring foundation delivers eight concrete services: VictoriaMetrics,
+The monitoring foundation delivers ten concrete services: VictoriaMetrics,
 VictoriaLogs, VictoriaTraces, Grafana OSS, blackbox_exporter, Alertmanager,
-vmalert-logs and vmalert-metrics. Unfinished integrations fail before connecting. Exit 0 from install
-means all eight passed their documented verification; it never means the full requested station exists.
+vmalert-logs, vmalert-metrics, Caddy and private ingress authorization. Unfinished integrations fail before connecting. Exit 0 from install
+means all ten passed their documented verification; it never means the full requested station exists.
 `status` reads service states and stored HTTP probe samples; use `verify` to test health.
 Help and `--plan` require no SSH. No generic primitives are public commands.
 
@@ -31,7 +31,7 @@ does not introduce a generic public CLI framework or a resource DSL.
 
 The wizard offers monitoring install, agents, verify, status, firewall guidance,
 architecture information, and command-line help. Station setup defaults to the
-implemented eight-service station; roadmap settings require explicit opt-in and
+implemented ten-service station; roadmap settings require explicit opt-in and
 still fail before SSH. Agent setup uses application/station OpenSSH aliases, validated services and
 optional private application metrics URLs. Unsupported components and protected-file credential inputs do not
 become implemented merely because an interactive interface exists.
@@ -226,7 +226,7 @@ VictoriaMetrics continues to use its free-space reserve and 90-day retention.
 Disk warning/critical and inode rules now use the verified Vector host contract.
 The fixed host pack joins the separate log/probe packs; without agent metrics it
 has no inputs. HostDown and systemd service-state alerts remain deferred.
-`monitoring install --plan` describes all eight installed components and lists
+`monitoring install --plan` describes all ten installed services and lists
 unavailable integrations separately.
 There are no new CLI policy overrides or rule-deployment options.
 
@@ -296,7 +296,7 @@ directories, binary, and unit must retain their expected types, owners, and mode
 `vl_storage_is_read_only` must be zero; missing identity or read-only storage fails
 verification and cannot finalize the component. No synthetic log or remote
 application ingestion is required, so success does not demonstrate an application
-log pipeline. `monitoring verify` checks all eight installed components; `status`
+log pipeline. `monitoring verify` checks all ten installed services; `status`
 reports their service states without claiming full health or active alerts.
 
 ## VictoriaTraces installation and verification
@@ -581,7 +581,7 @@ Station `--config PATH` is explicit and supported for monitoring install, verify
 and status. That schema has no conventional-path search, includes or
 interpolation; application config uses the separate contract above.
 `config/monitoring.zig` accepts a bounded 64 KiB version-1 TOML subset:
-`version = 1`, `[connection].ssh_host`, and `[grafana]` username/password inline
+`version = 1`, `[connection].ssh_host`, `[ingress].hostname`, and `[grafana]` username/password inline
 `{ op = "op://vault/item/field" }` references. Single-line basic/literal strings,
 basic escapes and comments are supported. Unknown or duplicate keys/tables,
 literal secret values, array/dotted/nested/multiline forms and unsupported sources
@@ -912,14 +912,25 @@ records authorize each request. Private sockets are dt-ingest:dt-ingest 0660 in
 0750 RuntimeDirectory; only Caddy's service supplementary group grants access.
 The helper never terminates TLS or reads server keys. Local roots remain trusted.
 
-Base station install has no TLS hostname and remains app-independent. Application
-apply supplies explicit `station.hostname`, bootstraps PKI and verifies Caddy
-before client preparation. Runtime checks require exactly two IPv4 TCP listeners,
-no UDP/admin/trace listener, exact process/user/binary/config/unit/hardening, and
-both protected Unix sockets. Absence retries within 15 seconds; deterministic
-drift fails immediately. Per-signal native mTLS probes use 30 seconds, fresh
-station telemetry uses 45 seconds. No fixed startup sleep. Transport restart
-intent is cleared only after current-process host/log signal proof.
+Station install owns accounts, the native helper, CA/server PKI, Caddy and private
+Unix-socket authorization. A fresh station requires explicit `--ingress-hostname`
+or `[ingress].hostname`; an omitted value reuses only an exactly managed server
+bundle's saved endpoint. CLI overrides the config; neither infers a TLS name from
+SSH. Native `station-ensure` accepts only the endpoint, no app registration.
+`station-verify` is read-only; the enrollment `ensure` action now only checks an
+already provisioned station. Existing valid CA/key state remains unchanged.
+
+Station health needs zero clients: validate strict PKI, exactly two IPv4 TCP
+listeners, no UDP/admin/trace listener, exact process/user/binary/config/unit/
+hardening and both protected Unix sockets. Private `/health` rejects anonymous
+requests; Caddy proves server CA/hostname and rejects certificate-less TLS. No
+synthetic client is enrolled. Absence retries within 15 seconds for active state
+and 30 seconds for transport health; invariant drift fails immediately. Each
+station service finalizes its own restart intent after its health proof, independent
+of app telemetry. Application apply and app-verify check ingress read-only;
+apply refuses unfinished station restart markers and directs repair to station
+install. Application telemetry still uses 45-second readiness and gates agent
+and client-enrollment finalization. No fixed startup sleep.
 
 `tools/fetch_caddy_fixture.py` explicitly fetches/checks a native fixture binary;
 normal builds/tests stay offline. Linux/macOS CI runs the same real-Caddy test

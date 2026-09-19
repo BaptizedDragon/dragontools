@@ -8,6 +8,7 @@ pub const max_bytes = 64 * 1024;
 pub const Config = struct {
     arena: std.heap.ArenaAllocator,
     ssh_host: ?[]const u8 = null,
+    ingress_hostname: ?[]const u8 = null,
     grafana_user_op: ?[]const u8 = null,
     grafana_password_op: ?[]const u8 = null,
     probes: []const probes.Probe = &.{},
@@ -19,7 +20,7 @@ pub const Config = struct {
     }
 };
 
-const Section = enum { root, connection, grafana, telegram, probe };
+const Section = enum { root, connection, ingress, grafana, telegram, probe };
 
 const ProbeTable = struct { name: ?[]const u8 = null, url: ?[]const u8 = null };
 
@@ -115,6 +116,7 @@ pub fn parse(a: std.mem.Allocator, contents: []const u8) !Config {
     var section: Section = .root;
     var version_seen = false;
     var connection_seen = false;
+    var ingress_seen = false;
     var grafana_seen = false;
     var telegram_seen = false;
     var probe_tables: std.ArrayList(ProbeTable) = .empty;
@@ -146,6 +148,10 @@ pub fn parse(a: std.mem.Allocator, contents: []const u8) !Config {
                 if (connection_seen) return error.DuplicateMonitoringConfigKey;
                 connection_seen = true;
                 section = .connection;
+            } else if (std.mem.eql(u8, table, "ingress")) {
+                if (ingress_seen) return error.DuplicateMonitoringConfigKey;
+                ingress_seen = true;
+                section = .ingress;
             } else if (std.mem.eql(u8, table, "grafana")) {
                 if (grafana_seen) return error.DuplicateMonitoringConfigKey;
                 grafana_seen = true;
@@ -172,6 +178,12 @@ pub fn parse(a: std.mem.Allocator, contents: []const u8) !Config {
                 if (!std.mem.eql(u8, key, "ssh_host")) return error.UnknownMonitoringConfigKey;
                 if (config.ssh_host != null) return error.DuplicateMonitoringConfigKey;
                 config.ssh_host = try line.string(storage);
+            },
+            .ingress => {
+                if (!std.mem.eql(u8, key, "hostname")) return error.UnknownMonitoringConfigKey;
+                if (config.ingress_hostname != null) return error.DuplicateMonitoringConfigKey;
+                config.ingress_hostname = try line.string(storage);
+                try @import("application.zig").validateStationHostname(config.ingress_hostname.?);
             },
             .grafana => {
                 const target = if (std.mem.eql(u8, key, "username")) &config.grafana_user_op else if (std.mem.eql(u8, key, "password")) &config.grafana_password_op else return error.UnknownMonitoringConfigKey;

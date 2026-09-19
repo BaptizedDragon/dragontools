@@ -142,9 +142,12 @@ listener or CA/server key access. Caddy strips client identity headers and suppl
 verified peer assertions; dt-ingest-owned 0660 sockets provide the local trust boundary.
 Never recreate the historical public `dragontools-ingestion.service`. Existing
 historical units require a coordinated explicit cutover; refuse rather than stop
-them implicitly. First application apply uses explicit station.hostname to prepare
-PKI and verify Caddy before client enrollment; base station install stays independent
-of applications. DNS/provider firewalls/NAT are operator-managed. Fixed write
+them implicitly. Station install owns CA/server PKI, Caddy and private ingress
+authorization. First install needs explicit --ingress-hostname or [ingress].hostname;
+later installs may reuse the managed server identity. Zero clients is healthy.
+Application apply verifies base ingress read-only before enrollment and directs
+missing/drifted/pending station state back to station install. It never clears
+station restart intent or bootstraps station ingress. DNS/provider firewalls/NAT are operator-managed. Fixed write
 routes and authenticated health only. Keep raw VM/VL and
 all administrative services loopback-only. Require a registered client identity;
 station root owns CA/server keys and monitored hosts generate their own P-256

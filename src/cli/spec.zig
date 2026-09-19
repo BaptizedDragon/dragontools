@@ -19,7 +19,7 @@ pub const commands = [_]CommandSpec{
     .{ .node = .app_apply, .parent = .monitoring, .name = "apply", .description = "Apply application monitoring from ./monitoring.toml", .command = .app_apply },
     .{ .node = .app_verify, .parent = .monitoring, .name = "app-verify", .description = "Verify application agents, signals, probes and alerts read-only", .command = .app_verify },
     .{ .node = .app_status, .parent = .monitoring, .name = "app-status", .description = "Show application monitoring state", .command = .app_status },
-    .{ .node = .install, .parent = .monitoring, .name = "install", .description = "Install the eight-service storage, Grafana, probe and alerting station", .command = .install },
+    .{ .node = .install, .parent = .monitoring, .name = "install", .description = "Install the ten-service station including mTLS ingress", .command = .install },
     .{ .node = .verify, .parent = .monitoring, .name = "verify", .description = "Verify station services, stored probe telemetry and alerting readiness", .command = .verify },
     .{ .node = .status, .parent = .monitoring, .name = "status", .description = "Show monitoring service state", .command = .status },
     .{ .node = .notify_test, .parent = .monitoring, .name = "notify-test", .description = "Send an explicit test alert through configured Alertmanager", .command = .notify_test },
@@ -62,6 +62,7 @@ const network = &[_]Command{ .install, .firewall };
 pub const flags = [_]FlagSpec{
     .{ .name = "--json", .description = "Machine-readable version metadata", .kind = .boolean, .group = "Output", .commands = &.{.version} },
     .{ .name = "--host", .description = "Direct target host", .metavar = "HOST", .group = "Required", .commands = all },
+    .{ .name = "--ingress-hostname", .description = "Station mTLS DNS name; required for first install, otherwise reuse managed identity", .metavar = "DNS", .group = "Station ingress", .commands = &.{ .install, .verify, .status } },
     .{ .name = "--ssh-host", .description = "OpenSSH host/alias; use normal SSH configuration", .metavar = "ALIAS", .group = "Connection", .commands = native_ssh },
     .{ .name = "--config", .description = "Monitoring TOML path; app commands default to ./monitoring.toml", .metavar = "PATH", .kind = .path, .group = "Configuration", .commands = configured },
     .{ .name = "--user", .description = "SSH user (default: root)", .metavar = "USER", .group = "Connection", .commands = all },

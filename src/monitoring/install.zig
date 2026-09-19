@@ -24,6 +24,7 @@ pub const Report = struct {
     grafana_credentials: ?*const @import("../secrets/secret.zig").Secret = null,
     logs_query_verified: bool = false,
     station_enabled: bool = false,
+    ingress_hostname: ?[]const u8 = null,
     probes: []const @import("probes.zig").Probe = &.{},
     telegram_credentials: ?*const @import("../secrets/secret.zig").Secret = null,
     telegram_configured: bool = false,
@@ -104,6 +105,10 @@ pub const Report = struct {
             89 => {
                 self.check = .registry_permissions;
                 return error.RegistryPermissionsConflict;
+            },
+            90 => {
+                self.check = .ingress_hostname_required;
+                return error.IngressHostnameRequired;
             },
             91, 92, 93, 94, 95 => {
                 if (self.enrollment_stage != null) self.check = switch (result.code) {
@@ -265,5 +270,6 @@ pub fn install(a: std.mem.Allocator, r: remote.Remote, report: *Report) !void {
         report.beginComponent(.vmalert_metrics);
         try @import("vmalert.zig").install(a, r, report, machine.arch, .metrics);
         report.endComponent();
+        try @import("ingress.zig").install(a, r, report, machine.arch);
     }
 }

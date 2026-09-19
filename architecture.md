@@ -18,10 +18,12 @@ The controller reads only the current directory's file or an explicit `--config`
 
 `cli/parse.zig` merges explicit monitoring configuration and validates all supplied
 inputs before SSH. CLI values override file values; the small version-1 TOML
-schema contains an OpenSSH alias, Grafana/Telegram secret references and bounded HTTP probes. `main.zig` rejects
+schema contains an OpenSSH alias, an explicit ingress TLS hostname,
+Grafana/Telegram secret references and bounded HTTP probes. `main.zig` rejects
 unimplemented integrations. `monitoring/install.zig` detects the host once, then
 installs and verifies VictoriaMetrics, VictoriaLogs, VictoriaTraces, Grafana,
-blackbox_exporter, Alertmanager, vmalert-logs and vmalert-metrics. Each concrete
+blackbox_exporter, Alertmanager, vmalert-logs, vmalert-metrics, private ingress
+authorization and Caddy. Each concrete
 component workflow handles its account, directories, binary, unit, activation,
 verification, and finalization; VictoriaMetrics also computes its capacity reserve.
 Host detection checks OS and prerequisites once. Before changing a component,
@@ -109,7 +111,8 @@ from registered monitored hosts (operator-managed firewall, mTLS required).
 Reserved :9445 remains closed; tracing agents are unavailable.
 ```
 
-The separate agent workflow adds the mTLS ingestion and logs/metrics path below.
+Station install owns the mTLS ingress even with zero applications. The separate
+agent workflow enrolls clients and adds host-side logs/metrics collection below.
 OTel traces agents, dashboards, systemd-service state alerts, monitoring firewall,
 public Grafana TLS and frontend telemetry remain unavailable. The controller exits
 after each command and keeps no state database.
@@ -231,9 +234,9 @@ use the bounded application schema; arbitrary expressions and custom metrics
 alerts remain unavailable. Renderer tests do not establish full-host
 operation or notification delivery.
 
-The ordinary install plan describes all eight available components,
+The ordinary install plan describes all ten available services,
 including their private listeners and retention, then explicitly lists unavailable
-integrations. A successful installation means all eight components passed their
+integrations. A successful installation means all ten services passed their
 checks; it does not install application-host agents or dashboards. Unsupported component paths and flags
 still fail before SSH; generated YAML does not make a component available.
 
@@ -324,8 +327,8 @@ reach loopback, so initialize promptly on a trusted host.
 Metrics uses Grafana's built-in Prometheus datasource at `127.0.0.1:8428`;
 Logs uses the signed `victoriametrics-logs-datasource` plugin at `127.0.0.1:9428`;
 Traces uses the built-in Jaeger datasource at `127.0.0.1:10428/select/jaeger`.
-The stores remain independently usable and loopback-only. Grafana provisioning adds no public ingress or firewall rule; the separate
-agent workflow manages only its narrowly scoped mTLS ingestion edge.
+The stores remain independently usable and loopback-only. Grafana provisioning adds no public ingress or firewall rule; station install independently manages its
+narrowly scoped mTLS ingestion edge.
 
 Grafana changes set only `/var/lib/dragontools/grafana-restart-required` before
 publication. Config/provisioning changes require Grafana restart but do not
@@ -533,6 +536,15 @@ The hosts need synchronized clocks because Vector supplies agent timestamps.
 These use the ordinary 45-second telemetry
 readiness budget, not fixed sleeps. Missing signals fail installation.
 
+Station `monitoring install` provisions the ingestion/Caddy accounts, native helper,
+CA/server bundle, Caddy binary/config/unit and private authorization helper. Explicit
+`[ingress].hostname` or `--ingress-hostname` supplies the TLS DNS identity on first
+install; later runs may reuse the managed server endpoint. No SSH alias inference
+or application registration is involved. Station verify checks PKI and transport,
+including mandatory client authentication with an empty registry; it never enrolls
+a test client. Application apply checks this base state read-only and directs the
+operator back to station install for missing, drifted or pending ingress.
+
 Caddy runs as `dt-caddy`, requires TLS 1.2+ and a trusted clientAuth certificate,
 and strips caller-supplied identity headers before setting verified certificate
 assertions. Its two fixed Unix-socket upstreams run as `dt-ingest` in the private
@@ -578,8 +590,8 @@ telemetry gate registry promotion and removal of the legacy station client key.
 Station finalization precedes host cleanup, so an uncertain SSH response retains
 the working candidate for recovery. Unlink is not a physical secure-erase claim.
 The registry retains public certificate/identity metadata, never new client keys.
-Server hostname changes append the explicit name to a bounded set of at most 16
-managed SANs and atomically replace only the server certificate, with ingestion
+Station install server hostname changes append the explicit name to a bounded set of at most 16
+managed SANs and atomically replace only the server certificate, with Caddy
 restart intent recorded first. Existing names remain valid for other hosts.
 Application endpoints change independently of client identity: canonical and
 consumer credential metadata keep enrollment provenance, while rendered agent
@@ -587,9 +599,9 @@ configuration supplies the current expected server name. The existing CA and
 registered machine fingerprint must still match before reuse. No hostname change
 rotates CA/server/client keys or writes another application's manifest.
 
-Apply renews client/server certificates with their existing keys at 30 days or
-less remaining (one-year leaf lifetime, ten-year CA). Valid identities are unchanged;
-server renewal dirties only ingestion. CA lifetime of 366 days or less requires
+Application apply renews client certificates; station install renews server
+certificates, with existing keys at 30 days or less remaining (one-year leaf lifetime, ten-year CA). Valid identities are unchanged;
+server renewal dirties only Caddy. CA lifetime of 366 days or less requires
 explicit maintenance and never triggers automatic rollover. Read-only verify
 creates no CSR, staged file or certificate. The native Mbed TLS client provides ordered,
 bounded DNS/TCP/server-TLS/client-auth/request diagnostics without raw errors.
@@ -693,7 +705,7 @@ cover policy constants, verified host metric names, explicit unavailable service
 rendering, deterministic log/probe/host rules, thresholds, and stable labels. CLI smoke tests
 check non-TTY behavior and the local help/completion boundary. Fake-remote tests
 cover independent first/second runs, drift, failures, and restart recovery for all
-eight installed components;
+ten installed services;
 these prove sequencing, not actual systemd behavior. Separate isolated Linux
 process fixtures verified the pinned host metric contract and real mTLS forwarding
 into VM/VL, including authenticated host-label override. Their journal input was

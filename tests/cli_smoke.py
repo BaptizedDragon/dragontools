@@ -301,7 +301,7 @@ url = "https://orders.example.com/healthz"
         assert component in unavailable, (component, unavailable)
     for component in ("vmalert", "Alertmanager", "Telegram"):
         assert component not in unavailable, (component, unavailable)
-    for text in ("eight services", "loopback:9115", "loopback:9093", "logs loopback:8880", "metrics loopback:8881",
+    for text in ("ten services", "loopback:9115", "loopback:9093", "logs loopback:8880", "metrics loopback:8881",
                  "ServiceProbeFailed", "probe_success == 0 for 2m", "reload without restart", "notify-test is a separate explicit command"):
         assert text in plan_output, (text, plan_output)
     assert "Host metric rules use verified Vector contracts; systemd-service state alerts remain deferred." in plan_output
@@ -549,7 +549,7 @@ url = "https://orders.example.com/healthz"
     assert "REDACTION-SENTINEL" not in status.stdout + status.stderr
     checked += 1
 
-    # Successful status performs eight service-state queries plus a stored-probe
+    # Successful status performs ten service-state queries plus a stored-probe
     # read, with no target probes or credential resolution.
     # Datasource names are expected policy, never evidence of a plugin query.
     saved_ssh = ssh.read_text()
@@ -567,7 +567,7 @@ esac
     status = subprocess.run([str(binary), "monitoring", "status", "--config", str(config)],
                             env=env, input="", capture_output=True, text=True, timeout=15)
     assert status.returncode == 0, (status.stdout, status.stderr)
-    assert marker.read_text() == "status\n" * 8 + "probes\n"
+    assert marker.read_text() == "status\n" * 10 + "probes\n"
     assert "none configured" in status.stdout
     assert "datasources (expected policy; not queried):" in status.stdout
     for mapping in ("Metrics -> VictoriaMetrics", "Logs -> VictoriaLogs", "Traces -> VictoriaTraces"):
@@ -757,6 +757,15 @@ elif 'source=base64.b64decode' in command:
         sys.stdout.write('unchanged')
     elif mode == 'finalize':
         assert not os.environ.get('DRAGONTOOLS_ASSERT_READONLY')
+elif 'dragontool-agent' in command and '--stdin' in command:
+    request = json.load(sys.stdin)
+    assert request['action'] in ('station-ensure', 'station-verify')
+    assert len(request['args']) == 1
+    if request['action'] == 'station-ensure':
+        assert not os.environ.get('DRAGONTOOLS_ASSERT_READONLY')
+        if os.environ.get('DRAGONTOOLS_FRESH_STATION') and not request['args'][0]:
+            sys.exit(90)
+    sys.stdout.write('unchanged')
 elif 'dragontools-blackbox-exporter-http_ready' in command:
     sys.stdout.write('Healthy')
 elif 'dragontools-blackbox-exporter-provisioning_ready' in command:
@@ -793,8 +802,8 @@ else:
         assert provider_marker.read_text() == "resolved\nresolved\n"
         modes = ("bootstrap", "reconcile", "logs_verify") if command == "install" else ("verify", "logs_verify")
         assert marker.read_text() == "".join(f"stdin {mode} verified\n" for mode in modes)
-        for number, component in enumerate(("VictoriaMetrics", "VictoriaLogs", "VictoriaTraces", "Grafana", "Blackbox exporter", "Alertmanager", "vmalert logs", "vmalert metrics"), 1):
-            heading = f"[{number}/8] {component}"
+        for number, component in enumerate(("VictoriaMetrics", "VictoriaLogs", "VictoriaTraces", "Grafana", "Blackbox exporter", "Alertmanager", "vmalert logs", "vmalert metrics", "Ingress authorization", "Caddy mTLS ingress"), 1):
+            heading = f"[{number}/10] {component}"
             assert heading in result.stdout, result.stdout
             component_output = result.stdout.split(heading, 1)[1].split("[", 1)[0]
             assert "verifying..." in component_output and "healthy; no changes" in component_output
@@ -895,6 +904,20 @@ else:
     assert "/api/ds/query" not in output
     checked += 1
 
+    # Fresh station identity is explicit. Reusing a saved identity is allowed;
+    # an absent one produces a safe actionable station error, never alias inference.
+    for flags, expected in (([], 1), (["--ingress-hostname", "station.example"], 0)):
+        result = subprocess.run([str(binary), "monitoring", "install", "--ssh-host", "management-alias", *flags],
+                                env=dict(env, DRAGONTOOLS_FRESH_STATION="1"), input="", capture_output=True, text=True, timeout=30)
+        assert result.returncode == expected, result.stdout + result.stderr
+        if expected:
+            assert 'Check: ingress_hostname_required.' in result.stdout
+            assert 'Fresh station ingress requires --ingress-hostname' in result.stdout
+            assert 'Detail: ingress_hostname_required' in result.stdout
+        else:
+            assert 'zero registered clients is valid' in result.stdout
+        checked += 1
+
     # Drive actual apply/SSH/stdin/error rendering through station ensure only.
     # No remote commands execute and no keys or credentials are generated here.
     app_config.write_text('''version = 1
@@ -921,6 +944,9 @@ marker = Path(os.environ['DRAGONTOOLS_TEST_MARKER'])
 if 'dragontool-agent' in command and '--stdin' in command:
     assert '--diagnostics' in command
     request = json.load(sys.stdin)
+    if request['action'] == 'station-verify':
+        print('unchanged')
+        sys.exit(0)
     assert request['action'] == 'ensure'
     marker.write_text('station_ensure\n')
     diagnostic = os.environ['DRAGONTOOLS_AGENT_DIAGNOSTIC']

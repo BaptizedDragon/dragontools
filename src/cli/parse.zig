@@ -17,6 +17,7 @@ pub const Options = struct {
     plan: bool = false,
     host: []const u8 = "",
     ssh_host: ?[]const u8 = null,
+    ingress_hostname: ?[]const u8 = null,
     config_path: ?[]const u8 = null,
     grafana_user_op: ?[]const u8 = null,
     grafana_password_op: ?[]const u8 = null,
@@ -92,6 +93,8 @@ pub fn validateValue(name: []const u8, value: []const u8) !void {
         if (!token(value, ".-:")) return error.InvalidHost;
     } else if (eq(name, "--ssh-host") or eq(name, "--station")) {
         if (!token(value, "_.-:")) return error.InvalidSshHost;
+    } else if (eq(name, "--ingress-hostname")) {
+        try application.validateStationHostname(value);
     } else if (eq(name, "--user") or eq(name, "--target-user")) {
         if (!token(value, "_-")) return error.InvalidUser;
     } else if (eq(name, "--port")) {
@@ -125,6 +128,10 @@ pub fn validateValue(name: []const u8, value: []const u8) !void {
 }
 fn assign(a: std.mem.Allocator, o: *Options, name: []const u8, value: []const u8) !void {
     try validateValue(name, value);
+    if (eq(name, "--ingress-hostname")) {
+        o.ingress_hostname = value;
+        return;
+    }
     if (eq(name, "--config")) {
         o.config_path = value;
         return;
@@ -203,6 +210,7 @@ pub fn parse(a: std.mem.Allocator, args: []const []const u8) !Options {
 
 fn validateMerged(o: Options, complete: bool) !void {
     if (o.command == .version or spec.applicationCommand(o.command)) return;
+    if (o.ingress_hostname) |value| try validateValue("--ingress-hostname", value);
     if (o.ssh_host) |value| try validateValue("--ssh-host", value);
     if (o.grafana_user_op) |value| try validateValue("--grafana-user-op", value);
     if (o.grafana_password_op) |value| try validateValue("--grafana-password-op", value);
@@ -234,6 +242,7 @@ fn merge(o: *Options, values: config.Config) !void {
     if (o.config_values != null) return error.MonitoringConfigAlreadyLoaded;
     var merged = o.*;
     if (merged.ssh_host == null and merged.host.len == 0) merged.ssh_host = values.ssh_host;
+    if (merged.ingress_hostname == null) merged.ingress_hostname = values.ingress_hostname;
     if (merged.grafana_user_op == null) merged.grafana_user_op = values.grafana_user_op;
     if (merged.grafana_password_op == null) merged.grafana_password_op = values.grafana_password_op;
     merged.probes = values.probes;
@@ -590,4 +599,21 @@ test "version and maintenance share strict CLI metadata without implicit SSH" {
     try std.testing.expectEqualStrings("application", remote_check.ssh_host.?);
     try std.testing.expectError(error.FlagNotAllowed, parse(a, &.{ "maintenance", "check", "--plan" }));
     try std.testing.expectError(error.FlagNotAllowed, parse(a, &.{ "version", "--ssh-host", "application" }));
+}
+
+test "station ingress hostname is explicit DNS configuration with CLI precedence" {
+    const a = std.testing.allocator;
+    var options = try parse(a, &.{ "monitoring", "install", "--ssh-host", "ssh-alias", "--ingress-hostname", "tls.example", "--config", "station.toml" });
+    defer options.deinit(a);
+    try mergeText(a, &options, "version=1\n[ingress]\nhostname='config.example'\n");
+    try std.testing.expectEqualStrings("tls.example", options.ingress_hostname.?);
+    var configured = try parse(a, &.{ "monitoring", "verify", "--config", "station.toml" });
+    defer configured.deinit(a);
+    try mergeText(a, &configured, "version=1\n[connection]\nssh_host='admin-alias'\n[ingress]\nhostname='config.example'\n");
+    try std.testing.expectEqualStrings("config.example", configured.ingress_hostname.?);
+    var reused = try parse(a, &.{ "monitoring", "install", "--ssh-host", "admin-alias" });
+    defer reused.deinit(a);
+    try std.testing.expect(reused.ingress_hostname == null);
+    try std.testing.expectError(error.InvalidStationHostname, parse(a, &.{ "monitoring", "install", "--ssh-host", "alias", "--ingress-hostname", "https://station.example:9443" }));
+    try std.testing.expectError(error.FlagNotAllowed, parse(a, &.{ "monitoring", "apply", "--ingress-hostname", "station.example" }));
 }

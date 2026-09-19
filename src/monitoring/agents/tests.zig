@@ -17,7 +17,7 @@ const State = struct {
 const Fake = struct {
     allocator: std.mem.Allocator,
     report: *model.Report,
-    states: [@typeInfo(model.Component).@"enum".fields.len]State = @splat(.{}),
+    states: [@typeInfo(model.Component).@"enum".fields.len]State = initialStates(),
     now: i64 = 0,
     delayed: ?readiness.Check = null,
     fail: ?readiness.Check = null,
@@ -47,10 +47,16 @@ const Fake = struct {
     ingestion_directory: bool = false,
     registry_failure: bool = false,
     ensure_failure: ?remote.Result = null,
-    registry_repair: bool = false,
     registry_attempts: usize = 0,
     app_helper: bool = false,
-    station_helper: bool = false,
+    station_helper: bool = true,
+    base_missing: bool = false,
+    fn initialStates() [@typeInfo(model.Component).@"enum".fields.len]State {
+        var states: [@typeInfo(model.Component).@"enum".fields.len]State = @splat(.{});
+        states[@intFromEnum(model.Component.caddy)].active = true;
+        states[@intFromEnum(model.Component.ingestion)].active = true;
+        return states;
+    }
     fn asRemote(self: *Fake) remote.Remote {
         return .{ .context = self, .execute = execute, .execute_input = executeInput, .clock = .{ .context = self, .now_ms = nowMs, .sleep_ms = sleepMs } };
     }
@@ -90,15 +96,13 @@ const Fake = struct {
         const self: *Fake = @ptrCast(@alignCast(ctx));
         if (std.mem.indexOf(u8, command, "dt-helper-inspect") != null) return .{ .code = 0, .output = if (if (self.report.component == .application_host) self.app_helper else self.station_helper) "unchanged" else "upload" };
         try std.testing.expect(std.mem.indexOf(u8, command, "PRIVATE-CERTIFICATE-SENTINEL") == null);
+        if (std.mem.indexOf(u8, command, " 'station-verify' ") != null) return .{ .code = if (self.base_missing) 86 else 0 };
+        if (self.report.state.check == .station_ingress_required and (self.state(.caddy).pending or self.state(.ingestion).pending)) return .{ .code = 1 };
         const registry_ensure = std.mem.indexOf(u8, command, " 'ensure' '") != null;
         if (registry_ensure or std.mem.indexOf(u8, command, " 'verify' '") != null) {
             self.registry_attempts += 1;
             if (self.registry_failure) return .{ .code = 89 };
-            if (registry_ensure and self.registry_repair) {
-                self.registry_repair = false;
-                self.mutations += 1;
-                return .{ .code = 0, .output = "changed" };
-            }
+            if (registry_ensure) return .{ .code = 0, .output = "unchanged" };
         }
         if (std.mem.indexOf(u8, command, " 'inspect' '") != null) return .{ .code = 0, .output = try std.fmt.allocPrint(self.allocator, "{{\"host\":\"dt-0123456789abcdef0123456789abcdef\",\"station\":\"{s}\",\"ca.crt\":\"PUBLIC-CA\",\"legacy\":{s},\"legacy_expired\":false,\"legacy_active\":{s},\"certificate_sha256\":\"{s}\",\"pending_certificate_sha256\":{s}}}", .{ self.station_hostname, if (self.legacy) "true" else "false", if (self.legacy) "true" else "false", if (self.committed_pending) "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" else "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", if (self.pending_registry) "\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"" else "null" }) };
         if (std.mem.indexOf(u8, command, " 'client-prepare' '") != null) {
@@ -235,11 +239,11 @@ test "agents first install signals finalize and unchanged rerun performs no muta
     try std.testing.expectEqual(@as(usize, 0), report.state.changes);
     try std.testing.expectEqual(before, fake.mutations);
     for ([_]model.Component{ .vector, .vmagent, .ingestion, .caddy }) |kind| {
-        try std.testing.expectEqual(@as(usize, 1), fake.state(kind).restarts);
+        try std.testing.expectEqual(@as(usize, if (kind == .caddy or kind == .ingestion) 0 else 1), fake.state(kind).restarts);
         if (kind == .vector or kind == .vmagent) try std.testing.expectEqual(@as(usize, 1), fake.state(kind).credential_writes);
     }
     try std.testing.expectEqual(@as(usize, 1), fake.enrollments);
-    try std.testing.expectEqual(@as(usize, 1), fake.state(.caddy).downloads);
+    try std.testing.expectEqual(@as(usize, 0), fake.state(.caddy).downloads);
 }
 test "registry permissions failure reports ingestion check without retry and recovers on apply" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -263,38 +267,28 @@ test "registry permissions failure reports ingestion check without retry and rec
     try std.testing.expectEqual(@as(usize, 0), report.state.changes);
     try std.testing.expectEqual(before, fake.mutations);
 }
-test "registry mode repair changes only permissions without restarting and rerun is a no-op" {
+test "application install refuses missing station ingress without bootstrap or enrollment" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var report: model.Report = .{};
-    var fake: Fake = .{ .allocator = a, .report = &report };
-    try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
-    const before = fake.mutations;
-    const states = fake.states;
-    fake.registry_repair = true;
+    var fake: Fake = .{ .allocator = a, .report = &report, .base_missing = true };
+    try std.testing.expectError(error.RemoteOperationFailed, install.install(a, fake.asRemote(), fake.asRemote(), &report, registration));
+    try std.testing.expectEqual(readiness.Check.station_ingress_required, report.state.check.?);
+    try std.testing.expectEqual(@as(usize, 0), fake.enrollments);
+    for ([_]model.Component{ .caddy, .ingestion }) |kind| {
+        try std.testing.expectEqual(@as(usize, 0), fake.state(kind).restarts);
+        for (fake.state(kind).commands) |command| try std.testing.expect(command == null);
+    }
+    // Station install has now independently bootstrapped the transport.
+    fake.base_missing = false;
     report = .{};
     try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
-    try std.testing.expectEqual(@as(usize, 1), report.state.changes);
-    try std.testing.expectEqual(before + 1, fake.mutations);
-    for (states, fake.states) |old, current| {
-        try std.testing.expectEqual(old.restarts, current.restarts);
-        try std.testing.expectEqual(old.pending, current.pending);
-        try std.testing.expectEqual(old.credential_writes, current.credential_writes);
-    }
     report = .{};
     try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
     try std.testing.expectEqual(@as(usize, 0), report.state.changes);
-    try std.testing.expectEqual(before + 1, fake.mutations);
-    const attempts = fake.registry_attempts;
-    fake.registry_failure = true;
-    report = .{};
-    try std.testing.expectError(error.RegistryPermissionsConflict, verify.verify(a, fake.asRemote(), fake.asRemote(), &report, registration));
-    try std.testing.expectEqual(model.Component.ingestion, report.component);
-    try std.testing.expectEqual(readiness.Check.registry_permissions, report.state.check.?);
-    try std.testing.expectEqual(attempts + 1, fake.registry_attempts);
-    try std.testing.expectEqual(before + 1, fake.mutations);
 }
+
 test "Vector-only and vmagent-only edits restart only the affected agent" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -313,7 +307,7 @@ test "Vector-only and vmagent-only edits restart only the affected agent" {
     try install.install(a, fake.asRemote(), fake.asRemote(), &report, changed);
     try std.testing.expectEqual(@as(usize, 2), fake.state(.vector).restarts);
     try std.testing.expectEqual(@as(usize, 2), fake.state(.vmagent).restarts);
-    try std.testing.expectEqual(@as(usize, 1), fake.state(.ingestion).restarts);
+    try std.testing.expectEqual(@as(usize, 0), fake.state(.ingestion).restarts);
     try std.testing.expectEqual(@as(usize, 1), fake.state(.host_rules).restarts);
 }
 test "no metrics targets skips vmagent binary account and credentials" {
@@ -401,7 +395,7 @@ test "removing the last application target stops only managed vmagent and reruns
     try install.install(a, fake.asRemote(), fake.asRemote(), &report, changed);
     try std.testing.expect(!fake.state(.vmagent).active);
     try std.testing.expectEqual(@as(usize, 1), fake.state(.vector).restarts);
-    try std.testing.expectEqual(@as(usize, 1), fake.state(.ingestion).restarts);
+    try std.testing.expectEqual(@as(usize, 0), fake.state(.ingestion).restarts);
     const before = fake.mutations;
     report = .{};
     try install.install(a, fake.asRemote(), fake.asRemote(), &report, changed);
@@ -457,7 +451,7 @@ test "application scopes keep shared agents independent of policy edits and isol
     try install.install(a, fake.asRemote(), fake.asRemote(), &report, merged);
     try std.testing.expectEqual(@as(usize, 1), fake.state(.vector).restarts);
     try std.testing.expectEqual(@as(usize, 2), fake.state(.vmagent).restarts);
-    try std.testing.expectEqual(@as(usize, 1), fake.state(.ingestion).restarts);
+    try std.testing.expectEqual(@as(usize, 0), fake.state(.ingestion).restarts);
     // Removing one application's optional signals preserves the other app.
     merged.applications = &.{ .{ .name = "doers", .environment = "production", .services = &.{} }, orderflow };
     merged.services = &.{"orderflow.service"};
@@ -587,7 +581,7 @@ test "uncertain station finalization retains candidate and resumes without crede
     try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
     try std.testing.expect(!fake.candidate);
     for ([_]model.Component{ .vector, .vmagent }) |kind| try std.testing.expectEqual(@as(usize, 2), fake.state(kind).restarts);
-    try std.testing.expectEqual(@as(usize, 1), fake.state(.ingestion).restarts);
+    try std.testing.expectEqual(@as(usize, 0), fake.state(.ingestion).restarts);
     try std.testing.expectEqual(@as(usize, 1), fake.state(.host_rules).restarts);
 }
 
@@ -618,7 +612,7 @@ test "endpoint failures expose safe semantic checks with bounded transient retri
     }
 }
 
-test "server-only restart intent never renews client or restarts agent consumers" {
+test "application apply preserves station restart intent until station install completes" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -627,8 +621,10 @@ test "server-only restart intent never renews client or restarts agent consumers
     try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
     fake.state(.caddy).pending = true;
     report = .{};
-    try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
-    try std.testing.expectEqual(@as(usize, 2), fake.state(.caddy).restarts);
+    try std.testing.expectError(error.RemoteOperationFailed, install.install(a, fake.asRemote(), fake.asRemote(), &report, registration));
+    try std.testing.expectEqual(readiness.Check.station_ingress_required, report.state.check.?);
+    try std.testing.expect(fake.state(.caddy).pending);
+    try std.testing.expectEqual(@as(usize, 0), fake.state(.caddy).restarts);
     try std.testing.expectEqual(@as(usize, 1), fake.enrollments);
     for ([_]model.Component{ .vector, .vmagent }) |kind| try std.testing.expectEqual(@as(usize, 1), fake.state(kind).restarts);
 }
@@ -684,7 +680,7 @@ test "interrupted migration refreshes expired rollout authorization before endpo
     try std.testing.expectEqual(@as(usize, 0), report.state.changes);
 }
 
-test "hostname change restarts only Caddy and endpoint consumers then reruns unchanged" {
+test "application hostname change follows station certificate update and restarts only endpoint consumers" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -694,11 +690,10 @@ test "hostname change restarts only Caddy and endpoint consumers then reruns unc
     var changed = registration;
     changed.station = "monitoring.baptizeddragon.com";
     fake.station_hostname = changed.station;
-    // The native PKI fixture proves SAN reconciliation. Model its sole marker.
-    fake.state(.caddy).pending = true;
+    // Station install already reconciled its certificate and finalized Caddy.
     report = .{};
     try install.install(a, fake.asRemote(), fake.asRemote(), &report, changed);
-    for ([_]model.Component{ .caddy, .vector, .vmagent }) |kind| try std.testing.expectEqual(@as(usize, 2), fake.state(kind).restarts);
+    for ([_]model.Component{ .caddy, .vector, .vmagent }) |kind| try std.testing.expectEqual(@as(usize, if (kind == .caddy) 0 else 2), fake.state(kind).restarts);
     try std.testing.expectEqual(@as(usize, 1), fake.state(.host_rules).restarts);
     try std.testing.expectEqual(@as(usize, 1), fake.enrollments);
     for ([_]model.Component{ .vector, .vmagent }) |kind| try std.testing.expectEqual(@as(usize, 1), fake.state(kind).credential_writes);
@@ -707,7 +702,7 @@ test "hostname change restarts only Caddy and endpoint consumers then reruns unc
     try install.install(a, fake.asRemote(), fake.asRemote(), &report, changed);
     try std.testing.expectEqual(@as(usize, 0), report.state.changes);
     try std.testing.expectEqual(mutations, fake.mutations);
-    for ([_]model.Component{ .caddy, .vector, .vmagent }) |kind| try std.testing.expectEqual(@as(usize, 2), fake.state(kind).restarts);
+    for ([_]model.Component{ .caddy, .vector, .vmagent }) |kind| try std.testing.expectEqual(@as(usize, if (kind == .caddy) 0 else 2), fake.state(kind).restarts);
 }
 
 test "station ensure failure reports safe substage and preserves native semantic codes" {
@@ -774,7 +769,7 @@ test "Caddy listener retries precede enrollment and preserve restart intent on t
             try std.testing.expectError(error.ReadinessTimedOut, install.install(a, fake.asRemote(), fake.asRemote(), &report, registration));
             try std.testing.expectEqual(readiness.Check.caddy_listener, report.state.check.?);
             try std.testing.expectEqual(@as(usize, 0), fake.enrollments);
-            try std.testing.expect(fake.state(.caddy).pending and fake.state(.ingestion).pending);
+            try std.testing.expect(!fake.state(.caddy).pending and !fake.state(.ingestion).pending);
             fake.timeout = false;
             report = .{};
             try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
@@ -803,23 +798,26 @@ test "Caddy invariants and legacy public gateway conflicts fail once before clie
     }
 }
 
-test "Caddy config reconciliation restarts only Caddy and reruns unchanged" {
+test "application apply refuses Caddy drift and never writes base configuration" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var report: model.Report = .{};
     var fake: Fake = .{ .allocator = a, .report = &report };
     try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
-    fake.state(.caddy).commands[@intFromEnum(remote.Operation.config)] = null;
+    const mutations = fake.mutations;
+    fake.fail = .caddy_service;
     report = .{};
-    try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
-    for ([_]model.Component{ .ingestion, .vector, .vmagent }) |kind| try std.testing.expectEqual(@as(usize, 1), fake.state(kind).restarts);
-    try std.testing.expectEqual(@as(usize, 2), fake.state(.caddy).restarts);
+    try std.testing.expectError(error.RemoteOperationFailed, install.install(a, fake.asRemote(), fake.asRemote(), &report, registration));
+    try std.testing.expectEqual(mutations, fake.mutations);
+    try std.testing.expectEqual(@as(usize, 0), fake.state(.caddy).restarts);
     try std.testing.expectEqual(@as(usize, 1), fake.enrollments);
+    // Only station install repairs it. The next apply remains unchanged.
+    fake.fail = null;
     report = .{};
     try install.install(a, fake.asRemote(), fake.asRemote(), &report, registration);
     try std.testing.expectEqual(@as(usize, 0), report.state.changes);
-    try std.testing.expectEqual(@as(usize, 2), fake.state(.caddy).restarts);
+    for ([_]model.Component{ .caddy, .ingestion }) |kind| for (fake.state(kind).commands) |command| try std.testing.expect(command == null);
 }
 
 test "per-signal endpoint diagnostics preserve bounded retries and skip unselected logs" {

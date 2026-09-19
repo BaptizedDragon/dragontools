@@ -7,7 +7,10 @@ outage recovery or notification delivery.
 Use disposable Ubuntu 24.04/26.04 station and application hosts with verified
 OpenSSH aliases `replace-me-monitoring` and `replace-me-application`, root or
 noninteractive sudo, normal prerequisites and synchronized clocks. Install the
-central station with its separate `station.toml`. Allow application-to-station TCP
+central station with its separate `station.toml` including `[ingress].hostname`.
+Before any application exists, run station install, verify and an unchanged
+install rerun. Require healthy Caddy/private auth with an empty registry and
+`No changes required.` on the rerun. Allow application-to-station TCP
 9443 (metrics) and 9444 (logs) in the operator-managed firewall; 9445 stays closed; keep raw storage/admin ports private.
 Prepare canonical `app.service` with structured journal logs, a private Prometheus
 endpoint exposing a real application metric, and a reachable HTTP health URL.
@@ -28,8 +31,9 @@ dragontool monitoring app-status
 dragontool monitoring apply
 ```
 
-1. Confirm plan makes no SSH connection. The first apply must provision the
-   private auth sockets and Caddy before client enrollment, using station.hostname.
+1. Confirm plan makes no SSH connection. Station install must already have
+   provisioned private auth sockets, PKI and Caddy before the first apply. Apply
+   verifies them read-only using station.hostname, then enrolls the client.
    Check Caddy owns only IPv4 TCP 9443/9444, its admin API and ACME are disabled,
    and the private auth helper has no TCP listener or private-key access.
    Cross-port requests, absent/unregistered certificates and forged identity
@@ -97,8 +101,8 @@ checks, not results established by the local crypto/process fixtures:
    remaining. Apply must retain the client public key, replace its certificate,
    restart only actual credential consumers, verify fresh telemetry, finalize
    registry/local state, and become a no-op on rerun. Read-only app-verify must
-   never renew. Independently shorten only the server certificate: its public
-   key stays the same and only Caddy restarts.
+   never renew. Independently shorten only the server certificate and run station install:
+   its public key stays the same and only Caddy restarts.
 4. Use a prior-version **disposable** installation with station-generated client
    credentials. Require a new host-generated key, old working credentials
    retained until the candidate path verifies, and station key unlink only after

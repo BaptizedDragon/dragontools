@@ -6,7 +6,7 @@ const workflow = @import("install.zig");
 const readiness = @import("readiness.zig");
 const probes = @import("probes.zig");
 const Secret = @import("../secrets/secret.zig").Secret;
-const extra = [_]workflow.Component{ .blackbox_exporter, .alertmanager, .vmalert_logs, .vmalert_metrics };
+const extra = [_]workflow.Component{ .blackbox_exporter, .alertmanager, .vmalert_logs, .vmalert_metrics, .ingress_auth, .caddy };
 const operation_count = @typeInfo(remote.Operation).@"enum".fields.len;
 const State = struct {
     present: [operation_count]bool = @splat(false),
@@ -21,12 +21,13 @@ const State = struct {
     fail: ?readiness.Check = null,
     delayed: ?readiness.Check = null,
     attempts: usize = 0,
+    timeout: bool = false,
 };
 const Fake = struct {
     allocator: std.mem.Allocator,
     report: *workflow.Report,
     core: @import("tests.zig").Fake = .{},
-    states: [4]State = @splat(.{}),
+    states: [6]State = @splat(.{}),
     now: i64 = 0,
     shared_binary: bool = false,
     scrape_digest: ?[32]u8 = null,
@@ -39,6 +40,8 @@ const Fake = struct {
     notify_calls: usize = 0,
     check_syntax: bool = false,
     helper_present: bool = false,
+    pki_present: bool = false,
+    pki_calls: usize = 0,
     fail_after_unit: ?workflow.Component = null,
 
     fn state(self: *Fake, component: workflow.Component) *State {
@@ -95,6 +98,22 @@ const Fake = struct {
     }
     fn publicInput(ctx: *anyopaque, op: remote.Operation, input: remote.Input, _: u32) !remote.Result {
         const self: *Fake = @ptrCast(@alignCast(ctx));
+        if (input.enrollment_stage != null) {
+            const Request = struct { action: []const u8, args: []const []const u8 };
+            const request = (try std.json.parseFromSlice(Request, self.allocator, input.bytes, .{})).value;
+            try std.testing.expectEqual(@as(usize, 1), request.args.len);
+            try std.testing.expectEqualStrings("station.example", request.args[0]);
+            if (std.mem.eql(u8, request.action, "station-ensure")) {
+                self.pki_calls += 1;
+                if (self.pki_present) return .{ .code = 0, .output = "unchanged" };
+                self.pki_present = true;
+                self.state(.caddy).pending = true;
+                return .{ .code = 0, .output = "changed" };
+            }
+            try std.testing.expectEqualStrings("station-verify", request.action);
+            if (!self.pki_present) return .{ .code = 86 };
+            return .{ .code = 0, .output = "unchanged" };
+        }
         try std.testing.expectEqual(remote.Operation.binary, op);
         try std.testing.expectEqual(workflow.Component.agent_helper, self.report.component.?);
         try std.testing.expect(input.bytes.len > 100000);
@@ -125,6 +144,7 @@ const Fake = struct {
             .health => {
                 const check = self.report.check.?;
                 if (current.fail == check) return .{ .code = 1 };
+                if (check == .legacy_ingress_conflict) return .{ .code = 0 };
                 // Ownership of app glob inputs is checked before the evaluator
                 // exists or starts; all runtime checks still require active.
                 if (check == .application_ownership) {
@@ -134,7 +154,7 @@ const Fake = struct {
                 }
                 if (current.delayed == check) {
                     current.attempts += 1;
-                    if (current.attempts <= 2) return .{ .code = 75 };
+                    if (current.timeout or current.attempts <= 2) return .{ .code = 75 };
                 }
                 try std.testing.expect(current.active);
                 if (component == .blackbox_exporter) return .{ .code = 0, .output = switch (check) {
@@ -164,7 +184,7 @@ const Fake = struct {
                 current.downloads += 1;
                 return .{ .code = 0, .output = "changed" };
             },
-            .config => if (std.mem.indexOf(u8, command, "dragontools-vmalert-dry-run") != null or std.mem.startsWith(u8, command, "runuser ")) return .{ .code = 0, .output = "unchanged" },
+            .config => if (std.mem.indexOf(u8, command, "dragontools-vmalert-dry-run") != null or std.mem.startsWith(u8, command, "runuser ") or std.mem.startsWith(u8, command, "CREDENTIALS_DIRECTORY=")) return .{ .code = 0, .output = "unchanged" },
             .unit => {
                 if (current.unit_command) |existing| if (std.mem.eql(u8, existing, command)) return .{ .code = 0, .output = "unchanged" };
                 if (component == .vmalert_logs or component == .vmalert_metrics) {
@@ -203,7 +223,7 @@ test "vmalert zero-delay unit migration dirties only its service and reruns beco
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        var report: workflow.Report = .{ .station_enabled = true, .probes = &one };
+        var report: workflow.Report = .{ .station_enabled = true, .ingress_hostname = "station.example", .probes = &one };
         var fake: Fake = .{ .allocator = a, .report = &report };
         try workflow.install(a, fake.asRemote(), &report);
         const current = fake.state(affected);
@@ -212,7 +232,7 @@ test "vmalert zero-delay unit migration dirties only its service and reruns beco
         current.unit_command = try std.mem.replaceOwned(u8, a, current.unit_command.?, "-group.maxStartDelay=1s", "-group.maxStartDelay=0s");
         const before = fake.states;
         fake.fail_after_unit = affected;
-        report = .{ .station_enabled = true, .probes = &one };
+        report = .{ .station_enabled = true, .ingress_hostname = "station.example", .probes = &one };
         try std.testing.expectError(error.RemoteOperationFailed, workflow.install(a, fake.asRemote(), &report));
         try std.testing.expectEqual(affected, report.component.?);
         try std.testing.expectEqual(remote.Operation.unit, report.phase);
@@ -227,10 +247,10 @@ test "vmalert zero-delay unit migration dirties only its service and reruns beco
         // The unit write completed before the failure. Recovery must restart
         // from persisted intent, verify, finalize, then leave the next run idle.
         fake.fail_after_unit = null;
-        report = .{ .station_enabled = true, .probes = &one };
+        report = .{ .station_enabled = true, .ingress_hostname = "station.example", .probes = &one };
         try workflow.install(a, fake.asRemote(), &report);
         try std.testing.expectEqual(@as(usize, 1), report.changes);
-        report = .{ .station_enabled = true, .probes = &one };
+        report = .{ .station_enabled = true, .ingress_hostname = "station.example", .probes = &one };
         try workflow.install(a, fake.asRemote(), &report);
         try std.testing.expectEqual(@as(usize, 0), report.changes);
         for (extra, before) |component, previous| {
@@ -251,11 +271,11 @@ test "vmalert zero-delay unit migration dirties only its service and reruns beco
     }
 }
 
-test "eight service station installs then remains unchanged while probe add remove only reload scraping" {
+test "ten service station installs then remains unchanged while probe add remove only reload scraping" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var report: workflow.Report = .{ .station_enabled = true, .probes = &one };
+    var report: workflow.Report = .{ .station_enabled = true, .ingress_hostname = "station.example", .probes = &one };
     var fake: Fake = .{ .allocator = a, .report = &report, .check_syntax = true };
     try workflow.install(a, fake.asRemote(), &report);
     try std.testing.expect(report.changes > 0);
@@ -264,7 +284,7 @@ test "eight service station installs then remains unchanged while probe add remo
     fake.check_syntax = false;
     for ([_][]const probes.Probe{ &one, &two, &one, &one }) |targets| {
         const before = fake.scrape_writes;
-        report = .{ .station_enabled = true, .probes = targets };
+        report = .{ .station_enabled = true, .ingress_hostname = "station.example", .probes = targets };
         try workflow.install(a, fake.asRemote(), &report);
         try std.testing.expectEqual(if (fake.scrape_writes == before) @as(usize, 0) else @as(usize, 2), report.changes);
         try std.testing.expectEqual(@as(usize, 1), fake.core.vm.restarts);
@@ -287,7 +307,7 @@ test "station preserves independent evaluator restart intent across failure and 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var report: workflow.Report = .{ .station_enabled = true, .probes = &one };
+    var report: workflow.Report = .{ .station_enabled = true, .ingress_hostname = "station.example", .probes = &one };
     var fake: Fake = .{ .allocator = a, .report = &report };
     fake.state(.vmalert_metrics).fail = .rules_ready;
     try std.testing.expectError(error.RemoteOperationFailed, workflow.install(a, fake.asRemote(), &report));
@@ -297,11 +317,12 @@ test "station preserves independent evaluator restart intent across failure and 
     try std.testing.expectEqual(@as(usize, 0), fake.state(.vmalert_metrics).calls[@intFromEnum(remote.Operation.finalize)]);
     try std.testing.expectEqual(@as(i64, 0), fake.now);
     fake.state(.vmalert_metrics).fail = null;
-    report = .{ .station_enabled = true, .probes = &one };
-    try @import("verify.zig").verify(a, fake.asRemote(), &report);
+    report = .{ .station_enabled = true, .ingress_hostname = "station.example", .probes = &one };
+    try std.testing.expectError(error.RemoteOperationFailed, @import("verify.zig").verify(a, fake.asRemote(), &report));
+    try std.testing.expectEqual(readiness.Check.station_ingress_required, report.check.?);
     try std.testing.expectEqual(@as(usize, 0), report.changes);
     try std.testing.expect(fake.state(.vmalert_metrics).pending);
-    report = .{ .station_enabled = true, .probes = &one };
+    report = .{ .station_enabled = true, .ingress_hostname = "station.example", .probes = &one };
     try workflow.install(a, fake.asRemote(), &report);
     try std.testing.expectEqual(@as(usize, 2), fake.state(.vmalert_metrics).restarts);
     try std.testing.expectEqual(@as(usize, 1), fake.state(.vmalert_logs).restarts);
@@ -318,7 +339,7 @@ test "station delayed evaluator readiness finalizes and unchanged install reuses
     const a = arena.allocator();
     const credentials = try Secret.init(std.testing.allocator, "PRIVATE-TELEGRAM-test-payload");
     defer credentials.deinit();
-    var report: workflow.Report = .{ .station_enabled = true, .probes = &one, .telegram_credentials = credentials, .telegram_configured = true };
+    var report: workflow.Report = .{ .station_enabled = true, .ingress_hostname = "station.example", .probes = &one, .telegram_credentials = credentials, .telegram_configured = true };
     var fake: Fake = .{ .allocator = a, .report = &report };
     fake.state(.vmalert_metrics).delayed = .rules_ready;
     try workflow.install(a, fake.asRemote(), &report);
@@ -342,7 +363,7 @@ test "broken blackbox or missing stored metrics fail station without finalizing 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var report: workflow.Report = .{ .station_enabled = true, .probes = &one };
+    var report: workflow.Report = .{ .station_enabled = true, .ingress_hostname = "station.example", .probes = &one };
     var fake: Fake = .{ .allocator = a, .report = &report };
     fake.state(.blackbox_exporter).fail = .http_ready;
     try std.testing.expectError(error.RemoteOperationFailed, workflow.install(a, fake.asRemote(), &report));
@@ -351,17 +372,89 @@ test "broken blackbox or missing stored metrics fail station without finalizing 
     try std.testing.expectEqual(@as(usize, 0), fake.state(.alertmanager).restarts);
     fake.state(.blackbox_exporter).fail = null;
     fake.scrape_fail = true;
-    report = .{ .station_enabled = true, .probes = &one };
+    report = .{ .station_enabled = true, .ingress_hostname = "station.example", .probes = &one };
     try std.testing.expectError(error.ReadinessTimedOut, workflow.install(a, fake.asRemote(), &report));
     try std.testing.expectEqual(readiness.Check.probe_metrics_ready, report.check.?);
     try std.testing.expect(fake.scrape_pending);
     try std.testing.expectEqual(@as(usize, 1), fake.core.vm.restarts);
     fake.scrape_fail = false;
-    report = .{ .station_enabled = true, .probes = &one };
+    report = .{ .station_enabled = true, .ingress_hostname = "station.example", .probes = &one };
     try workflow.install(a, fake.asRemote(), &report);
     try std.testing.expect(!fake.scrape_pending);
     try std.testing.expectEqual(@as(usize, 1), fake.core.vm.restarts);
     report.changes = 0;
     try workflow.install(a, fake.asRemote(), &report);
     try std.testing.expectEqual(@as(usize, 0), report.changes);
+}
+
+test "station ingress with zero clients retries readiness and finalizes independent intent" {
+    for ([_]bool{ false, true }) |timeout| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var report: workflow.Report = .{ .station_enabled = true, .ingress_hostname = "station.example" };
+        var fake: Fake = .{ .allocator = a, .report = &report };
+        fake.state(.caddy).delayed = .ingress_tls_ready;
+        fake.state(.caddy).timeout = timeout;
+        if (timeout) {
+            try std.testing.expectError(error.ReadinessTimedOut, workflow.install(a, fake.asRemote(), &report));
+            try std.testing.expectEqual(readiness.Check.ingress_tls_ready, report.check.?);
+            try std.testing.expect(fake.pki_present and fake.state(.caddy).pending);
+            try std.testing.expect(!fake.state(.ingress_auth).pending);
+            try std.testing.expectEqual(@as(i64, 30000), fake.now);
+            fake.state(.caddy).timeout = false;
+            report.changes = 0;
+            try workflow.install(a, fake.asRemote(), &report);
+        } else try workflow.install(a, fake.asRemote(), &report);
+        try std.testing.expect(fake.pki_present and fake.pki_calls > 0);
+        try std.testing.expect(fake.state(.caddy).attempts >= 3);
+        try std.testing.expect(!fake.state(.caddy).pending);
+        const restarts = fake.state(.caddy).restarts;
+        report.changes = 0;
+        try workflow.install(a, fake.asRemote(), &report);
+        try @import("verify.zig").verify(a, fake.asRemote(), &report);
+        try std.testing.expectEqual(@as(usize, 0), report.changes);
+        try std.testing.expectEqual(restarts, fake.state(.caddy).restarts);
+        try std.testing.expectEqual(@as(usize, 1), fake.state(.caddy).downloads);
+        try std.testing.expectEqual(@as(usize, 1), fake.state(.ingress_auth).restarts);
+    }
+}
+
+test "station Caddy config or server certificate changes restart only Caddy and rerun is unchanged" {
+    for ([_]bool{ false, true }) |certificate| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var report: workflow.Report = .{ .station_enabled = true, .ingress_hostname = "station.example" };
+        var fake: Fake = .{ .allocator = a, .report = &report };
+        try workflow.install(a, fake.asRemote(), &report);
+        if (certificate) {
+            // Native PKI tests prove publication marks only Caddy before write.
+            fake.state(.caddy).pending = true;
+        } else fake.state(.caddy).present[@intFromEnum(remote.Operation.config)] = false;
+        report.changes = 0;
+        try workflow.install(a, fake.asRemote(), &report);
+        try std.testing.expectEqual(@as(usize, 2), fake.state(.caddy).restarts);
+        try std.testing.expectEqual(@as(usize, 1), fake.core.vm.restarts);
+        try std.testing.expectEqual(@as(usize, 1), fake.core.vl.restarts);
+        for (extra) |component| if (component != .caddy) try std.testing.expectEqual(@as(usize, 1), fake.state(component).restarts);
+        report.changes = 0;
+        try workflow.install(a, fake.asRemote(), &report);
+        try std.testing.expectEqual(@as(usize, 0), report.changes);
+        try std.testing.expectEqual(@as(usize, 2), fake.state(.caddy).restarts);
+    }
+}
+
+test "station Caddy invariant fails deterministically and keeps restart intent" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var report: workflow.Report = .{ .station_enabled = true, .ingress_hostname = "station.example" };
+    var fake: Fake = .{ .allocator = a, .report = &report };
+    fake.state(.caddy).fail = .caddy_service;
+    try std.testing.expectError(error.RemoteOperationFailed, workflow.install(a, fake.asRemote(), &report));
+    try std.testing.expectEqual(readiness.Check.caddy_service, report.check.?);
+    try std.testing.expectEqual(@as(i64, 0), fake.now);
+    try std.testing.expect(fake.state(.caddy).pending);
+    try std.testing.expectEqual(@as(usize, 0), fake.state(.caddy).calls[@intFromEnum(remote.Operation.finalize)]);
 }

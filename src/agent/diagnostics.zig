@@ -17,6 +17,7 @@ pub const EnrollmentStage = enum {
 };
 pub fn enrollmentStage(action: []const u8) ?EnrollmentStage {
     const actions = .{
+        .{ "station-ensure", EnrollmentStage.station_ensure },           .{ "station-verify", EnrollmentStage.credential_verify },
         .{ "ensure", EnrollmentStage.station_ensure },                   .{ "inspect", EnrollmentStage.station_inspect },
         .{ "stage", EnrollmentStage.station_stage },                     .{ "stage-registration", EnrollmentStage.station_registration_prepare },
         .{ "registration", EnrollmentStage.station_registration_read },  .{ "finalize", EnrollmentStage.station_finalize },
@@ -58,6 +59,7 @@ pub const AgentError = enum {
     CaMaintenanceRequired,
     ClientIdentityInconsistent,
     RegistryPermissions,
+    IngressHostnameRequired,
     DnsUnresolved,
     TcpUnreachable,
     ServerTlsInvalid,
@@ -69,6 +71,7 @@ pub const Detail = enum {
     ca_maintenance,
     client_identity_inconsistent,
     registry_permissions,
+    ingress_hostname_required,
     dns_unresolved,
     tcp_unreachable,
     server_tls_invalid,
@@ -81,6 +84,7 @@ pub fn detail(code: u8) ?Detail {
         87 => .ca_maintenance,
         88 => .client_identity_inconsistent,
         89 => .registry_permissions,
+        90 => .ingress_hostname_required,
         91 => .dns_unresolved,
         92 => .tcp_unreachable,
         93 => .server_tls_invalid,
@@ -102,6 +106,7 @@ pub fn failure(stage: Stage, err: anyerror) Diagnostic {
         error.CaMaintenanceRequired => .CaMaintenanceRequired,
         error.ClientIdentityInconsistent => .ClientIdentityInconsistent,
         error.RegistryPermissions => .RegistryPermissions,
+        error.IngressHostnameRequired => .IngressHostnameRequired,
         error.DnsUnresolved => .DnsUnresolved,
         error.TcpUnreachable => .TcpUnreachable,
         error.ServerTlsInvalid => .ServerTlsInvalid,

@@ -28,13 +28,14 @@ pub fn configFile(a: std.mem.Allocator, kind: common.Kind, registration: model.R
     };
 }
 pub fn spec(a: std.mem.Allocator, kind: common.Kind, registration: model.Registration, arch: host.Arch) ![]const u8 {
-    const command = try commandLine(a, kind, registration);
-    const files = [_]File{try configFile(a, kind, registration)};
+    return serviceSpec(a, kind, arch, try commandLine(a, kind, registration), try configFile(a, kind, registration));
+}
+pub fn serviceSpec(a: std.mem.Allocator, kind: common.Kind, arch: host.Arch, command: []const u8, file: File) ![]const u8 {
+    const files = [_]File{file};
     return std.json.Stringify.valueAlloc(a, .{
         .kind = @tagName(kind),
         .owner = common.owner(kind),
         .service = common.serviceName(kind),
-        .station = registration.station,
         .unit = try common.unit(a, kind, command),
         .command = command,
         .files = &files,
@@ -221,10 +222,8 @@ pub fn verify(a: std.mem.Allocator, app: remote.Remote, station: remote.Remote, 
     try @import("helper.zig").verify(a, station, report, station_machine.arch);
     _ = try report.call(station, .health, @import("install.zig").station_preflight);
     report.component = .ingestion;
-    try service(a, station, report, registration, station_machine.arch, .ingestion);
-    report.component = .caddy;
-    try service(a, station, report, registration, station_machine.arch, .caddy);
-    report.component = .ingestion;
+    report.state.ingress_hostname = registration.station;
+    try @import("../ingress.zig").verifyBase(a, station, &report.state, station_machine.arch);
     _ = try report.call(station, .health, try ingress.verifyStationCommand(a, registration.host, registration.station, try registration.json(a)));
     report.component = .journald;
     _ = try report.call(app, .health, try @import("journald.zig").command(a, false));

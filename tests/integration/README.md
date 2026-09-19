@@ -137,7 +137,7 @@ sudo apt-get install -y openssh-server curl ca-certificates tar coreutils util-l
 Verify the VM SSH fingerprint through its console and enroll it in known_hosts.
 Allow outbound HTTPS to official GitHub release assets, `dl.grafana.com`, and
 `grafana.com` for the pinned plugin catalog artifact. Never
-use a production host: the monitoring installer now installs eight persistent
+use a production host: the monitoring installer now installs ten persistent
 services and writes actual metrics/data. Configured live alert rules may deliver
 real notifications. The older Victoria runners below retain only their
 backend-specific checks; use the full station checklist and Grafana checks too.
@@ -146,7 +146,8 @@ backend-specific checks; use the full station checklist and Grafana checks too.
 zig build -Doptimize=ReleaseSafe
 VM_HOST="disposable-ubuntu.example.com"
 VM_USER="root"
-export VM_HOST VM_USER
+INGRESS_HOSTNAME="monitoring-test.example.com"
+export VM_HOST VM_USER INGRESS_HOSTNAME
 tests/integration/victoriatraces.sh
 ```
 
@@ -189,8 +190,8 @@ may remain until installation recovers. Destroy the VM through your provider aft
 testing; DragonTools has no uninstall or provisioning command.
 
 The earlier `victoriametrics.sh` and `victorialogs.sh` runners remain available as
-narrower checks. Their current `monitoring install` commands install all eight
-services, but these earlier runners do not inspect the other five process
+narrower checks. Their current `monitoring install` commands install all ten
+services, but these earlier runners do not inspect the other seven process
 identities. Use `victoriatraces.sh` for three-component process stability and
 VictoriaTraces-isolated repair; the logs runner still covers logs-isolated repair.
 
@@ -245,6 +246,8 @@ cat > /tmp/dragontools-monitoring-integration.toml <<'TOML'
 version = 1
 [connection]
 ssh_host = "monitoring-test"
+[ingress]
+hostname = "monitoring-test.example.com"
 [[probe]]
 name = "controlled-health"
 url = "https://service.example.com/healthz"
@@ -256,7 +259,7 @@ TOML
 ./zig-out/bin/dragontool monitoring status --config /tmp/dragontools-monitoring-integration.toml
 
 ssh -o BatchMode=yes -o StrictHostKeyChecking=yes monitoring-test 'set -eu
-for component in victoriametrics victorialogs victoriatraces grafana blackbox-exporter alertmanager vmalert-logs vmalert-metrics; do
+for component in victoriametrics victorialogs victoriatraces grafana blackbox-exporter alertmanager vmalert-logs vmalert-metrics ingress-auth caddy; do
   systemctl show "dragontools-$component.service" -p MainPID -p ExecMainStartTimestampMonotonic -p User -p Group -p ActiveState -p UnitFileState
 done'
 
@@ -264,9 +267,9 @@ done'
 ./zig-out/bin/dragontool monitoring install --config /tmp/dragontools-monitoring-integration.toml
 ```
 
-Expected: all eight services verify, failed target availability is still valid
+Expected: all ten services verify, failed target availability is still valid
 telemetry, and the unchanged install prints `No changes required.`. Compare all
-eight PIDs/start times, managed file bytes/metadata and download/reload activity.
+ten PIDs/start times, managed file bytes/metadata and download/reload activity.
 The controller's status check queries stored samples; it must not request a fresh
 probe. Grafana reports its authenticated Logs query unchecked when its references
 are absent. None of these expected outcomes has been observed on a supported host
@@ -299,7 +302,7 @@ for this slice yet.
   one identity and ensure historical samples inside the 90-second window do not
   invalidate current readiness or status.
 - Add, remove and edit a controlled probe. Require only scraper config publication
-  and native reload, retaining all eight service identities. The first upgrade
+  and native reload, retaining all ten service identities. The first upgrade
   from the prior station slice adds VM's scrape flag and legitimately restarts
   VM once. After any successful verification, require cleared scrape reload intent
   and another no-op; verify alone must never reload or clear that marker.
@@ -357,7 +360,7 @@ for this slice yet.
 
 Record exact pins and checksum provenance from
 [the design](../../design.md#external-probing-and-alert-runtime), supported OS and
-architecture, all eight identities and outcomes. Never include resolved secrets
+architecture, all ten identities and outcomes. Never include resolved secrets
 or secret-bearing native errors in the evidence. **Disposable-host integration
 not run.**
 
@@ -394,31 +397,31 @@ The normal Zig test suite also runs these fixtures on both Linux and macOS.
 Run on each supported Ubuntu/architecture disposable-host combination above. The
 replaceable alias `monitoring-test` must use the same SSH authentication throughout;
 verify its host key first. Ensure no other process occupies target loopback port
-3000. Public inbound stays TCP 22 from the administrator IP only. Do not add a
+3000. Permit TCP 22 from the administrator IP and TCP 9443/9444 from monitored hosts. Do not add a
 Hetzner/provider port-3000 rule, public HTTP/HTTPS rule, or Cloudflare change.
 
 ```bash
 zig build -Doptimize=ReleaseSafe
 TEST_ALIAS="monitoring-test"
-./zig-out/bin/dragontool monitoring install --ssh-host "$TEST_ALIAS" --plan
-./zig-out/bin/dragontool monitoring install --ssh-host "$TEST_ALIAS"
+./zig-out/bin/dragontool monitoring install --ssh-host "$TEST_ALIAS" --ingress-hostname monitoring-test.example.com --plan
+./zig-out/bin/dragontool monitoring install --ssh-host "$TEST_ALIAS" --ingress-hostname monitoring-test.example.com
 ./zig-out/bin/dragontool monitoring verify --ssh-host "$TEST_ALIAS"
 ./zig-out/bin/dragontool monitoring status --ssh-host "$TEST_ALIAS"
 
-# Read-only listener inspection. All eight bind only to loopback.
+# Read-only listener inspection. Eight backend/admin services bind only to loopback; Caddy owns IPv4 9443/9444; authorization uses Unix sockets.
 ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$TEST_ALIAS" \
   'sudo -n ss -lntp'
 
-# Record all eight service identities around a deliberate unchanged install.
+# Record all ten service identities around a deliberate unchanged install.
 GRAFANA_CHECK_DIR=$(mktemp -d)
 ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$TEST_ALIAS" \
-  'for name in victoriametrics victorialogs victoriatraces grafana blackbox-exporter alertmanager vmalert-logs vmalert-metrics; do
+  'for name in victoriametrics victorialogs victoriatraces grafana blackbox-exporter alertmanager vmalert-logs vmalert-metrics ingress-auth caddy; do
      systemctl show "dragontools-$name.service" --no-pager \
        --property=Id,ActiveState,UnitFileState,MainPID,ExecMainStartTimestampMonotonic
    done' > "$GRAFANA_CHECK_DIR/before"
-./zig-out/bin/dragontool monitoring install --ssh-host "$TEST_ALIAS"
+./zig-out/bin/dragontool monitoring install --ssh-host "$TEST_ALIAS" --ingress-hostname monitoring-test.example.com
 ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$TEST_ALIAS" \
-  'for name in victoriametrics victorialogs victoriatraces grafana blackbox-exporter alertmanager vmalert-logs vmalert-metrics; do
+  'for name in victoriametrics victorialogs victoriatraces grafana blackbox-exporter alertmanager vmalert-logs vmalert-metrics ingress-auth caddy; do
      systemctl show "dragontools-$name.service" --no-pager \
        --property=Id,ActiveState,UnitFileState,MainPID,ExecMainStartTimestampMonotonic
    done' > "$GRAFANA_CHECK_DIR/after"
@@ -429,9 +432,10 @@ ssh -o StrictHostKeyChecking=yes -L 127.0.0.1:3000:127.0.0.1:3000 "$TEST_ALIAS"
 ```
 
 If the alias logs in as root on an image without sudo, use `ss -lntp` directly in
-that inspection command. Expected: all eight active/persistently enabled, loopback
-ports 8428, 9428, 10428, 3000, 9115, 9093, 8880 and 8881,
-`No changes required.` on unchanged install, and no diff in the eight
+that inspection command. Expected: all ten active/persistently enabled, loopback
+ports 8428, 9428, 10428, 3000, 9115, 9093, 8880 and 8881, Caddy on IPv4
+9443/9444, and private authorization on Unix sockets,
+`No changes required.` on unchanged install, and no diff in the ten
 process identities. Also compare managed Grafana files' bytes, modes, owners
 and modification times around the rerun, and inspect download evidence: no archive
 request or provisioning rewrite should occur. `verify` must preserve the same
@@ -461,7 +465,7 @@ resolved values, provider output or secret-bearing commands.
 Check fresh initialization with the desired login, then an existing manually
 changed password reconciled from the configured references. Repeat with the
 already-correct credentials and require `No changes required.`, no password reset,
-no restart, and stable identities for all eight services. Configured standalone
+no restart, and stable identities for all ten services. Configured standalone
 verify must authenticate read-only; mismatched credentials must fail without
 reconciliation. Exercise failure/retry and confirm no Grafana secret files or retained
 administrator plaintext are created, without printing resolved contents. Ensure no plaintext value appears in unit,
@@ -497,7 +501,7 @@ On this disposable target only, test recovery and component isolation:
 
 - On a pre-plugin DragonTools installation, rerun with the same configured
   references. Expect one pinned plugin download, Logs provisioning and one Grafana
-  restart. Record all eight PIDs/start times; the other services must remain unchanged. Require
+  restart. Record all ten PIDs/start times; the other services must remain unchanged. Require
   configured verification and UI queries to succeed, then an unchanged no-op.
 - Inspect the active plugin symlink, versioned content and per-file catalog. Require
   root ownership, executable/readable modes, intact `MANIFEST.txt`, and both plugin

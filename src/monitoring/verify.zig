@@ -142,6 +142,7 @@ pub fn verify(a: std.mem.Allocator, r: remote.Remote, report: *install.Report) !
         report.beginComponent(.vmalert_metrics);
         try @import("vmalert.zig").health(a, r, report, machine.arch, .metrics);
         report.endComponent();
+        try @import("ingress.zig").verify(a, r, report, machine.arch);
     }
 }
 
