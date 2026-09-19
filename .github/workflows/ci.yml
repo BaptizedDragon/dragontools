@@ -37,6 +37,9 @@ jobs:
       - name: Linux helper filesystem lifecycle (temporary paths only)
         if: runner.os == 'Linux'
         run: sudo python3 -I -B tests/helper_install_test.py --fixture "$PWD/zig-out/bin/dragontool-pki-fixture" --agent "$PWD/zig-out/bin/dragontool-agent"
+      - name: Native station bootstrap (isolated filesystem, exact production ownership)
+        if: runner.os == 'Linux'
+        run: sudo python3 -I -B tests/station_bootstrap_test.py --agent "$PWD/zig-out/bin/dragontool-agent"
   cross-build:
     runs-on: ubuntu-24.04
     strategy:

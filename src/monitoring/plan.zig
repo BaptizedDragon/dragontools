@@ -9,6 +9,14 @@ const logs_plugin = @import("../components/grafana_victorialogs_plugin.zig");
 
 pub const unavailable = "Not yet available: dashboards, OTel Collector/traces agents, HostDown and systemd-service state alerts, firewall, public Grafana TLS, automatic OS upgrades.\n";
 
+pub fn connection(a: std.mem.Allocator, alias: ?[]const u8, host: []const u8, hostname: ?[]const u8) ![]const u8 {
+    return std.fmt.allocPrint(a, "Connection:\n  {s}: {s}\n\nStation:\n  hostname: {s}\n  metrics ingress: :9443\n  logs ingress: :9444\n\n", .{
+        if (alias != null) "SSH alias" else "direct host",
+        alias orelse host,
+        hostname orelse "reuse managed identity (explicit hostname required for first install)",
+    });
+}
+
 pub fn renderStation(a: std.mem.Allocator, grafana_configured: bool, telegram_configured: bool, probe_count: usize) ![]const u8 {
     const core = try renderWithCredentials(a, grafana_configured);
     defer a.free(core);
@@ -65,7 +73,7 @@ pub fn renderWithCredentials(a: std.mem.Allocator, configured: bool) ![]const u8
         "Grafana access: SSH port forwarding only; public Grafana HTTPS/TLS and firewall management are unavailable.\n\n" ++
         "Safe rerun: inspect actual state, resume pending activation, and verify before finalization. Healthy unchanged services are not restarted; unchanged valid binaries are not downloaded. No controller state database.\n" ++
         "Host metric rules use verified Vector contracts; systemd-service state alerts remain deferred.\n" ++
-        "Station install owns CA/server PKI, Caddy v2.11.4 mTLS 0.0.0.0:9443 metrics / 0.0.0.0:9444 logs and private ingress authorization. Use --ingress-hostname or [ingress].hostname for a fresh station; reruns may reuse the managed server identity. Zero registered clients is healthy; :9445 stays closed. Application apply enrolls clients and installs agents only after station ingress verification.\n" ++
+        "Station install owns CA/server PKI, Caddy v2.11.4 mTLS 0.0.0.0:9443 metrics / 0.0.0.0:9444 logs and private ingress authorization. Use --ingress-hostname or [station].hostname for a fresh station; reruns may reuse the managed server identity. Zero registered clients is healthy; :9445 stays closed. Application apply enrolls clients and installs agents only after station ingress verification.\n" ++
         unavailable ++
         "No remote operations performed.\n", .{
         vm.version,

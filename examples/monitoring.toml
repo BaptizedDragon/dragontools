@@ -6,7 +6,7 @@ version = 1
 ssh_host = "monitoring"
 
 # TLS identity; independent of the SSH alias. Required for a fresh station.
-[ingress]
+[station]
 hostname = "monitoring.example.com"
 
 [grafana]

@@ -14,7 +14,12 @@ provider abstraction, arbitrary shell hooks, or general plugin framework.
 Application repositories use strict `monitoring.toml` v1 and `monitoring apply`.
 The controller reads only the current directory's file or an explicit `--config`.
 `app-verify` and `app-status` are read-only application commands; station
-`install/verify/status` retain their separate central configuration and secrets.
+`install/verify/status/notify-test` load optional `./station.toml`, separately from
+application configuration and secrets. Explicit `--config` replaces the default.
+Neither workflow searches parents, home, XDG or `/etc`; CLI-only station operation
+remains valid when the default is absent. `[station].hostname` supplies TLS identity
+independent of the SSH alias; the deprecated v1 `[ingress].hostname` alias cannot
+contradict it. Plans show the resolved connection/hostname and never resolve secrets.
 
 `cli/parse.zig` merges explicit monitoring configuration and validates all supplied
 inputs before SSH. CLI values override file values; the small version-1 TOML
@@ -541,7 +546,7 @@ readiness budget, not fixed sleeps. Missing signals fail installation.
 
 Station `monitoring install` provisions the ingestion/Caddy accounts, native helper,
 CA/server bundle, Caddy binary/config/unit and private authorization helper. Explicit
-`[ingress].hostname` or `--ingress-hostname` supplies the TLS DNS identity on first
+`[station].hostname` or `--ingress-hostname` supplies the TLS DNS identity on first
 install; later runs may reuse the managed server endpoint. No SSH alias inference
 or application registration is involved. Station verify checks PKI and transport,
 including mandatory client authentication with an empty registry; it never enrolls

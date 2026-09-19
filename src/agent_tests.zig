@@ -6,6 +6,7 @@ const client_store = @import("agent/client_store.zig");
 const j = state.j;
 const f = state.f;
 const pki = state.pki;
+const runtime = @import("agent/runtime.zig");
 const host = "dt-0123456789abcdef0123456789abcdef";
 const Services = struct {
     active: [2]bool = .{ false, false },
@@ -45,6 +46,18 @@ fn registration(a: std.mem.Allocator) !j.Value {
 // Existing PKI lifecycle fixtures exercise the station-owned bootstrap API.
 fn bootstrap(ctx: state.Context, value: j.Value) !bool {
     return station.ensureStation(ctx, try j.field(value, "station"));
+}
+test "native operation lock accepts a free directory and serializes independent opens" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    const io = std.testing.io;
+    const locked = try runtime.lock(io, fixture.temp.dir);
+    locked.close(io);
+    const repeated = try runtime.lock(io, fixture.temp.dir);
+    defer repeated.close(io);
+    // Separate open descriptions must contend even inside the same process.
+    try std.testing.expectError(error.OperationBusy, runtime.lock(io, fixture.temp.dir));
+    try std.testing.expectEqual(@as(u8, 96), @import("agent/protocol.zig").exitCode(error.OperationBusy));
 }
 test "native station bootstraps empty parents migrates registry and preserves exact valid PKI" {
     var fixture = try Fixture.init();
@@ -252,7 +265,7 @@ test "native CA corruption missing roots and near-expiry require repair without 
     if (bootstrap(ctx, value)) |_| return error.ExpectedFailure else |_| {}
     try std.testing.expectEqualStrings("broken certificate", try bytes(ctx, f.base ++ "/pki/ca/ca.crt"));
     try ctx.store.rename(f.base ++ "/pki/ca", f.base ++ "/pki/saved-ca", false);
-    try std.testing.expectError(error.CaMaintenanceRequired, bootstrap(ctx, value));
+    try std.testing.expectError(error.UnexpectedManagedFile, bootstrap(ctx, value));
     try std.testing.expect(!try ctx.store.exists(f.base ++ "/pki/ca"));
 }
 test "native registry read-only metadata rejection and owned directory migration" {
@@ -622,8 +635,8 @@ test "native managed directory refusal and registry permissions keep distinct di
         const err = (try ensureFailure(ctx, try registration(ctx.store.a), &stage)).err;
         try std.testing.expectEqual(@as(u8, if (registry) 89 else 86), @import("agent/protocol.zig").exitCode(err));
         const diagnostic = diagnostics.failure(stage, err);
-        try std.testing.expectEqual(if (registry) diagnostics.Stage.registry_prepare else .managed_directories, diagnostic.stage);
-        try std.testing.expectEqual(if (registry) diagnostics.AgentError.RegistryPermissions else .FilesystemStateRefused, diagnostic.reason);
+        try std.testing.expectEqual(if (registry) diagnostics.Stage.registry_directory else .pki_directory, diagnostic.stage);
+        try std.testing.expectEqual(if (registry) diagnostics.AgentError.RegistryPermissions else .InvalidManagedState, diagnostic.reason);
         try std.testing.expectEqualStrings("private-sentinel", try bytes(ctx, path));
     }
 }
@@ -664,4 +677,66 @@ test "station install bootstraps and verifies with zero clients and enrollment c
     try std.testing.expect(!try station.ensure(ctx, try registration(ctx.store.a)));
     try std.testing.expect(f.equal(ca, try station.loadCa(ctx)));
     try std.testing.expectEqualStrings(server, try bytes(ctx, f.base ++ "/server/server.crt"));
+}
+
+test "native station bootstrap matrix includes absent partial and exact empty production directories" {
+    for (0..3) |kind| {
+        var fixture = try Fixture.init();
+        defer fixture.deinit();
+        const ctx = fixture.context();
+        if (kind == 0) try ctx.store.removeEmpty(f.base);
+        if (kind >= 1) _ = try ctx.store.directory(f.base ++ "/pki", ctx.store.root_owner, 0o700, true);
+        if (kind == 2) {
+            _ = try ctx.store.directory(f.base ++ "/clients", ctx.store.root_owner, 0o700, true);
+            _ = try ctx.store.registry(ctx.ingestion.gid, true);
+            _ = try ctx.store.directory(f.state ++ "/ingestion", ctx.ingestion, 0o750, true);
+        }
+        const operation_lock = try runtime.lock(std.testing.io, fixture.temp.dir);
+        defer operation_lock.close(std.testing.io);
+        try std.testing.expect(try station.ensureStation(ctx, "monitoring.baptizeddragon.com"));
+        const ca = try station.loadCa(ctx);
+        const server = try bytes(ctx, f.base ++ "/server/server.crt");
+        _ = try station.verifyServer(ctx, "monitoring.baptizeddragon.com", false);
+        try std.testing.expect(!try station.ensureStation(ctx, "monitoring.baptizeddragon.com"));
+        try std.testing.expect(f.equal(ca, try station.loadCa(ctx)));
+        try std.testing.expectEqualStrings(server, try bytes(ctx, f.base ++ "/server/server.crt"));
+        for ([_][]const u8{ "registry", "clients" }) |name| try std.testing.expectEqual(@as(usize, 0), (try ctx.store.names(try ctx.store.path(f.base, name))).len);
+        try std.testing.expect(!try ctx.store.exists(f.etc ++ "/apps"));
+    }
+}
+
+test "native unpublished CA staging recovers while unrecognized files fail closed" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    const ctx = fixture.context();
+    const parent = f.base ++ "/pki";
+    _ = try ctx.store.directory(parent, ctx.store.root_owner, 0o700, true);
+    const stage = try ctx.store.temporary(parent, "bundle", true);
+    try ctx.store.write(try ctx.store.path(stage, ".dragontools-managed"), f.marker, ctx.store.root_owner, 0o400);
+    try ctx.store.write(try ctx.store.path(stage, "ca.key"), "incomplete private candidate", ctx.store.root_owner, 0o600);
+    try std.testing.expect(try station.ensureStation(ctx, "station.example"));
+    try std.testing.expect(!try ctx.store.exists(stage));
+    const ca = try station.loadCa(ctx);
+    try std.testing.expect(!try station.ensureStation(ctx, "station.example"));
+    try ctx.store.write(parent ++ "/unexpected.key", "private-sentinel", ctx.store.root_owner, 0o400);
+    try std.testing.expectError(error.UnexpectedManagedFile, station.ensureStation(ctx, "station.example"));
+    try std.testing.expectError(error.UnexpectedManagedFile, station.verifyServer(ctx, "station.example", false));
+    try std.testing.expect(f.equal(ca, try station.loadCa(ctx)));
+    try std.testing.expectEqualStrings("private-sentinel", try bytes(ctx, parent ++ "/unexpected.key"));
+}
+
+test "native CA and server publication interruptions reuse already published keys" {
+    for ([_][]const u8{ f.base ++ "/pki/ca", f.base ++ "/server" }) |path| {
+        var fixture = try Fixture.init();
+        defer fixture.deinit();
+        const ctx = fixture.context();
+        var fault: Fault = .{ .event = "after_publish", .path = path };
+        try std.testing.expectError(error.InjectedInterruption, station.ensureStation(fault.context(ctx), "station.example"));
+        const ca = try station.loadCa(ctx);
+        const server = if (try ctx.store.exists(f.base ++ "/server")) try bytes(ctx, f.base ++ "/server/server.crt") else null;
+        try std.testing.expectEqual(server == null, try station.ensureStation(ctx, "station.example"));
+        try std.testing.expect(f.equal(ca, try station.loadCa(ctx)));
+        if (server) |saved| try std.testing.expectEqualStrings(saved, try bytes(ctx, f.base ++ "/server/server.crt"));
+        try std.testing.expect(!try station.ensureStation(ctx, "station.example"));
+    }
 }

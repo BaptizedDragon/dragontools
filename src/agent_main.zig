@@ -49,8 +49,10 @@ fn entry(init: std.process.Init, enabled: *bool, stage: *diagnostics.Stage) !u8 
     stage.* = .native_initialization;
     const root = try std.Io.Dir.openDirAbsolute(init.io, "/", .{});
     defer root.close(init.io);
+    stage.* = .operation_lock;
     const operation_lock = try runtime.lock(init.io, root);
     defer operation_lock.close(init.io);
+    stage.* = .native_initialization;
     var system: runtime.Runtime = .{ .a = a, .io = init.io };
     var ctx = try system.context(root, protocol.stationAction(action));
     ctx.diagnostic_stage = stage;

@@ -20,6 +20,9 @@ fn print(io: std.Io, message: []const u8) void {
 pub fn main(init: std.process.Init) void {
     run(init) catch |err| {
         const detail: ?[]const u8 = switch (err) {
+            error.StationConfigurationRequired => "No station configuration found.\n\nExpected:\n  ./station.toml\n\nor provide:\n  --config <path>\n  or the required CLI options.\n",
+            error.UnableToReadMonitoringConfig => "Unable to read station config. The default is ./station.toml; use --config for an explicit path. Nothing changed; SSH was not attempted.\n",
+            error.ConflictingStationHostname => "Conflicting station hostname settings. Use [station].hostname; the v1 [ingress].hostname alias must agree if both are supplied. Nothing changed; SSH was not attempted.\n",
             error.ApplicationTracesUnsupported => "Traces are declared but not supported by this DragonTools build. Nothing changed; SSH was not attempted.\n",
             error.ApplicationMetricsAlertsUnsupported => "Custom metrics alerts are not supported by this DragonTools build. Nothing changed; SSH was not attempted.\n",
             error.UnableToReadApplicationConfig => "Unable to read application config. The default is ./monitoring.toml; use --config for an explicit path. Nothing changed; SSH was not attempted.\n",
@@ -102,6 +105,7 @@ fn execute(init: std.process.Init, options: cli.Options) !void {
         return;
     }
     if (options.plan) {
+        print(init.io, try plan.connection(a, options.ssh_host, options.host, options.ingress_hostname));
         print(init.io, try plan.renderStation(a, options.grafana_user_op != null, options.telegram_bot_token_op != null, options.probes.len));
         return;
     }
@@ -142,7 +146,7 @@ fn execute(init: std.process.Init, options: cli.Options) !void {
                     "Verification is read-only. Later checks were not attempted. Correct the cause and repeat verification.";
                 print(init.io, try std.fmt.allocPrint(a, "Failed at {s}; {d} steps completed, {d} change steps confirmed. Component: {s}. Check: {s}. {s} Check SSH/prerequisites for detection failures, or inspect the managed unit and journal for later failures.\n", .{ @tagName(report.phase), report.completed, report.changes, if (report.component) |component| component.name() else "host", if (report.check) |check| @tagName(check) else @tagName(report.phase), advice }));
                 print(init.io, try report.credentialDiagnostics(a));
-                if (err == error.IngressHostnameRequired) print(init.io, "Fresh station ingress requires --ingress-hostname or [ingress].hostname in the station config. The TLS identity is never inferred from SSH.\n");
+                if (err == error.IngressHostnameRequired) print(init.io, "Fresh station ingress requires --ingress-hostname or [station].hostname in the station config. The TLS identity is never inferred from SSH.\n");
                 return err;
             };
             if (options.command == .install and report.changes == 0) print(init.io, "No changes required.\n");

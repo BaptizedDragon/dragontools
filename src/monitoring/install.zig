@@ -49,6 +49,26 @@ pub const Report = struct {
     pub fn captureAgentFailure(self: *Report, result: remote.Result) void {
         self.agent_detail = if (self.enrollment_stage != null) remote.diagnostics.detail(result.agent_exit_code orelse result.code) else null;
         self.agent_diagnostic = if (self.agent_detail != null) result.diagnostic else null;
+        if (self.agent_diagnostic) |diagnostic| {
+            // Fixed invariants only; never forward helper input or raw stderr.
+            const mapped: ?@import("readiness.zig").Check = switch (diagnostic.reason) {
+                .OperationBusy => .operation_busy,
+                .OperationLockFailed => .operation_lock_failed,
+                .UnexpectedManagedFile => .unexpected_managed_file,
+                .UnexpectedSymlink => .unexpected_symlink,
+                else => switch (diagnostic.stage) {
+                    .ingestion_root => .ingestion_root_invalid,
+                    .pki_directory => .pki_directory_invalid,
+                    .clients_directory => .clients_directory_invalid,
+                    .registry_directory => .registry_directory_invalid,
+                    .state_directory => .state_directory_invalid,
+                    .ca_state, .ca_certificate_validation => .ca_bundle_invalid,
+                    .server_state, .server_certificate_validation => .server_identity_invalid,
+                    else => null,
+                },
+            };
+            if (mapped) |check| self.check = check;
+        }
     }
     pub fn emit(self: *Report, phase: progress.Phase) void {
         if (self.progress) |sink| if (self.component) |component| sink.emit(.{ .component = component, .phase = phase, .station_enabled = self.station_enabled });
@@ -103,8 +123,12 @@ pub const Report = struct {
                 return error.ClientIdentityInconsistent;
             },
             89 => {
-                self.check = .registry_permissions;
+                if (self.check != .registry_directory_invalid) self.check = .registry_permissions;
                 return error.RegistryPermissionsConflict;
+            },
+            96 => {
+                self.check = .operation_busy;
+                return error.OperationBusy;
             },
             90 => {
                 self.check = .ingress_hostname_required;

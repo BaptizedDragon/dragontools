@@ -64,7 +64,7 @@ pub const flags = [_]FlagSpec{
     .{ .name = "--host", .description = "Direct target host", .metavar = "HOST", .group = "Required", .commands = all },
     .{ .name = "--ingress-hostname", .description = "Station mTLS DNS name; required for first install, otherwise reuse managed identity", .metavar = "DNS", .group = "Station ingress", .commands = &.{ .install, .verify, .status } },
     .{ .name = "--ssh-host", .description = "OpenSSH host/alias; use normal SSH configuration", .metavar = "ALIAS", .group = "Connection", .commands = native_ssh },
-    .{ .name = "--config", .description = "Monitoring TOML path; app commands default to ./monitoring.toml", .metavar = "PATH", .kind = .path, .group = "Configuration", .commands = configured },
+    .{ .name = "--config", .description = "Explicit TOML path; station defaults to ./station.toml, app to ./monitoring.toml", .metavar = "PATH", .kind = .path, .group = "Configuration", .commands = configured },
     .{ .name = "--user", .description = "SSH user (default: root)", .metavar = "USER", .group = "Connection", .commands = all },
     .{ .name = "--port", .description = "SSH port (default: 22)", .metavar = "PORT", .group = "Connection", .commands = all },
     .{ .name = "--ssh-sock", .description = "SSH agent socket, including 1Password agent", .metavar = "PATH", .kind = .path, .group = "Connection", .commands = all },
@@ -91,6 +91,9 @@ pub const flags = [_]FlagSpec{
 };
 pub fn applicationCommand(command: Command) bool {
     return command == .app_apply or command == .app_verify or command == .app_status;
+}
+pub fn stationCommand(command: Command) bool {
+    return command == .install or command == .verify or command == .status or command == .notify_test;
 }
 pub fn flagAllowed(item: FlagSpec, command: Command) bool {
     return std.mem.indexOfScalar(Command, item.commands, command) != null;

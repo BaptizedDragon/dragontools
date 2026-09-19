@@ -577,11 +577,16 @@ unchecked; plans and status never resolve secrets or execute these API requests.
 
 ## Monitoring configuration and Grafana credentials
 
-Station `--config PATH` is explicit and supported for monitoring install, verify
-and status. That schema has no conventional-path search, includes or
-interpolation; application config uses the separate contract above.
+Station install, verify, status and notify-test load the optional `./station.toml`
+from CWD, including install plans. Explicit `--config PATH` replaces the default;
+CLI fields override that selected file, then existing CLI defaults apply. Only
+absence is optional; present invalid/unreadable config fails safely. No parent,
+home, XDG or `/etc` search, includes or interpolation is performed. Application
+commands retain the independent `./monitoring.toml` contract above. `[station].hostname`
+is canonical; the v1 `[ingress].hostname` alias remains accepted, and contradictory
+values fail before CLI merging or SSH.
 `config/monitoring.zig` accepts a bounded 64 KiB version-1 TOML subset:
-`version = 1`, `[connection].ssh_host`, `[ingress].hostname`, and `[grafana]` username/password inline
+`version = 1`, `[connection].ssh_host`, `[station].hostname`, and `[grafana]` username/password inline
 `{ op = "op://vault/item/field" }` references. Single-line basic/literal strings,
 basic escapes and comments are supported. Unknown or duplicate keys/tables,
 literal secret values, array/dotted/nested/multiline forms and unsupported sources
@@ -914,7 +919,7 @@ The helper never terminates TLS or reads server keys. Local roots remain trusted
 
 Station install owns accounts, the native helper, CA/server PKI, Caddy and private
 Unix-socket authorization. A fresh station requires explicit `--ingress-hostname`
-or `[ingress].hostname`; an omitted value reuses only an exactly managed server
+or `[station].hostname`; an omitted value reuses only an exactly managed server
 bundle's saved endpoint. CLI overrides the config; neither infers a TLS name from
 SSH. Native `station-ensure` accepts only the endpoint, no app registration.
 `station-verify` is read-only; the enrollment `ensure` action now only checks an
@@ -984,18 +989,18 @@ replaces keys, suppresses a failure or relies on platform-specific output text.
 New CA material is fully validated in memory before root-private staging and atomic rename;
 validation failure removes staging and leaves no published CA directory. Parent
 directories may remain. New directories explicitly receive their requested mode
-after creation under the helper's private umask. Apply reconciles the fixed
+after creation under the helper's private umask. Station install reconciles the fixed
 ingestion registry directory to root:dt-ingest 0750, including older mode-0700
 directories on initialized stations. Directory handles opened without following
-symlinks anchor the repair under the owned ingestion tree. Only mode is repaired
+symlinks anchor the repair under the owned ingestion tree. Only the known 0700 mode is repaired
 after root ownership and the dt-ingest group are proven; unsafe paths, other file
-types and incompatible ownership fail with `ingestion / registry_permissions`.
+types and incompatible ownership fail with `Ingress authorization / registry_directory_invalid` (legacy helpers retain `registry_permissions`).
 Contents and credentials are preserved; no service restart is requested for a
 mode-only repair, and correct permissions are a no-op. Read-only verification
 reports drift without repairing it. Empty pki/clients/registry parents remain a
 valid bootstrap starting point. An existing CA is never replaced on
 validation failure; missing CA material on an initialized station still requires
-explicit maintenance. Rerunning apply needs no manual cleanup of empty parents.
+explicit maintenance. Rerunning station install needs no manual cleanup of empty parents.
 
 The bounded native stdin decoder treats Zig 0.16 `error.EndOfStream` as normal
 request completion. It still rejects empty, malformed, oversized and unexpected
@@ -1004,7 +1009,18 @@ station enrollment failing before CA generation when the controller closes stdin
 
 `ingestion.zig` invokes the installed native helper using a fixed command and
 bounded public JSON on stdin. SSH transports only public inspection, CSR and
-certificate payloads. The root operation lock serializes local generations. A CSR is at most 8192 bytes and must be strict PEM
+certificate payloads. The root operation lock serializes local generations. It opens the existing
+`/etc/dragontools` directory with `iterate=true`: Zig 0.16 otherwise uses Linux
+`O_PATH`, which cannot be flocked (EBADF). Contention maps to `OperationBusy`/96;
+other lock failures are distinct from filesystem invariants. The lock remains
+exclusive/nonblocking and creates no lock file. Bootstrap explicitly validates
+each managed parent with separate safe stages, and records missing CA as an
+allowed bootstrap condition only before any server/client/registry state exists.
+Only root-owned unpublished `.bundle-<32 lowercase hex>` and `.credential-...`
+candidates with known metadata/contents are discarded; active CA/server bundles
+are validated and reused. Unknown files, links or malformed active bundles fail
+closed. Recovery validates every candidate entry before unlinking any; marker
+and file mode transitions from interrupted writes are recognized. A CSR is at most 8192 bytes and must be strict PEM
 PKCS#10. The station checks its signature, P-256 public-key validity, exact CN and
 sole host URI SAN with a narrow DER profile. Other requested extensions (including
 CA/serverAuth), extra names and attributes fail before signing. Issuance never

@@ -2,6 +2,21 @@
 
 ## 0.1.0-dev — unreleased
 
+- Default station install/verify/status/notify-test to CWD `./station.toml`, with
+  explicit config replacement and CLI precedence. Add canonical `[station].hostname`,
+  retain the compatible v1 `[ingress].hostname` alias and reject conflicts. Plans
+  show the SSH connection and TLS hostname/9443/9444 without resolving secrets;
+  application commands retain their separate `./monitoring.toml` default.
+- Fix Linux native bootstrap's free-lock failure: Zig 0.16 `O_PATH` descriptors
+  cannot be flocked. Use a readable directory descriptor with unchanged exclusive,
+  nonblocking semantics; report contention as OperationBusy/96. Add granular safe
+  filesystem/CA/server checks and preserve redaction and CA maintenance semantics.
+- Converge absent/empty/interrupted station PKI state, recover proven unpublished
+  candidates, reuse published CA/server identity and restrict registry repair to
+  the known 0700-to-0750 generation. Add portable lifecycle/lock tests and a real
+  helper chroot regression with exact root/dt-ingest production ownership and no-op
+  rerun. No application registration, ambient OpenSSL or architecture changes.
+
 - Accept fresh vmagent failed-scrape telemetry when the application is down;
   require fresh non-scrape payload on successful targets and reject stale/missing
   data. Report pipeline readiness independently of application availability.

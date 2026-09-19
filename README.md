@@ -6,7 +6,8 @@ Install the monitoring station once, then keep each application's monitoring
 contract in its own repository:
 
 ```bash
-dragontool monitoring install --config station.toml
+cd monitoring-infra # Directory containing station.toml
+dragontool monitoring install
 
 cd my-application
 dragontool monitoring apply --plan
@@ -15,6 +16,7 @@ dragontool monitoring app-verify
 dragontool monitoring apply # Deliberate unchanged rerun
 ```
 
+Station `install`, `verify`, `status` and `notify-test` read `./station.toml`.
 Application commands read only `./monitoring.toml` by default, or one explicit
 `--config PATH`. They configure host metrics, selected journal logs, optional
 application metrics, station HTTP probes and application alerts. The strict
@@ -129,14 +131,18 @@ while anonymous access, auth proxy and signup stay disabled.
 
 ## Monitoring configuration and Grafana credentials
 
-`--config` reads one explicit, small TOML file for monitoring `install`, `verify`,
-`status`, and `notify-test`. There is no implicit file discovery. The version-1
+`monitoring install`, `verify`, `status` and `notify-test` load **`./station.toml`**
+when present; install `--plan` uses it too. `--config PATH` selects one different
+file instead of the default. Only the current working directory is used: no parent,
+home, XDG or `/etc` search. Application commands use only `./monitoring.toml`. The version-1
 schema accepts an OpenSSH alias, an ingress TLS DNS hostname, Grafana/Telegram secret references and bounded
 named HTTP/HTTPS probes; component tuning, literal passwords, unknown keys and
 duplicate keys are rejected.
 
-The checked-in [examples/monitoring.toml](examples/monitoring.toml) contains these
-**example** references. Replace the alias and vault/item/field paths with your own:
+Save central station intent as `station.toml`, separately from application
+repositories. [examples/station.toml](examples/station.toml) is a minimal template.
+The following hostname, SSH alias and optional secret references are examples;
+replace them with your own:
 
 ```toml
 version = 1
@@ -144,12 +150,16 @@ version = 1
 [connection]
 ssh_host = "monitoring"
 
-[ingress]
-hostname = "monitoring.example.com"
+[station]
+hostname = "monitoring.baptizeddragon.com"
 
 [grafana]
 username = { op = "op://BaptizedDragon/Grafana/username" }
 password = { op = "op://BaptizedDragon/Grafana/password" }
+
+[telegram]
+bot_token = { op = "op://BaptizedDragon/DragonTools/alarms-telegram-bot-token" }
+chat_id = { op = "op://BaptizedDragon/DragonTools/alarms-telegram-chat-id" }
 ```
 
 A reference contains no resolved secret and is safe to keep in configuration or
@@ -164,17 +174,44 @@ its CLI, or its session credentials.
 op signin
 
 zig build -Doptimize=ReleaseSafe
-./zig-out/bin/dragontool monitoring install --config examples/monitoring.toml --plan
-./zig-out/bin/dragontool monitoring install --config examples/monitoring.toml
-./zig-out/bin/dragontool monitoring verify --config examples/monitoring.toml
-./zig-out/bin/dragontool monitoring status --config examples/monitoring.toml
+./zig-out/bin/dragontool monitoring install --plan
+./zig-out/bin/dragontool monitoring install
+./zig-out/bin/dragontool monitoring verify
+./zig-out/bin/dragontool monitoring status
 
 # Desired credentials already work: no password reset or service restart.
-./zig-out/bin/dragontool monitoring install --config examples/monitoring.toml
+./zig-out/bin/dragontool monitoring install
 ```
 
-Explicit CLI values override the corresponding configuration values. The direct
-CLI equivalent is:
+Precedence is explicit CLI flags, then the selected file, then CLI defaults. An
+explicit `--config other.toml` ignores `./station.toml` completely. A missing
+default file still permits CLI-only usage; without a connection, the error points
+to `./station.toml`, `--config` and CLI options. Present malformed files fail
+without exposing their contents.
+
+`connection.ssh_host` is an administrative OpenSSH alias. `station.hostname` is
+the independent DNS/mTLS identity, overridden by `--ingress-hostname`. It must be
+a DNS name without a scheme, port or path. Version 1 continues accepting deprecated
+`[ingress].hostname`; specifying both forms with different values fails. Plan shows
+the connection, hostname and metrics/logs ports without resolving any secrets.
+
+For example, from a directory without `station.toml`, CLI-only operation is:
+
+```bash
+dragontool monitoring install --ssh-host monitoring \
+  --ingress-hostname monitoring.baptizeddragon.com
+```
+
+`station.toml` describes the station; `monitoring.toml` describes one application:
+
+```bash
+cd monitoring-infra
+dragontool monitoring install
+cd ../doers
+dragontool monitoring apply
+```
+
+The Grafana CLI equivalent is:
 
 ```bash
 ./zig-out/bin/dragontool monitoring install \
@@ -569,14 +606,14 @@ Run with the same enrolled SSH alias throughout:
 
 ```bash
 zig build -Doptimize=ReleaseSafe
-./zig-out/bin/dragontool monitoring install --config monitoring.toml --plan
-./zig-out/bin/dragontool monitoring install --config monitoring.toml
-./zig-out/bin/dragontool monitoring verify --config monitoring.toml
-./zig-out/bin/dragontool monitoring status --config monitoring.toml
+./zig-out/bin/dragontool monitoring install --config station.toml --plan
+./zig-out/bin/dragontool monitoring install --config station.toml
+./zig-out/bin/dragontool monitoring verify --config station.toml
+./zig-out/bin/dragontool monitoring status --config station.toml
 # Deliberate unchanged rerun:
-./zig-out/bin/dragontool monitoring install --config monitoring.toml
+./zig-out/bin/dragontool monitoring install --config station.toml
 # Explicitly sends a test alert through Alertmanager to its configured receiver:
-./zig-out/bin/dragontool monitoring notify-test --config monitoring.toml
+./zig-out/bin/dragontool monitoring notify-test --config station.toml
 ```
 
 Only GET with expected HTTP 2xx is supported. Probe names are unique, at most 63
@@ -1004,7 +1041,7 @@ for local test evidence and remaining deployment checks.
 
 `monitoring install` owns all ten station services, including Caddy and private
 registry authorization, plus the native helper and station PKI. A fresh station
-requires `--ingress-hostname DNS` or `[ingress].hostname` in the central station
+requires `--ingress-hostname DNS` or `[station].hostname` in the central station
 config. The CLI flag overrides the file. Without either, an existing exactly
 managed server bundle supplies its saved identity; a fresh station fails with
 `ingress_hostname_required`. The SSH alias never supplies the TLS hostname.
@@ -1224,6 +1261,25 @@ stack traces are printed. A diagnostic does not authorize deleting or rotating
 CA state. Correct the reported cause and rerun station install for base PKI/ingress,
 or the same application config for client enrollment;
 empty managed bootstrap parents remain safe to reuse.
+
+Station install accepts an absent ingestion tree, the empty root-owned
+`pki/clients/registry` skeleton and interrupted unpublished bundles. It validates
+native Mbed TLS CA/server candidates before atomic publication and fsync, reuses
+an already published valid CA, and never rotates an invalid existing CA silently.
+Only recognized private staging with known names, marker and metadata is removed;
+unrecognized files and symlinks are preserved and refused. The known
+root:dt-ingest registry mode `0700` migrates to `0750`; other ownership/type or
+unknown mode conflicts fail. No app directory or registration is required.
+
+Fixed checks now distinguish `ingestion_root_invalid`, `pki_directory_invalid`,
+`clients_directory_invalid`, `registry_directory_invalid`, `state_directory_invalid`,
+`unexpected_managed_file`, `unexpected_symlink`, `ca_bundle_invalid` and
+`server_identity_invalid`. Missing CA in an uninitialized tree is the internal
+`ca_missing_bootstrap_allowed` state, not corruption. A held operation lock reports
+`operation_busy` (native exit 96); it never reports a filesystem contradiction.
+The Linux lock regression used Zig 0.16's `O_PATH` directory descriptor, which
+`flock` rejects even without contention. Using a readable directory handle preserves
+the same exclusive, nonblocking advisory lock and read-only verification behavior.
 
 This is a private ingestion channel, so DragonTools intentionally uses its own
 CA rather than Let's Encrypt. The station certificate includes its configured

@@ -69,6 +69,7 @@ pub const Store = struct {
         errdefer current.close(self.io);
         var parts = std.mem.splitScalar(u8, pathname[1..], '/');
         while (parts.next()) |part| {
+            if ((try current.statFile(self.io, part, .{ .follow_symlinks = false })).kind == .sym_link) return error.UnexpectedManagedSymlink;
             const next = try current.openDir(self.io, part, .{ .iterate = true, .follow_symlinks = false });
             current.close(self.io);
             current = next;
@@ -114,6 +115,9 @@ pub const Store = struct {
         defer dir.close(self.io);
         const name = std.fs.path.basename(pathname);
         var changed = false;
+        if (dir.statFile(self.io, name, .{ .follow_symlinks = false })) |st| {
+            if (st.kind == .sym_link) return error.UnexpectedManagedSymlink;
+        } else |err| if (err != error.FileNotFound) return err;
         const child = dir.openDir(self.io, name, .{ .iterate = true, .follow_symlinks = false }) catch |err| blk: {
             if (err != error.FileNotFound or !create) return err;
             try dir.createDir(self.io, name, .fromMode(0o700));
@@ -150,7 +154,8 @@ pub const Store = struct {
         try metadata(child.handle, .{ .uid = self.root_owner.uid, .gid = group }, null, std.posix.S.IFDIR);
         const st = try child.stat(self.io);
         if (st.permissions.toMode() & 0o7777 != 0o750) {
-            try j.require(reconcile);
+            // Only the known previous 0700 generation may be migrated.
+            try j.require(reconcile and st.permissions.toMode() & 0o7777 == 0o700);
             try child.setPermissions(self.io, .fromMode(0o750));
             try self.syncDir(child);
             changed = true;
@@ -176,6 +181,7 @@ pub const Store = struct {
         // Refuse FIFOs/devices before opening; opening a FIFO could otherwise
         // block forever. Ancestors are root-owned and not publicly writable.
         const before = try dir.statFile(self.io, std.fs.path.basename(pathname), .{ .follow_symlinks = false });
+        if (before.kind == .sym_link) return error.UnexpectedManagedSymlink;
         try j.require(before.kind == .file);
         const file = try dir.openFile(self.io, std.fs.path.basename(pathname), .{ .follow_symlinks = false, .allow_directory = false });
         defer file.close(self.io);
@@ -260,8 +266,8 @@ pub const Store = struct {
     pub fn managed(self: Store, pathname: []const u8, owner: Owner, mode: u16, names_value: []const []const u8, content: []const u8, exact: bool) !Files {
         _ = try self.directory(pathname, .{ .uid = self.root_owner.uid, .gid = owner.gid }, mode, false);
         const entries = try self.names(pathname);
+        for (entries) |name| if (!std.mem.eql(u8, name, ".dragontools-managed") and !j.contains(names_value, name)) return error.UnexpectedManagedFile;
         if (exact) try j.require(entries.len == names_value.len + 1);
-        for (entries) |name| try j.require(std.mem.eql(u8, name, ".dragontools-managed") or j.contains(names_value, name));
         try j.require(std.mem.eql(u8, try self.read(try self.path(pathname, ".dragontools-managed"), self.root_owner, 0o400, 128), content));
         const result = try self.readFiles(pathname, names_value, owner);
         if (exact) try keys(result, names_value);
@@ -286,5 +292,52 @@ pub const Store = struct {
         try self.syncDir(dir);
         try self.rename(stage, pathname, false);
         published = true;
+    }
+    pub fn stagedFile(self: Store, pathname: []const u8, owner: Owner) ![]const u8 {
+        const parent_dir = try self.parent(pathname);
+        defer parent_dir.close(self.io);
+        const st = try parent_dir.statFile(self.io, std.fs.path.basename(pathname), .{ .follow_symlinks = false });
+        if (st.kind == .sym_link) return error.UnexpectedManagedSymlink;
+        const mode: u16 = @intCast(st.permissions.toMode() & 0o7777);
+        try j.require(mode == 0o400 or mode == 0o600);
+        if (mode == 0o600) {
+            // write() may stop before or after chown, before its final chmod.
+            return self.read(pathname, self.root_owner, mode, limit) catch |err| {
+                if (err != error.CredentialStateRefused) return err;
+                return self.read(pathname, owner, mode, limit);
+            };
+        }
+        return self.read(pathname, owner, mode, limit);
+    }
+    /// Only station CA/server candidates use this recovery path. Validate every
+    /// entry before unlinking any: private generated name, exact marker/prefix,
+    /// no links, known files and metadata from interrupted createBundle writes.
+    pub fn discardBundle(self: Store, pathname: []const u8, owner: Owner, mode: u16, names_value: []const []const u8) !void {
+        const dir = try self.walk(pathname);
+        defer dir.close(self.io);
+        var st: Metadata = undefined;
+        try j.require(dragontools_file_metadata(dir.handle, &st) == 0);
+        try j.require(st.uid == self.root_owner.uid and
+            (st.gid == self.root_owner.gid and st.mode & 0o7777 == 0o700 or st.gid == owner.gid and (st.mode & 0o7777 == 0o700 or st.mode & 0o7777 == mode)));
+        const entries = try self.names(pathname);
+        if (entries.len != 0) {
+            const marker_path = try self.path(pathname, ".dragontools-managed");
+            const marker_stat = dir.statFile(self.io, ".dragontools-managed", .{ .follow_symlinks = false }) catch return error.UnexpectedManagedFile;
+            if (marker_stat.kind == .sym_link) return error.UnexpectedManagedSymlink;
+            const marker_mode: u16 = @intCast(marker_stat.permissions.toMode() & 0o7777);
+            try j.require(marker_mode == 0o400 or marker_mode == 0o600);
+            const value = try self.read(marker_path, self.root_owner, marker_mode, marker.len);
+            if (marker_mode == 0o400) try j.require(std.mem.eql(u8, value, marker)) else try j.require(std.mem.startsWith(u8, marker, value));
+            // Marker is completed before any bundle contents are created.
+            if (!std.mem.eql(u8, value, marker)) try j.require(entries.len == 1);
+        }
+        for (entries) |name| {
+            if (std.mem.eql(u8, name, ".dragontools-managed")) continue;
+            if (!j.contains(names_value, name)) return error.UnexpectedManagedFile;
+            _ = try self.stagedFile(try self.path(pathname, name), owner);
+        }
+        for (entries) |name| if (!std.mem.eql(u8, name, ".dragontools-managed")) try self.unlink(try self.path(pathname, name));
+        if (entries.len != 0) try self.unlink(try self.path(pathname, ".dragontools-managed"));
+        try self.removeEmpty(pathname);
     }
 };

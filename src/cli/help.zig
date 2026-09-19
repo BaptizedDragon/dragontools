@@ -37,7 +37,7 @@ pub fn render(a: std.mem.Allocator, node: spec.Node) ![]const u8 {
     try w.print("{s}\n\nUsage:\n  ", .{item.description});
     try writePath(w, node);
     if (item.command) |command| {
-        try w.writeAll(if (command == .version) " [--json]\n" else if (command == .maintenance_check) " [--ssh-host ALIAS | --host HOST] [options]\n" else if (spec.applicationCommand(command)) (if (command == .app_apply) " [--config PATH] [--plan]\n" else " [--config PATH]\n") else if (spec.flagAllowed(spec.flag("--config").?, command)) " (--config PATH | --ssh-host ALIAS | --host HOST) [options]\n" else if (spec.flagAllowed(spec.flag("--station").?, command)) " (--ssh-host ALIAS | --host HOST) --station ALIAS [options]\n" else if (spec.flagAllowed(spec.flag("--ssh-host").?, command)) " (--ssh-host ALIAS | --host HOST) [options]\n" else " --host HOST [options]\n");
+        try w.writeAll(if (command == .version) " [--json]\n" else if (command == .maintenance_check) " [--ssh-host ALIAS | --host HOST] [options]\n" else if (spec.applicationCommand(command)) (if (command == .app_apply) " [--config PATH] [--plan]\n" else " [--config PATH]\n") else if (spec.flagAllowed(spec.flag("--config").?, command)) " [--config PATH | --ssh-host ALIAS | --host HOST] [options]\n" else if (spec.flagAllowed(spec.flag("--station").?, command)) " (--ssh-host ALIAS | --host HOST) --station ALIAS [options]\n" else if (spec.flagAllowed(spec.flag("--ssh-host").?, command)) " (--ssh-host ALIAS | --host HOST) [options]\n" else " --host HOST [options]\n");
     } else {
         var has_children = false;
         for (spec.commands) |child| {
@@ -77,7 +77,7 @@ pub fn render(a: std.mem.Allocator, node: spec.Node) ![]const u8 {
         if (spec.flagAllowed(spec.flag("--ssh-host").?, command)) {
             try w.writeAll("\nAlias mode: OpenSSH resolves HostName, User, Port, IdentityAgent, IdentityFile\nand ProxyJump through normal SSH configuration. Do not combine --ssh-host\nwith direct connection options. Direct mode defaults: user root, port 22,\nenvironment agent/default identities. Strict host-key checking is always enabled.\n");
         } else if (!spec.applicationCommand(command)) try w.writeAll("\nSSH defaults: user root, port 22, environment agent/default identities.\nStrict host-key checking is always enabled. Explicit authentication modes are exclusive.\n");
-        if (!spec.applicationCommand(command) and spec.flagAllowed(spec.flag("--config").?, command)) try w.writeAll("\nConfiguration is explicit: no default file is searched. Version 1 supports only\nconnection.ssh_host and Grafana username/password { op = \"op://...\" } references.\nRelative config paths are allowed. Literal credentials and unknown keys fail.\nCLI values override config; --host replaces the configured SSH alias.\nBoth Grafana references are required together after merging. Help, completion,\nstatus and --plan never resolve secrets; install and verify resolve them locally.\nWithout references, Grafana administrator credentials remain unmanaged.\n");
+        if (spec.stationCommand(command)) try w.writeAll("\nLoads optional ./station.toml from CWD; --config selects a different file.\nNo parent/home/XDG search. Missing default permits CLI-only usage. Version 1\nsupports connection.ssh_host, station.hostname, Grafana/Telegram secret references\nand named probes. Deprecated [ingress].hostname is accepted unless conflicting.\nRelative config paths are allowed. Literal credentials and unknown keys fail.\nCLI values override config; --host replaces the configured SSH alias and\n--ingress-hostname overrides station.hostname. Credential references are paired.\nHelp, completion, status and --plan never resolve secrets; install and verify\nresolve Grafana references locally; Telegram resolves only during install.\nWithout references, Grafana administrator credentials remain unmanaged.\n");
     }
     try w.writeAll("\n  --help\n      Show help for this command.\n");
 
@@ -178,7 +178,7 @@ pub fn render(a: std.mem.Allocator, node: spec.Node) ![]const u8 {
         \\ServiceProbeFailed alerts after probe_success == 0 for 2m. A down target does not fail station installation.
         \\Telegram resolves locally during install only; protected files never enter argv or configuration.
         \\Status reads stored probe metrics. Verify is read-only and sends no test alerts.
-        \\Send a test explicitly with monitoring notify-test --config monitoring.toml.
+        \\Send a test explicitly with monitoring notify-test (reads ./station.toml).
         \\Vector logs/host metrics and optional vmagent app metrics use monitoring agents.
         \\OTel traces agents, dashboards, firewall, TLS and legacy Telegram flags are unavailable.
         \\Unavailable options are validated, then rejected before SSH, including with --plan.
@@ -205,7 +205,8 @@ test "workflow help has contextual options and explicit availability" {
     const a = std.testing.allocator;
     const install = try render(a, .install);
     defer a.free(install);
-    try std.testing.expect(std.mem.indexOf(u8, install, "dragontool monitoring install (--config PATH | --ssh-host ALIAS | --host HOST)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, install, "dragontool monitoring install [--config PATH | --ssh-host ALIAS | --host HOST]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, install, "./station.toml") != null);
     try std.testing.expect(std.mem.indexOf(u8, install, "--grafana-user-op") != null);
     try std.testing.expect(std.mem.indexOf(u8, install, "--grafana-password-op") != null);
     try std.testing.expect(std.mem.indexOf(u8, install, "status and --plan never resolve secrets") != null);

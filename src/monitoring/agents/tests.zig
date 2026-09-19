@@ -717,6 +717,7 @@ test "station ensure failure reports safe substage and preserves native semantic
         .{ .code = 93, .failure = error.RemoteOperationFailed, .detail = .server_tls_invalid, .check = .server_tls_invalid },
         .{ .code = 94, .failure = error.RemoteOperationFailed, .detail = .client_certificate_rejected, .check = .client_certificate_rejected },
         .{ .code = 95, .failure = error.RemoteOperationFailed, .detail = .ingestion_rejected, .check = .ingestion_rejected },
+        .{ .code = 96, .failure = error.OperationBusy, .detail = .operation_busy, .check = .operation_busy },
     }) |case| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
@@ -756,6 +757,42 @@ test "silent or rejected native diagnostics still identify station ensure and ge
     var fake: Fake = .{ .allocator = a, .report = &report, .ensure_failure = .{ .code = 86 } };
     try std.testing.expectError(error.RemoteOperationFailed, install.install(a, fake.asRemote(), fake.asRemote(), &report, registration));
     try std.testing.expectEqualStrings("Stage: station_ensure\nDetail: agent_internal_error\n", try report.state.credentialDiagnostics(a));
+}
+
+test "station ensure diagnostics identify fixed managed invariants without exposing remote output" {
+    const Case = struct { stage: remote.diagnostics.Stage, reason: remote.diagnostics.AgentError = .InvalidManagedState, check: readiness.Check, code: u8 = 86 };
+    for ([_]Case{
+        .{ .stage = .ingestion_root, .check = .ingestion_root_invalid },
+        .{ .stage = .pki_directory, .check = .pki_directory_invalid },
+        .{ .stage = .clients_directory, .check = .clients_directory_invalid },
+        .{ .stage = .registry_directory, .reason = .RegistryPermissions, .check = .registry_directory_invalid, .code = 89 },
+        .{ .stage = .state_directory, .check = .state_directory_invalid },
+        .{ .stage = .ca_state, .check = .ca_bundle_invalid },
+        .{ .stage = .ca_certificate_validation, .reason = .CertificateValidationFailed, .check = .ca_bundle_invalid },
+        .{ .stage = .server_state, .check = .server_identity_invalid },
+        .{ .stage = .server_certificate_validation, .reason = .CertificateValidationFailed, .check = .server_identity_invalid },
+        .{ .stage = .pki_directory, .reason = .UnexpectedManagedFile, .check = .unexpected_managed_file },
+        .{ .stage = .clients_directory, .reason = .UnexpectedSymlink, .check = .unexpected_symlink },
+        .{ .stage = .operation_lock, .reason = .OperationBusy, .check = .operation_busy, .code = 96 },
+        .{ .stage = .operation_lock, .reason = .OperationLockFailed, .check = .operation_lock_failed },
+    }) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var report: model.Report = .{};
+        var fake: Fake = .{ .allocator = a, .report = &report, .ensure_failure = .{
+            .code = case.code,
+            .output = "PRIVATE KEY sentinel",
+            .diagnostic = .{ .stage = case.stage, .reason = case.reason },
+        } };
+        try std.testing.expectError(if (case.code == 89) error.RegistryPermissionsConflict else if (case.code == 96) error.OperationBusy else error.RemoteOperationFailed, install.install(a, fake.asRemote(), fake.asRemote(), &report, registration));
+        try std.testing.expectEqual(case.check, report.state.check.?);
+        try std.testing.expectEqual(remote.diagnostics.EnrollmentStage.station_ensure, report.state.enrollment_stage.?);
+        const output = try report.state.credentialDiagnostics(a);
+        try std.testing.expect(std.mem.indexOf(u8, output, "PRIVATE KEY") == null);
+        try std.testing.expect(std.mem.indexOf(u8, output, "sentinel") == null);
+        try std.testing.expectEqual(@as(usize, 0), fake.enrollments);
+    }
 }
 
 test "Caddy listener retries precede enrollment and preserve restart intent on timeout" {

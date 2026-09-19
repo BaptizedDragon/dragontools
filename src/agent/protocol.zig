@@ -71,6 +71,7 @@ pub fn dispatch(ctx: s.Context, action: []const u8, args: []const []const u8) ![
 }
 pub fn exitCode(err: anyerror) u8 {
     return switch (err) {
+        error.OperationBusy => 96,
         error.DnsUnresolved => 91,
         error.TcpUnreachable => 92,
         error.ServerTlsInvalid => 93,

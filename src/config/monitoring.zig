@@ -1,9 +1,10 @@
 //! A deliberately narrow TOML v1 document: connection alias and secret references.
-//! No resolution, interpolation, include files, implicit discovery or remote I/O.
+//! No resolution, interpolation, include files or remote I/O.
 const std = @import("std");
 const probes = @import("../monitoring/probes.zig");
 const references = @import("../secrets/reference.zig");
 pub const max_bytes = 64 * 1024;
+pub const default_path = "./station.toml";
 
 pub const Config = struct {
     arena: std.heap.ArenaAllocator,
@@ -20,7 +21,7 @@ pub const Config = struct {
     }
 };
 
-const Section = enum { root, connection, ingress, grafana, telegram, probe };
+const Section = enum { root, connection, station, ingress, grafana, telegram, probe };
 
 const ProbeTable = struct { name: ?[]const u8 = null, url: ?[]const u8 = null };
 
@@ -117,6 +118,9 @@ pub fn parse(a: std.mem.Allocator, contents: []const u8) !Config {
     var version_seen = false;
     var connection_seen = false;
     var ingress_seen = false;
+    var station_seen = false;
+    var station_hostname: ?[]const u8 = null;
+    var legacy_hostname: ?[]const u8 = null;
     var grafana_seen = false;
     var telegram_seen = false;
     var probe_tables: std.ArrayList(ProbeTable) = .empty;
@@ -148,6 +152,10 @@ pub fn parse(a: std.mem.Allocator, contents: []const u8) !Config {
                 if (connection_seen) return error.DuplicateMonitoringConfigKey;
                 connection_seen = true;
                 section = .connection;
+            } else if (std.mem.eql(u8, table, "station")) {
+                if (station_seen) return error.DuplicateMonitoringConfigKey;
+                station_seen = true;
+                section = .station;
             } else if (std.mem.eql(u8, table, "ingress")) {
                 if (ingress_seen) return error.DuplicateMonitoringConfigKey;
                 ingress_seen = true;
@@ -179,11 +187,12 @@ pub fn parse(a: std.mem.Allocator, contents: []const u8) !Config {
                 if (config.ssh_host != null) return error.DuplicateMonitoringConfigKey;
                 config.ssh_host = try line.string(storage);
             },
-            .ingress => {
+            .station, .ingress => {
                 if (!std.mem.eql(u8, key, "hostname")) return error.UnknownMonitoringConfigKey;
-                if (config.ingress_hostname != null) return error.DuplicateMonitoringConfigKey;
-                config.ingress_hostname = try line.string(storage);
-                try @import("application.zig").validateStationHostname(config.ingress_hostname.?);
+                const target = if (section == .station) &station_hostname else &legacy_hostname;
+                if (target.* != null) return error.DuplicateMonitoringConfigKey;
+                target.* = try line.string(storage);
+                try @import("application.zig").validateStationHostname(target.*.?);
             },
             .grafana => {
                 const target = if (std.mem.eql(u8, key, "username")) &config.grafana_user_op else if (std.mem.eql(u8, key, "password")) &config.grafana_password_op else return error.UnknownMonitoringConfigKey;
@@ -206,6 +215,10 @@ pub fn parse(a: std.mem.Allocator, contents: []const u8) !Config {
         try line.end();
     }
     if (!version_seen) return error.MissingMonitoringConfigVersion;
+    if (station_hostname) |canonical| if (legacy_hostname) |legacy| {
+        if (!std.mem.eql(u8, canonical, legacy)) return error.ConflictingStationHostname;
+    };
+    config.ingress_hostname = station_hostname orelse legacy_hostname;
     if (telegram_seen and (config.telegram_bot_token_op == null or config.telegram_chat_id_op == null)) return error.TelegramCredentialReferencesRequired;
     const configured = try storage.alloc(probes.Probe, probe_tables.items.len);
     for (probe_tables.items, configured) |table, *probe| {
@@ -218,7 +231,17 @@ pub fn parse(a: std.mem.Allocator, contents: []const u8) !Config {
 }
 
 pub fn load(a: std.mem.Allocator, io: std.Io, path: []const u8) !Config {
-    const dir = std.Io.Dir.cwd();
+    return loadFrom(a, io, .cwd(), path);
+}
+pub fn loadDefault(a: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !?Config {
+    // Only absence is optional. A present invalid/unreadable file fails closed.
+    _ = dir.statFile(io, default_path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return error.UnableToReadMonitoringConfig,
+    };
+    return try loadFrom(a, io, dir, default_path);
+}
+pub fn loadFrom(a: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8) !Config {
     const metadata = dir.statFile(io, path, .{}) catch return error.UnableToReadMonitoringConfig;
     if (metadata.kind != .file) return error.InvalidMonitoringConfigFile;
     if (metadata.size > max_bytes) return error.MonitoringConfigTooLarge;
@@ -350,4 +373,29 @@ test "Telegram config rejects missing malformed plaintext and unsupported secret
     try std.testing.expectError(error.UnsupportedConfigSecretSource, parse(a, "version=1\n[telegram]\nbot_token={env='TOKEN'}"));
     try std.testing.expectError(error.DuplicateMonitoringConfigKey, parse(a, "version=1\n[telegram]\n[telegram]"));
     try std.testing.expectError(error.UnknownMonitoringConfigKey, parse(a, "version=1\n[telegram]\ntoken={op='op://v/i/token'}"));
+}
+
+test "station hostname canonical v1 setting and compatible legacy alias" {
+    const a = std.testing.allocator;
+    for ([_][]const u8{
+        "[station]\nhostname='monitoring.baptizeddragon.com'\n",
+        "[ingress]\nhostname='monitoring.baptizeddragon.com'\n",
+        "[station]\nhostname='monitoring.baptizeddragon.com'\n[ingress]\nhostname='monitoring.baptizeddragon.com'\n",
+    }) |tables| {
+        const text = try std.fmt.allocPrint(a, "version=1\n{s}", .{tables});
+        defer a.free(text);
+        var value = try parse(a, text);
+        defer value.deinit();
+        try std.testing.expectEqualStrings("monitoring.baptizeddragon.com", value.ingress_hostname.?);
+    }
+    for ([_][]const u8{ "https://station.example", "station.example:9443", "station.example/path", "127.0.0.1" }) |hostname| {
+        const text = try std.fmt.allocPrint(a, "version=1\n[station]\nhostname='{s}'\n", .{hostname});
+        defer a.free(text);
+        try std.testing.expectError(error.InvalidStationHostname, parse(a, text));
+    }
+    for ([_][]const u8{
+        "version=1\n[station]\nhostname='one.example'\n[ingress]\nhostname='two.example'\n",
+        "version=1\n[ingress]\nhostname='one.example'\n[station]\nhostname='two.example'\n",
+    }) |text| try std.testing.expectError(error.ConflictingStationHostname, parse(a, text));
+    try std.testing.expectError(error.DuplicateMonitoringConfigKey, parse(a, "version=1\n[station]\nhostname='one.example'\nhostname='one.example'\n"));
 }

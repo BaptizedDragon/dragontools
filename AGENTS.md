@@ -7,6 +7,11 @@ configuration and login shell. `wizard` and `completion` are local UX entry poin
 No generic resource DSL, shell hooks or provider framework.
 Read README.md, architecture.md and design.md before changing workflow behavior.
 
+Station install/verify/status/notify-test default only to CWD `./station.toml`;
+explicit `--config` replaces it and CLI fields override it. `[station].hostname`
+is canonical; conflicting v1 `[ingress].hostname` aliases fail. Application
+commands never load station config. Plans resolve no secrets.
+
 The primary application workflow is `monitoring apply` with strict version-1
 `./monitoring.toml`, or one explicit `--config`. Keep application configuration
 separate from central station configuration and secrets. Application/environment

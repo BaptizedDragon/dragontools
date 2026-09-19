@@ -26,11 +26,18 @@ with tempfile.TemporaryDirectory(prefix="dragontools-cli-") as directory:
                DRAGONTOOLS_TEST_MARKER=str(marker),
                DRAGONTOOLS_PROVIDER_MARKER=str(provider_marker), NO_COLOR="1", TERM="dumb")
     checked = 0
+    empty_repository = directory / "empty-repository"
+    empty_repository.mkdir()
+
+    def run_process(*args, **kwargs):
+        # Never consume a developer's station.toml from the checkout running tests.
+        kwargs["cwd"] = kwargs.get("cwd") or empty_repository
+        return subprocess.run(*args, **kwargs)
 
     def local_run(args, code=0, expected=None, cwd=None):
         """Pipe stdin explicitly so no-argument/wizard checks cannot read the terminal."""
         global checked
-        result = subprocess.run([str(binary), *args], env=env, input="", cwd=cwd,
+        result = run_process([str(binary), *args], env=env, input="", cwd=cwd,
                                 capture_output=True, text=True, timeout=15)
         output = result.stdout + result.stderr
         assert result.returncode == code, (args, result.returncode, output)
@@ -66,6 +73,45 @@ url = "HTTPS://EXAMPLE.COM:443/healthz"
 name = "orders"
 url = "https://orders.example.com/healthz"
 ''')
+    # Station defaults use only this CWD; explicit config replaces, never merges it.
+    station_repository = directory / "station-repository"
+    station_repository.mkdir()
+    implicit_station = station_repository / "station.toml"
+    station_text = station_config.read_text() + '\n[station]\nhostname="monitoring.baptizeddragon.com"\n'
+    implicit_station.write_text(station_text)
+    implicit = local_run(["monitoring", "install", "--plan"], cwd=station_repository).stdout
+    explicit = local_run(["monitoring", "install", "--config", str(implicit_station), "--plan"]).stdout
+    assert implicit == explicit
+    for value in ("SSH alias: monitoring", "hostname: monitoring.baptizeddragon.com",
+                  "metrics ingress: :9443", "logs ingress: :9444"):
+        assert value in implicit, implicit
+    override = local_run(["monitoring", "install", "--plan", "--ssh-host", "emergency-monitor",
+                          "--ingress-hostname", "alternate.example"], cwd=station_repository).stdout
+    assert "SSH alias: emergency-monitor" in override and "hostname: alternate.example" in override
+    assert "monitoring.baptizeddragon.com" not in override
+    for command in ("install", "verify", "status", "notify-test"):
+        local_run(["monitoring", command], 1, "StationConfigurationRequired")
+        implicit_station.write_text('version=1\n[station]\nhostname="https://REDACTION-SENTINEL"\n')
+        local_run(["monitoring", command], 1, "InvalidStationHostname", cwd=station_repository)
+    # Invalid implicit config is ignored when an explicit file was selected.
+    local_run(config_args, expected="No remote operations performed", cwd=station_repository)
+    implicit_station.write_text(station_text)
+    for command in ("apply", "app-verify", "app-status"):
+        local_run(["monitoring", command], 1, "UnableToReadApplicationConfig", cwd=station_repository)
+    child_repository = station_repository / "child"
+    child_repository.mkdir()
+    local_run(["monitoring", "install", "--plan"], 1, "StationConfigurationRequired", cwd=child_repository)
+    local_run([*plan_args, "--ingress-hostname", "station.example"], cwd=child_repository)
+    (child_repository / "monitoring.toml").write_text('version=1\n[connection]\nssh_host="monitoring"\n')
+    local_run(["monitoring", "install", "--plan"], 1, "StationConfigurationRequired", cwd=child_repository)
+    for bad in ("https://station.example", "station.example:9443", "station.example/path", "127.0.0.1"):
+        implicit_station.write_text('version=1\n[connection]\nssh_host="monitoring"\n[station]\nhostname="' + bad + '"\n')
+        local_run(["monitoring", "install", "--plan"], 1, "InvalidStationHostname", cwd=station_repository)
+    implicit_station.write_text(station_text + '\n[ingress]\nhostname="different.example"\n')
+    local_run(["monitoring", "install", "--plan"], 1, "ConflictingStationHostname", cwd=station_repository)
+    implicit_station.write_text(station_text + '\n[ingress]\nhostname="monitoring.baptizeddragon.com"\n')
+    local_run(["monitoring", "install", "--plan"], cwd=station_repository)
+    implicit_station.write_text(station_text)
     # Application repository defaults are one local file, never station config or
     # secret resolution. Plans and invalid configs must never spawn SSH.
     app_repository = directory / "application-repository"
@@ -181,10 +227,10 @@ url = "https://orders.example.com/healthz"
          1, "FlagNotAllowed"),
         (["host", "install-oh-my-zsh", "--ssh-host", "monitoring", "--ssh-op-path", "op://vault/item/key"],
          1, "FlagNotAllowed"),
-        (["monitoring", "install", "--ssh-host", "REDACTION-SENTINEL", "--plan"], 0, "Grafana: loopback:3000"),
+        (["monitoring", "install", "--ssh-host", "monitoring", "--plan"], 0, "Grafana: loopback:3000"),
         (config_args, 0, configured_credentials),
         (["monitoring", "install", "--config", str(station_config), "--plan"], 0, "External HTTP probes: 2 configured"),
-        (["monitoring", "install", "--config", os.path.relpath(config), "--plan"], 0, configured_credentials),
+        (["monitoring", "install", "--config", os.path.relpath(config, empty_repository), "--plan"], 0, configured_credentials),
         ([*config_args, "--ssh-host", "other"], 0, configured_credentials),
         ([*config_args, "--host", "example.com", "--user", "ops", "--port", "2222"], 0, configured_credentials),
         ([*config_args, "--user", "root"], 1, "ConflictingSshMode"),
@@ -374,7 +420,7 @@ url = "https://orders.example.com/healthz"
         if shell_binary is None:
             print(f"SKIP: {shell} completion syntax (shell not installed)")
             continue
-        syntax = subprocess.run([shell_binary, "-n", str(script)], env=env,
+        syntax = run_process([shell_binary, "-n", str(script)], env=env,
                                 input="", capture_output=True, text=True, timeout=15)
         assert syntax.returncode == 0, (shell, syntax.stderr)
         checked += 1
@@ -382,7 +428,7 @@ url = "https://orders.example.com/healthz"
     bash = shutil.which("bash")
     if bash:
         def bash_complete(words):
-            result = subprocess.run(
+            result = run_process(
                 [bash, "--noprofile", "--norc", "-c",
                  'source "$1"\nshift\nCOMP_WORDS=("$@")\n'
                  'COMP_CWORD=$((${#COMP_WORDS[@]} - 1))\n'
@@ -438,7 +484,7 @@ url = "https://orders.example.com/healthz"
     if zsh:
         def zsh_candidates(words):
             # Capture the candidates handed to Zsh's native UI. No terminal is needed.
-            result = subprocess.run(
+            result = run_process(
                 [zsh, "-f", "-c",
                  'script=$1\nshift\nwords=("$@")\nCURRENT=${#words[@]}\n'
                  '_describe() { print -rl -- "${candidates[@]}"; }\n'
@@ -478,7 +524,7 @@ url = "https://orders.example.com/healthz"
     fish = shutil.which("fish")
     if fish:
         def fish_complete(command):
-            result = subprocess.run(
+            result = run_process(
                 [fish, "--no-config", "-c", 'source "$argv[1]"\ncomplete -C "$argv[2]"',
                  str(scripts["fish"]), command],
                 env=env, input="", capture_output=True, text=True, timeout=15)
@@ -525,7 +571,7 @@ url = "https://orders.example.com/healthz"
     for command in ("install", "verify", "status"):
         for connection in (["--host", "example.com"], ["--ssh-host", "monitoring"]):
             marker.unlink(missing_ok=True)
-            result = subprocess.run([str(binary), "monitoring", command, *connection],
+            result = run_process([str(binary), "monitoring", command, *connection],
                                     env=env, input="", capture_output=True, text=True, timeout=15)
             assert marker.exists(), (command, connection, "The supported workflow did not invoke SSH")
             assert result.returncode == 1, (command, result.stdout, result.stderr)
@@ -541,7 +587,7 @@ url = "https://orders.example.com/healthz"
     # A normal status command reads references from config but must never resolve
     # them. It only reaches the intentionally failing fake SSH transport.
     marker.unlink(missing_ok=True)
-    status = subprocess.run([str(binary), "monitoring", "status", "--config", str(config)],
+    status = run_process([str(binary), "monitoring", "status", "--config", str(config)],
                             env=env, input="", capture_output=True, text=True, timeout=15)
     assert marker.exists() and status.returncode == 1, (status.stdout, status.stderr)
     assert "Failed at status;" in status.stdout, status.stdout
@@ -564,7 +610,7 @@ case "$command" in
 esac
 """)
     marker.unlink(missing_ok=True)
-    status = subprocess.run([str(binary), "monitoring", "status", "--config", str(config)],
+    status = run_process([str(binary), "monitoring", "status", "--config", str(config)],
                             env=env, input="", capture_output=True, text=True, timeout=15)
     assert status.returncode == 0, (status.stdout, status.stderr)
     assert marker.read_text() == "status\n" * 10 + "probes\n"
@@ -588,7 +634,7 @@ esac
     op.chmod(0o755)
     for command in ("install", "verify"):
         provider_marker.unlink(missing_ok=True)
-        result = subprocess.run([str(binary), "monitoring", command, "--config", str(config)],
+        result = run_process([str(binary), "monitoring", command, "--config", str(config)],
                                 env=env, input="", capture_output=True, text=True, timeout=15)
         assert result.returncode == 1 and provider_marker.exists(), (result.stdout, result.stderr)
         assert not marker.exists(), "Credential resolution failure reached SSH"
@@ -605,7 +651,7 @@ esac
                       + "sys.stdout.write(values[sys.argv[-1].rsplit('/', 1)[1]])\n")
         for command in ("install", "verify"):
             provider_marker.unlink(missing_ok=True)
-            result = subprocess.run([str(binary), "monitoring", command, "--config", str(config)],
+            result = run_process([str(binary), "monitoring", command, "--config", str(config)],
                                     env=env, input="", capture_output=True, text=True, timeout=15)
             output = result.stdout + result.stderr
             assert result.returncode == 1 and expected_error in output, output
@@ -619,7 +665,7 @@ esac
     shutil.copy(ssh, missing_provider_bin / "ssh")
     without_op = dict(env, PATH=str(missing_provider_bin))
     for command in ("install", "verify"):
-        result = subprocess.run([str(binary), "monitoring", command, "--config", str(config)],
+        result = run_process([str(binary), "monitoring", command, "--config", str(config)],
                                 env=without_op, input="", capture_output=True, text=True, timeout=15)
         output = result.stdout + result.stderr
         assert result.returncode == 1 and "GrafanaUsernameResolutionFailed" in output, output
@@ -630,7 +676,7 @@ esac
     for connection in (["--ssh-host", "monitoring"],
                        ["--host", "example.com", "--user", "root"]):
         marker.unlink(missing_ok=True)
-        result = subprocess.run([str(binary), "host", "install-oh-my-zsh", *connection],
+        result = run_process([str(binary), "host", "install-oh-my-zsh", *connection],
                                 env=env, input="", capture_output=True, text=True, timeout=15)
         assert marker.exists(), (connection, "Host workflow did not invoke SSH")
         assert result.returncode == 1, (connection, result.stdout, result.stderr)
@@ -659,7 +705,7 @@ esac
 ''')
     for connection in (["--host", "example.com"], ["--ssh-host", "monitoring"]):
         marker.unlink(missing_ok=True)
-        result = subprocess.run([str(binary), "monitoring", "verify", *connection],
+        result = run_process([str(binary), "monitoring", "verify", *connection],
                                 env=env, input="", capture_output=True, text=True, timeout=15)
         assert result.returncode == 1, (result.stdout, result.stderr)
         assert "Component: VictoriaMetrics. Check: self_scrape_ready." in result.stdout, result.stdout
@@ -793,7 +839,7 @@ else:
     for command in ("install", "verify", "install"):
         marker.unlink(missing_ok=True)
         provider_marker.unlink(missing_ok=True)
-        result = subprocess.run([str(binary), "monitoring", command, "--config", str(config)],
+        result = run_process([str(binary), "monitoring", command, "--config", str(config)],
                                 env=env, input="", capture_output=True, text=True, timeout=30)
         assert result.returncode == 0, (command, result.stdout, result.stderr)
         output = result.stdout + result.stderr
@@ -827,7 +873,7 @@ else:
     for command in ("install", "verify"):
         marker.unlink(missing_ok=True)
         provider_marker.unlink(missing_ok=True)
-        result = subprocess.run([str(binary), "monitoring", command, "--ssh-host", "monitoring"],
+        result = run_process([str(binary), "monitoring", command, "--ssh-host", "monitoring"],
                                 env=env, input="", capture_output=True, text=True, timeout=30)
         assert result.returncode == 0, (command, result.stdout, result.stderr)
         assert not marker.exists() and not provider_marker.exists()
@@ -845,7 +891,7 @@ else:
         marker.unlink(missing_ok=True)
         provider_marker.unlink(missing_ok=True)
         command_env = dict(station_env, DRAGONTOOLS_ASSERT_READONLY="1") if command == "verify" else station_env
-        result = subprocess.run([str(binary), "monitoring", command, "--config", str(station_config)],
+        result = run_process([str(binary), "monitoring", command, "--config", str(station_config)],
                                 env=command_env, input="", capture_output=True, text=True, timeout=30)
         output = result.stdout + result.stderr
         assert result.returncode == 0, output
@@ -865,7 +911,7 @@ else:
 
     marker.unlink(missing_ok=True)
     provider_marker.unlink(missing_ok=True)
-    result = subprocess.run([str(binary), "monitoring", "status", "--config", str(station_config)],
+    result = run_process([str(binary), "monitoring", "status", "--config", str(station_config)],
                             env=station_env, input="", capture_output=True, text=True, timeout=30)
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
@@ -875,7 +921,7 @@ else:
     assert "REDACTION-SENTINEL" not in output
     checked += 1
 
-    result = subprocess.run([str(binary), "monitoring", "notify-test", "--config", str(station_config)],
+    result = run_process([str(binary), "monitoring", "notify-test", "--config", str(station_config)],
                             env=dict(station_env, DRAGONTOOLS_ALLOW_NOTIFY="1"), input="", capture_output=True, text=True, timeout=30)
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
@@ -891,7 +937,7 @@ else:
     # without leaking commands, credentials, upstream response or stderr.
     marker.unlink(missing_ok=True)
     provider_marker.unlink(missing_ok=True)
-    result = subprocess.run([str(binary), "monitoring", "verify", "--config", str(config)],
+    result = run_process([str(binary), "monitoring", "verify", "--config", str(config)],
                             env=dict(env, DRAGONTOOLS_LOGS_FAIL="1"), input="",
                             capture_output=True, text=True, timeout=30)
     output = result.stdout + result.stderr
@@ -907,7 +953,7 @@ else:
     # Fresh station identity is explicit. Reusing a saved identity is allowed;
     # an absent one produces a safe actionable station error, never alias inference.
     for flags, expected in (([], 1), (["--ingress-hostname", "station.example"], 0)):
-        result = subprocess.run([str(binary), "monitoring", "install", "--ssh-host", "management-alias", *flags],
+        result = run_process([str(binary), "monitoring", "install", "--ssh-host", "management-alias", *flags],
                                 env=dict(env, DRAGONTOOLS_FRESH_STATION="1"), input="", capture_output=True, text=True, timeout=30)
         assert result.returncode == expected, result.stdout + result.stderr
         if expected:
@@ -978,7 +1024,7 @@ else:
     ):
         marker.unlink(missing_ok=True)
         provider_marker.unlink(missing_ok=True)
-        result = subprocess.run([str(binary), 'monitoring', 'apply', '--config', str(app_config)],
+        result = run_process([str(binary), 'monitoring', 'apply', '--config', str(app_config)],
             env=dict(env, DRAGONTOOLS_AGENT_CODE=str(code), DRAGONTOOLS_AGENT_DIAGNOSTIC=diagnostic),
             input='', capture_output=True, text=True, timeout=30)
         output = result.stdout + result.stderr

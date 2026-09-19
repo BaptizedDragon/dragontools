@@ -51,8 +51,14 @@ pub fn lock(io: std.Io, root: std.Io.Dir) !std.Io.Dir {
     // creates no lock file and alters no credential metadata. No unbounded wait.
     const etc = try root.openDir(io, "etc", .{ .follow_symlinks = false });
     defer etc.close(io);
-    const dir = try etc.openDir(io, "dragontools", .{ .follow_symlinks = false });
+    // Zig 0.16 uses O_PATH on Linux unless iterate is enabled. O_PATH handles
+    // cannot be flock'ed (EBADF), even when no other process holds the lock.
+    const dir = try etc.openDir(io, "dragontools", .{ .iterate = true, .follow_symlinks = false });
     errdefer dir.close(io);
-    try s.j.require(c.flock(dir.handle, c.LOCK_EX | c.LOCK_NB) == 0);
+    switch (std.posix.errno(c.flock(dir.handle, c.LOCK_EX | c.LOCK_NB))) {
+        .SUCCESS => {},
+        .AGAIN => return error.OperationBusy,
+        else => return error.OperationLockFailed,
+    }
     return dir;
 }

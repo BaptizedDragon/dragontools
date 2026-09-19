@@ -9,6 +9,47 @@ const ca_path = f.base ++ "/pki/ca";
 const server_path = f.base ++ "/server";
 const modern = [_][]const u8{ "certificate_pem", "certificate_identity" };
 
+fn directories(ctx: Context, create: bool) !bool {
+    const store = ctx.store;
+    ctx.track(.ingestion_root);
+    _ = try store.directory(f.etc, store.root_owner, 0o755, false);
+    var changed = try store.directory(f.base, store.root_owner, 0o755, create);
+    ctx.track(.pki_directory);
+    changed = try store.directory(f.base ++ "/pki", store.root_owner, 0o700, create) or changed;
+    ctx.track(.clients_directory);
+    changed = try store.directory(f.base ++ "/clients", store.root_owner, 0o700, create) or changed;
+    ctx.track(.registry_directory);
+    changed = try store.registry(ctx.ingestion.gid, create) or changed;
+    ctx.track(.state_directory);
+    changed = try store.directory(f.state, store.root_owner, 0o755, create) or changed;
+    changed = try store.directory(f.state ++ "/ingestion", ctx.ingestion, 0o750, create) or changed;
+    return changed;
+}
+fn temporaryName(name: []const u8, prefix: []const u8) bool {
+    if (name.len != prefix.len + 32 or !std.mem.startsWith(u8, name, prefix)) return false;
+    for (name[prefix.len..]) |byte| if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return false;
+    return true;
+}
+fn candidates(ctx: Context, parent: []const u8, active: []const []const u8, owner: f.Owner, mode: u16, files: []const []const u8) !bool {
+    var changed = false;
+    for (try ctx.store.names(parent)) |name| {
+        if (j.contains(active, name)) continue;
+        const path = try ctx.store.path(parent, name);
+        if (temporaryName(name, ".bundle-")) {
+            try ctx.store.discardBundle(path, owner, mode, files);
+        } else if (temporaryName(name, ".credential-")) {
+            // An interrupted single-file atomic publication is never active.
+            _ = try ctx.store.stagedFile(path, owner);
+            try ctx.store.unlink(path);
+        } else return error.UnexpectedManagedFile;
+        changed = true;
+    }
+    return changed;
+}
+fn cleanParent(ctx: Context, parent: []const u8, active: []const []const u8) !void {
+    for (try ctx.store.names(parent)) |name| if (!j.contains(active, name)) return error.UnexpectedManagedFile;
+}
+
 pub fn loadCa(ctx: Context) !f.Files {
     const caller_stage = if (ctx.diagnostic_stage) |current| current.* else .enrollment;
     ctx.track(.ca_state);
@@ -28,12 +69,11 @@ pub fn verifyServer(ctx: Context, endpoint: []const u8, allow_renewal: bool) ![]
     ctx.track(.server_certificate_validation);
     try s.endpoint(endpoint);
     const store = ctx.store;
-    ctx.track(.managed_directories);
-    _ = try store.directory(f.base, store.root_owner, 0o755, false);
-    _ = try store.directory(f.base ++ "/pki", store.root_owner, 0o700, false);
-    _ = try store.directory(f.base ++ "/clients", store.root_owner, 0o700, false);
-    ctx.track(.registry_prepare);
-    _ = try store.registry(ctx.ingestion.gid, false);
+    _ = try directories(ctx, false);
+    ctx.track(.ingestion_root);
+    try cleanParent(ctx, f.base, &.{ "pki", "clients", "registry", "server" });
+    ctx.track(.pki_directory);
+    try cleanParent(ctx, f.base ++ "/pki", &.{"ca"});
     const root = try loadCa(ctx);
     ctx.track(.server_state);
     const values = try store.managed(server_path, ctx.ingestion, 0o750, &.{ "ca.crt", "server.crt", "server.key", "endpoint" }, f.marker, true);
@@ -160,16 +200,16 @@ pub fn ensureStation(ctx: Context, hostname: ?[]const u8) !bool {
     const store = ctx.store;
     ctx.track(.server_state);
     const endpoint = try stationEndpoint(ctx, hostname);
-    ctx.track(.managed_directories);
-    _ = try store.directory(f.base, store.root_owner, 0o755, false);
-    ctx.track(.registry_prepare);
-    var changed = try store.registry(ctx.ingestion.gid, true);
-    ctx.track(.managed_directories);
-    changed = try store.directory(f.base ++ "/pki", store.root_owner, 0o700, true) or changed;
-    changed = try store.directory(f.base ++ "/clients", store.root_owner, 0o700, true) or changed;
+    var changed = try directories(ctx, true);
+    ctx.track(.ingestion_root);
+    changed = try candidates(ctx, f.base, &.{ "pki", "clients", "registry", "server" }, ctx.ingestion, 0o750, &.{ "ca.crt", "server.crt", "server.key", "endpoint" }) or changed;
+    ctx.track(.pki_directory);
+    changed = try candidates(ctx, f.base ++ "/pki", &.{"ca"}, store.root_owner, 0o700, &.{ "ca.crt", "ca.key" }) or changed;
     ctx.track(.ca_state);
     if (!try store.exists(ca_path)) {
         if (try store.exists(server_path) or (try store.names(f.base ++ "/clients")).len != 0 or (try store.names(f.base ++ "/registry")).len != 0) return error.CaMaintenanceRequired;
+        ctx.track(.ca_missing_bootstrap_allowed);
+        try store.checkpoint("ca_missing_bootstrap_allowed", ca_path);
         ctx.track(.ca_key_generation);
         try store.checkpoint("generate_ca_key", ca_path);
         var key = try pki.Key.generate();

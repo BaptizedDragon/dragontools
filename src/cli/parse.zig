@@ -204,7 +204,8 @@ pub fn parse(a: std.mem.Allocator, args: []const []const u8) !Options {
         i += 1;
         try assign(a, &o, key, args[i]);
     }
-    try validateMerged(o, o.config_path == null);
+    // Station connection/credential completeness follows optional default load.
+    try validateMerged(o, o.config_path == null and !spec.stationCommand(o.command));
     return o;
 }
 
@@ -262,11 +263,18 @@ pub fn loadAndMerge(a: std.mem.Allocator, io: std.Io, o: *Options) !void {
         o.application_config = try application.load(a, io, o.config_path orelse application.default_path);
         return;
     }
-    if (o.config_path) |path_value| {
-        var values = try config.load(a, io, path_value);
+    if (spec.stationCommand(o.command)) return loadStation(a, io, o, .cwd());
+    try validateMerged(o.*, true);
+}
+fn loadStation(a: std.mem.Allocator, io: std.Io, o: *Options, dir: std.Io.Dir) !void {
+    const loaded = if (o.config_path) |path_value| try config.loadFrom(a, io, dir, path_value) else try config.loadDefault(a, io, dir);
+    if (loaded) |loaded_values| {
+        var values = loaded_values;
         errdefer values.deinit();
         try merge(o, values);
-    } else try validateMerged(o.*, true);
+    } else validateMerged(o.*, true) catch |err| {
+        return if (err == error.HostRequired) error.StationConfigurationRequired else err;
+    };
 }
 
 fn mergeText(a: std.mem.Allocator, o: *Options, contents: []const u8) !void {
@@ -492,7 +500,11 @@ test "merged config preserves SSH conflicts and validates incomplete credential 
     try std.testing.expectError(error.HostRequired, mergeText(a, &missing, "version = 1"));
     try std.testing.expectError(error.GrafanaCredentialReferencesRequired, mergeText(a, &missing, "version = 1\n[connection]\nssh_host = 'monitoring'\n[grafana]\nusername = { op = 'op://Example/Grafana/username' }"));
     try std.testing.expectError(error.InvalidSshHost, mergeText(a, &missing, "version = 1\n[connection]\nssh_host = 'host;id'"));
-    try std.testing.expectError(error.GrafanaCredentialReferencesRequired, parse(a, &.{ "monitoring", "install", "--ssh-host", "monitoring", "--grafana-user-op", "op://Example/Grafana/username" }));
+    var partial = try parse(a, &.{ "monitoring", "install", "--ssh-host", "monitoring", "--grafana-user-op", "op://Example/Grafana/username" });
+    defer partial.deinit(a);
+    var empty = std.testing.tmpDir(.{});
+    defer empty.cleanup();
+    try std.testing.expectError(error.GrafanaCredentialReferencesRequired, loadStation(a, std.testing.io, &partial, empty.dir));
     var pair = try parse(a, &.{ "monitoring", "verify", "--ssh-host", "monitoring", "--grafana-user-op", "op://Example/Grafana/username", "--grafana-password-op", "op://Example/Grafana/password" });
     defer pair.deinit(a);
     try std.testing.expect(!pair.unsupported());
@@ -616,4 +628,59 @@ test "station ingress hostname is explicit DNS configuration with CLI precedence
     try std.testing.expect(reused.ingress_hostname == null);
     try std.testing.expectError(error.InvalidStationHostname, parse(a, &.{ "monitoring", "install", "--ssh-host", "alias", "--ingress-hostname", "https://station.example:9443" }));
     try std.testing.expectError(error.FlagNotAllowed, parse(a, &.{ "monitoring", "apply", "--ingress-hostname", "station.example" }));
+}
+
+test "station commands load only the cwd default and explicit CLI values win" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    try temp.dir.writeFile(io, .{ .sub_path = config.default_path, .data = "version=1\n[connection]\nssh_host='monitoring'\n[station]\nhostname='monitoring.baptizeddragon.com'\n" });
+    try temp.dir.writeFile(io, .{ .sub_path = "monitoring.toml", .data = "invalid application sentinel" });
+    for ([_][]const u8{ "install", "verify", "status", "notify-test" }) |command| {
+        var o = try parse(a, &.{ "monitoring", command });
+        defer o.deinit(a);
+        try loadStation(a, io, &o, temp.dir);
+        try std.testing.expectEqualStrings("monitoring", o.ssh_host.?);
+        try std.testing.expectEqualStrings("monitoring.baptizeddragon.com", o.ingress_hostname.?);
+        try std.testing.expect(o.application_config == null);
+    }
+    var override = try parse(a, &.{ "monitoring", "install", "--ssh-host", "emergency-monitor", "--ingress-hostname", "emergency.example", "--plan" });
+    defer override.deinit(a);
+    try loadStation(a, io, &override, temp.dir);
+    try std.testing.expectEqualStrings("emergency-monitor", override.ssh_host.?);
+    try std.testing.expectEqualStrings("emergency.example", override.ingress_hostname.?);
+    try temp.dir.writeFile(io, .{ .sub_path = "other.toml", .data = "version=1\n[connection]\nssh_host='other-monitor'\n[station]\nhostname='other.example'\n" });
+    try temp.dir.writeFile(io, .{ .sub_path = config.default_path, .data = "invalid implicit sentinel" });
+    var explicit = try parse(a, &.{ "monitoring", "install", "--config", "other.toml", "--ssh-host", "emergency-monitor" });
+    defer explicit.deinit(a);
+    try loadStation(a, io, &explicit, temp.dir);
+    try std.testing.expectEqualStrings("emergency-monitor", explicit.ssh_host.?);
+    try std.testing.expectEqualStrings("other.example", explicit.ingress_hostname.?);
+}
+
+test "missing station default retains CLI-only mode and never falls back to app or parent config" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    try temp.dir.writeFile(io, .{ .sub_path = config.default_path, .data = "version=1\n[connection]\nssh_host='parent-must-not-load'\n" });
+    try temp.dir.createDir(io, "child", .default_dir);
+    const child = try temp.dir.openDir(io, "child", .{});
+    defer child.close(io);
+    try child.writeFile(io, .{ .sub_path = "monitoring.toml", .data = application.example });
+    for ([_][]const u8{ "install", "verify", "status", "notify-test" }) |command| {
+        var absent = try parse(a, &.{ "monitoring", command });
+        defer absent.deinit(a);
+        try std.testing.expectError(error.StationConfigurationRequired, loadStation(a, io, &absent, child));
+    }
+    var cli_only = try parse(a, &.{ "monitoring", "install", "--ssh-host", "monitoring", "--ingress-hostname", "monitoring.baptizeddragon.com" });
+    defer cli_only.deinit(a);
+    try loadStation(a, io, &cli_only, child);
+    try std.testing.expect(cli_only.config_values == null);
+    var explicit_missing = try parse(a, &.{ "monitoring", "install", "--config", "missing.toml", "--ssh-host", "monitoring" });
+    defer explicit_missing.deinit(a);
+    try std.testing.expectError(error.UnableToReadMonitoringConfig, loadStation(a, io, &explicit_missing, child));
+    try child.writeFile(io, .{ .sub_path = config.default_path, .data = "private-invalid-value" });
+    try std.testing.expectError(error.InvalidMonitoringConfig, loadStation(a, io, &cli_only, child));
 }

@@ -32,9 +32,16 @@ pub fn enrollmentStage(action: []const u8) ?EnrollmentStage {
 pub const Stage = enum {
     request,
     native_initialization,
+    operation_lock,
     enrollment,
     station_registration_prepare,
     managed_directories,
+    ingestion_root,
+    pki_directory,
+    clients_directory,
+    registry_directory,
+    state_directory,
+    ca_missing_bootstrap_allowed,
     registry_prepare,
     ca_state,
     ca_key_generation,
@@ -55,6 +62,10 @@ pub const AgentError = enum {
     CertificateValidationFailed,
     FilesystemStateRefused,
     InvalidManagedState,
+    UnexpectedManagedFile,
+    UnexpectedSymlink,
+    OperationBusy,
+    OperationLockFailed,
     AgentInternalError,
     CaMaintenanceRequired,
     ClientIdentityInconsistent,
@@ -68,6 +79,7 @@ pub const AgentError = enum {
 };
 pub const Detail = enum {
     agent_internal_error,
+    operation_busy,
     ca_maintenance,
     client_identity_inconsistent,
     registry_permissions,
@@ -90,6 +102,7 @@ pub fn detail(code: u8) ?Detail {
         93 => .server_tls_invalid,
         94 => .client_certificate_rejected,
         95 => .ingestion_rejected,
+        96 => .operation_busy,
         else => null,
     };
 }
@@ -103,6 +116,10 @@ pub const Diagnostic = struct {
 };
 pub fn failure(stage: Stage, err: anyerror) Diagnostic {
     const reason: AgentError = switch (err) {
+        error.OperationBusy => .OperationBusy,
+        error.OperationLockFailed => .OperationLockFailed,
+        error.UnexpectedManagedFile => .UnexpectedManagedFile,
+        error.UnexpectedManagedSymlink, error.SymLinkLoop => .UnexpectedSymlink,
         error.CaMaintenanceRequired => .CaMaintenanceRequired,
         error.ClientIdentityInconsistent => .ClientIdentityInconsistent,
         error.RegistryPermissions => .RegistryPermissions,
@@ -117,7 +134,14 @@ pub fn failure(stage: Stage, err: anyerror) Diagnostic {
             .ca_certificate_generation, .server_certificate_generation => .CertificateGenerationFailed,
             .ca_certificate_validation, .server_certificate_validation => .CertificateValidationFailed,
             .managed_directories, .registry_prepare, .ca_publication, .server_publication => .FilesystemStateRefused,
-            .ca_state, .server_state, .station_registration_prepare => .InvalidManagedState,
+            .ca_state,
+            .server_state,
+            .station_registration_prepare,
+            .ingestion_root,
+            .pki_directory,
+            .clients_directory,
+            .state_directory,
+            => .InvalidManagedState,
             else => if (err == error.CredentialStateRefused) .InvalidManagedState else .AgentInternalError,
         },
     };
