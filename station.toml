@@ -1,0 +1,15 @@
+version = 1
+
+[connection]
+ssh_host = "monitoring"
+
+[station]
+hostname = "monitoring.baptizeddragon.com"
+
+[grafana]
+username = { op = "op://BaptizedDragon/Grafana/username" }
+password = { op = "op://BaptizedDragon/Grafana/password" }
+
+[telegram]
+bot_token = { op = "op://BaptizedDragon/DragonTools/alarms-telegram-bot-token" }
+chat_id = { op = "op://BaptizedDragon/DragonTools/alarms-telegram-chat-id" }

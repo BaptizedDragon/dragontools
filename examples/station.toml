@@ -1,0 +1,18 @@
+# Central station configuration. Keep this outside application repositories.
+# Replace the OpenSSH alias; optional credential references belong here only.
+version = 1
+
+[connection]
+ssh_host = "replace-me-monitoring"
+
+# TLS identity; independent of the SSH alias. Required for a fresh station.
+[station]
+hostname = "monitoring.example.com"
+
+# [grafana]
+# username = { op = "op://Example/Grafana/username" }
+# password = { op = "op://Example/Grafana/password" }
+
+# [telegram]
+# bot_token = { op = "op://Example/DragonTools/bot-token" }
+# chat_id = { op = "op://Example/DragonTools/chat-id" }

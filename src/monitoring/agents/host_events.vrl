@@ -1,0 +1,23 @@
+# This source is only the DragonTools-owned journal unit or host metadata source.
+# Application journal records use logs.vrl and cannot select this transform.
+stamp = timestamp(.timestamp) ?? parse_timestamp(string(.timestamp) ?? "", format: "%+") ?? now()
+. = parse_json!(string!(.message))
+if .event == "host_reboot_required" || .event == "host_reboot_requirement_cleared" {
+  assert!(is_string(.event_id) && match(string!(.event_id), r'^[0-9a-f]{16}$'))
+  assert!(is_string(.kernel) && is_integer(.uptime_seconds) && is_integer(.packages_count))
+  packages = array!(.packages)
+  assert!(length(packages) <= 20)
+  # One searchable JSON value, never recursive array expansion or a stream label.
+  .packages = encode_json(packages)
+  .level = if .event == "host_reboot_required" { "warning" } else { "info" }
+} else {
+  assert!(.event == "host_stream_ready")
+  .level = "info"
+}
+.application = "host"
+.environment = "host"
+.service = "dragontools-host"
+.type = "dragontools_host"
+.message = .event
+.timestamp = stamp
+# The renderer appends the trusted machine identity after this code.

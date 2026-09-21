@@ -1,0 +1,46 @@
+global:
+  scrape_interval: 30s
+  scrape_timeout: 5s
+scrape_configs:
+- job_name: dragontools-blackbox
+  metrics_path: /probe
+  params:
+    module:
+    - http_2xx
+  relabel_configs:
+  - source_labels: [__address__]
+    target_label: __param_target
+  - source_labels: [__param_target]
+    target_label: target
+  - source_labels: [probe]
+    target_label: instance
+  - target_label: __address__
+    replacement: 127.0.0.1:9115
+  metric_relabel_configs:
+  - action: keep
+    source_labels: [__name__]
+    regex:
+    - probe_success
+    - probe_duration_seconds
+    - probe_dns_lookup_time_seconds
+    - probe_http_duration_seconds
+    - probe_http_status_code
+    - probe_http_ssl
+    - probe_ssl_earliest_cert_expiry
+    - probe_http_redirects
+    - probe_ip_protocol
+  - action: labelkeep
+    regex:
+    - __name__
+    - job
+    - instance
+    - probe
+    - target
+    - phase
+  static_configs:
+  - targets:
+    - https://example.com/healthz
+    labels:
+      __scrape_interval__: 30s
+      __scrape_timeout__: 5s
+      probe: landing

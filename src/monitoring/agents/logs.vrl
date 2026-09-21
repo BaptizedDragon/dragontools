@@ -1,0 +1,46 @@
+# DragonTools-owned log schema. Journald input only; never host metrics.
+unit = string!(._SYSTEMD_UNIT)
+text = string(.message) ?? ""
+stamp = timestamp(.timestamp) ?? parse_timestamp(string(.timestamp) ?? "", format: "%+") ?? now()
+priority, priority_error = to_int(.PRIORITY)
+has_priority = is_string(.PRIORITY) || is_integer(.PRIORITY)
+parsed, parse_error = parse_json(text)
+. = {}
+.message = text
+.timestamp = stamp
+if has_priority && priority_error == null && priority >= 0 && priority <= 7 {
+  .level = if priority <= 2 { "critical" } else if priority == 3 { "error" } else if priority == 4 { "warning" } else if priority == 7 { "debug" } else { "info" }
+}
+if parse_error == null && is_object(parsed) {
+  fields = object!(parsed)
+  # Common fields survive even when the extra scalar-field budget is exhausted.
+  common = ["event", "method", "path", "status", "duration_ms", "request_id", "trace_id", "span_id", "cf_ray", "client_ip"]
+  reserved = ["application", "environment", "host", "service", "journal_unit", "type", "message", "timestamp", "level"]
+  extra_count = 0
+  extra_bytes = 0
+  for_each(fields) -> |key, value| {
+    scalar = is_string(value) || is_integer(value) || is_float(value) || is_boolean(value)
+    allowed = match(key, r'^[A-Za-z][A-Za-z0-9_.-]{0,63}$') && !includes(reserved, key)
+    size = if is_string(value) { length(string!(value)) } else { 8 }
+    if scalar && allowed && size <= 8192 {
+      if includes(common, key) {
+        . = set!(., [key], value)
+      } else if extra_count < 64 && extra_bytes + size <= 32768 {
+        . = set!(., [key], value)
+        extra_count = extra_count + 1
+        extra_bytes = extra_bytes + size
+      }
+    }
+  }
+  # No recursive flattening or array expansion. The original JSON remains the
+  # message unless it contains a useful human-readable message of its own.
+  message = string(fields.message) ?? ""
+  if strip_whitespace(message) != "" { .message = message }
+  level = downcase(strip_whitespace(string(fields.level) ?? ""))
+  if match(level, r'^[a-z]{1,32}$') { .level = level }
+  candidate, timestamp_error = parse_timestamp(string(fields.timestamp) ?? "", format: "%+")
+  if timestamp_error == null {
+    delta = to_unix_timestamp(candidate) - to_unix_timestamp(stamp)
+    if delta >= -86400 && delta <= 86400 { .timestamp = candidate }
+  }
+}

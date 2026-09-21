@@ -1,0 +1,33 @@
+/* DragonTools reviewed PSA configuration. No RSA, other curves, legacy hashes,
+ * persistent PSA key store, platform-specific assembly or external providers. */
+#ifndef DRAGONTOOLS_CRYPTO_CONFIG_H
+#define DRAGONTOOLS_CRYPTO_CONFIG_H
+#define PSA_WANT_ALG_SHA_256 1
+#define PSA_WANT_ALG_ECDSA 1
+#define PSA_WANT_ECC_SECP_R1_256 1
+#define PSA_WANT_KEY_TYPE_ECC_KEY_PAIR_BASIC 1
+#define PSA_WANT_KEY_TYPE_ECC_KEY_PAIR_IMPORT 1
+#define PSA_WANT_KEY_TYPE_ECC_KEY_PAIR_EXPORT 1
+#define PSA_WANT_KEY_TYPE_ECC_KEY_PAIR_GENERATE 1
+#define PSA_WANT_KEY_TYPE_ECC_PUBLIC_KEY 1
+/* AES-128-GCM, ECDH and PRF are used only by private-channel TLS 1.2. */
+#define PSA_WANT_ALG_ECDH 1
+#define PSA_WANT_ALG_GCM 1
+#define PSA_WANT_ALG_TLS12_PRF 1
+#define PSA_WANT_KEY_TYPE_AES 1
+#define MBEDTLS_PSA_CRYPTO_C
+#define MBEDTLS_PSA_BUILTIN_GET_ENTROPY
+#define MBEDTLS_CTR_DRBG_C
+#define MBEDTLS_HAVE_TIME
+#define MBEDTLS_HAVE_TIME_DATE
+#define MBEDTLS_ASN1_PARSE_C
+#define MBEDTLS_ASN1_WRITE_C
+#define MBEDTLS_BASE64_C
+#define MBEDTLS_PEM_PARSE_C
+#define MBEDTLS_PEM_WRITE_C
+#define MBEDTLS_PK_C
+#define MBEDTLS_PK_PARSE_C
+#define MBEDTLS_PK_WRITE_C
+#define MBEDTLS_ECP_NIST_OPTIM
+#define MBEDTLS_MPI_MAX_SIZE 32
+#endif

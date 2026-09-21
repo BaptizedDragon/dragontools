@@ -1,0 +1,142 @@
+//! Bounded, read-only readiness polling; deterministic mismatches never retry.
+const std = @import("std");
+const remote = @import("../system/remote.zig");
+const install = @import("install.zig");
+
+pub const Check = enum {
+    managed_state,
+    managed_account,
+    managed_helper,
+    managed_unit,
+    managed_directories,
+    managed_registry,
+    managed_server_state,
+    managed_systemd_properties,
+    caddy_listener,
+    caddy_tls,
+    ingress_hostname_required,
+    station_ingress_required,
+    caddy_account,
+    caddy_binary,
+    caddy_unit,
+    caddy_systemd_properties,
+    caddy_config,
+    caddy_credentials,
+    caddy_directories,
+    legacy_ingress_conflict,
+    application_ownership,
+    application_publish,
+    application_scrape_reload,
+    application_finalize,
+    plugin_integrity,
+    service_active,
+    http_ready,
+    self_scrape_ready,
+    storage_ready,
+    provisioning_ready,
+    backend_ready,
+    logs_backend_ready,
+    logs_datasource_ready,
+    credentials_bootstrap,
+    credentials_authenticated,
+    scrape_ready,
+    probe_metrics_ready,
+    rules_ready,
+    secure_endpoint,
+    dns_unresolved,
+    tcp_unreachable,
+    tcp_metrics_unreachable,
+    tcp_logs_unreachable,
+    metrics_ingestion_rejected,
+    logs_ingestion_rejected,
+    server_tls_invalid,
+    client_certificate_rejected,
+    ingestion_rejected,
+    ca_maintenance,
+    registry_permissions,
+    ingestion_root_invalid,
+    pki_directory_invalid,
+    clients_directory_invalid,
+    registry_directory_invalid,
+    state_directory_invalid,
+    unexpected_managed_file,
+    unexpected_symlink,
+    ca_bundle_invalid,
+    server_identity_invalid,
+    operation_busy,
+    operation_lock_failed,
+    credential_recovery,
+    client_identity_inconsistent,
+    host_events_state,
+    host_events_ready,
+    host_metrics_ready,
+    log_stream_ready,
+    metrics_source_ready,
+    metrics_agent_active,
+    metrics_station_reachable,
+    metrics_mtls_authenticated,
+    metrics_remote_write_accepted,
+    application_metrics_visible,
+};
+pub const active_ms = 15_000;
+pub const http_ms = 30_000;
+pub const telemetry_ms = 45_000;
+pub const Validator = *const fn (std.mem.Allocator, []const u8) anyerror!void;
+
+pub fn now(r: remote.Remote) i64 {
+    if (r.clock) |clock| return clock.now_ms(clock.context);
+    return std.Io.Clock.awake.now(std.Io.Threaded.global_single_threaded.io()).toMilliseconds();
+}
+fn sleep(r: remote.Remote, milliseconds: u32) !void {
+    if (r.clock) |clock| return clock.sleep_ms(clock.context, milliseconds);
+    try std.Io.sleep(std.Io.Threaded.global_single_threaded.io(), .fromMilliseconds(milliseconds), .awake);
+}
+
+pub fn deterministic(_: std.mem.Allocator, r: remote.Remote, report: *install.Report, check: Check, command: anytype) ![]const u8 {
+    report.check = check;
+    return report.call(r, .health, command);
+}
+
+pub fn ready(_: std.mem.Allocator, _: []const u8) !void {}
+
+/// Exit 75 and error.NotReady are the only transient outcomes. The caller must
+/// keep invariant checks outside that classification, including on later probes.
+/// Production SSH receives the remaining budget as an absolute process deadline;
+/// a slow command, connection or response cannot start a fresh retry window.
+pub fn poll(a: std.mem.Allocator, r: remote.Remote, report: *install.Report, check: Check, deadline_ms: u32, command: anytype, validator: Validator) !void {
+    report.phase = .health;
+    report.beginRequest(command);
+    report.check = check;
+    report.startVerification();
+    const started = now(r);
+    const deadline = started + deadline_ms;
+    var delay_ms: u32 = 500;
+    while (true) {
+        const remaining = deadline - now(r);
+        if (remaining <= 0) return error.ReadinessTimedOut;
+        const result = r.runTimed(.health, command, @intCast(remaining)) catch |err| switch (err) {
+            error.Timeout => return error.ReadinessTimedOut,
+            else => return err,
+        };
+        report.captureAgentFailure(result);
+        var ready_now = false;
+        if (result.code != 75) {
+            const output = try report.accept(result);
+            ready_now = if (validator(a, output)) |_| true else |err| switch (err) {
+                error.NotReady => false,
+                else => return err,
+            };
+        }
+        const left = deadline - now(r);
+        if (left <= 0) return error.ReadinessTimedOut;
+        if (ready_now) return;
+        if (now(r) - started >= 2000) report.waitingForReadiness();
+        try sleep(r, @intCast(@min(left, delay_ms)));
+        if (now(r) - started >= 2000) report.waitingForReadiness();
+        delay_ms = 1000;
+    }
+}
+
+test {
+    _ = @import("readiness_tests.zig");
+}

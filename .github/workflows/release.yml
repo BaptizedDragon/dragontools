@@ -1,0 +1,86 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.5'
+          cache: false
+      - run: python3 tools/verify_crypto_vendor.py
+      - run: zig fmt --check build.zig src
+      - run: zig build
+      - run: python3 tests/version_test.py
+      - run: zig build test --summary all
+      - run: python3 tests/cli_smoke.py
+      - name: Pinned Caddy mTLS integration fixture (local sockets only)
+        run: |
+          python3 -I -B tools/fetch_caddy_fixture.py --output "$RUNNER_TEMP/dragontools-caddy-2.11.4"
+          python3 -I -B tests/agent_ingestion_test.py --caddy "$RUNNER_TEMP/dragontools-caddy-2.11.4"
+      - run: python3 -I -B tests/release_test.py
+      - name: Linux helper filesystem lifecycle (temporary paths only)
+        if: runner.os == 'Linux'
+        run: sudo python3 -I -B tests/helper_install_test.py --fixture "$PWD/zig-out/bin/dragontool-pki-fixture" --agent "$PWD/zig-out/bin/dragontool-agent"
+  build:
+    needs: test
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        target: [aarch64-macos, x86_64-macos, aarch64-linux, x86_64-linux]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Build matching controller and helpers
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe -Dversion="${RELEASE_TAG#v}"
+      - name: Package standalone binary
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: |
+          python3 tools/package_release.py package --version "$RELEASE_TAG" --target "$RELEASE_TARGET" --binary zig-out/bin/dragontool --output dist
+          case "$RELEASE_TARGET" in
+            *-linux) python3 tools/package_release.py package --version "$RELEASE_TAG" --target "$RELEASE_TARGET" --binary zig-out/bin/dragontool-agent --agent --output dist ;;
+          esac
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Verify complete archive set and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 tools/package_release.py checksums --version "$RELEASE_TAG" --output dist
+          gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG" --generate-notes dist/*.tar.gz dist/SHA256SUMS

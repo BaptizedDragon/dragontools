@@ -1,0 +1,130 @@
+{{/* Managed by DragonTools: Telegram presentation v1. No safeHtml/safeUrl. */}}
+{{- define "dragontools.telegram.identity" -}}
+{{- $name := or .Labels.application .Labels.service .Labels.probe .Labels.host .Labels.alertname "Alert" -}}
+{{- $name = reReplaceAll "[[:cntrl:]]" " " $name -}}
+{{- $name = reReplaceAll "(?s)^(.{48}).+$" "${1}…" $name -}}
+{{- if or .Labels.application .Labels.service -}}
+{{- $first := reReplaceAll "(?s)^(.).*" "${1}" $name -}}
+{{- toUpper $first }}{{ reReplaceAll "(?s)^." "" $name -}}
+{{- else -}}{{ $name }}{{- end -}}
+{{- end -}}
+
+{{- define "dragontools.telegram.title" -}}
+{{- $resolved := eq .Status "resolved" -}}
+{{- $name := .Labels.alertname -}}
+{{- if or (eq $name "HostRebootRequired") (eq $name "HostRebootRequirementCleared") -}}
+{{ template "dragontools.telegram.field" .Labels.host }}{{ if eq $name "HostRebootRequired" }} reboot required{{ else }} reboot requirement cleared{{ end }}
+{{- else if eq $name "DragonToolsNotificationTest" -}}
+DragonTools notification test{{ if $resolved }} completed{{ end }}
+{{- else -}}
+{{- template "dragontools.telegram.identity" . -}}
+{{- if or (eq $name "ServiceProbeFailed") (eq .Labels.source "blackbox") -}}
+{{- if $resolved }} recovered{{ else }} unavailable{{ end }}
+{{- else if eq $name "ErrorBurst" -}}
+{{- if $resolved }} error rate recovered{{ else }} error burst{{ end }}
+{{- else if eq $name "CriticalLogEvent" -}}
+{{- if $resolved }} critical alert cleared{{ else }} critical event{{ end }}
+{{- else if or (eq $name "DiskWarning") (eq $name "DiskCritical") -}}
+{{- if $resolved }} disk usage recovered{{ else }} disk usage high{{ end }}
+{{- else if eq $name "InodesCritical" -}}
+{{- if $resolved }} inode usage recovered{{ else }} inode usage high{{ end }}
+{{- else if eq $name "CPUHigh" -}}
+{{- if $resolved }} CPU usage recovered{{ else }} CPU usage high{{ end }}
+{{- else if eq $name "MemoryPressure" -}}
+{{- if $resolved }} memory usage recovered{{ else }} memory usage high{{ end }}
+{{- else if eq $name "SecurityUpdatesPending" -}}
+{{- if $resolved }} security update alert cleared{{ else }} security updates pending{{ end }}
+{{- else if eq $name "RebootRequired" -}}
+{{- if $resolved }} reboot alert cleared{{ else }} reboot required{{ end }}
+{{- else if eq .Labels.source "victorialogs" -}}
+{{- if $resolved }} log alert cleared{{ else }} log threshold reached{{ end }}
+{{- else -}}
+{{- if $resolved }} alert cleared{{ else }} alert active{{ end }}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "dragontools.telegram.icon" -}}
+{{- if or (eq .Status "resolved") (eq .Labels.alertname "HostRebootRequirementCleared") -}}✅
+{{- else if eq .Labels.alertname "DragonToolsNotificationTest" -}}ℹ️
+{{- else if eq .Labels.severity "critical" -}}🚨
+{{- else if eq .Labels.severity "warning" -}}⚠️
+{{- else -}}ℹ️{{- end -}}
+{{- end -}}
+
+{{- define "dragontools.telegram.field" -}}
+{{- reReplaceAll "(?s)^(.{64}).+$" "${1}…" (reReplaceAll "[[:cntrl:]]" " " .) -}}
+{{- end -}}
+
+{{- define "dragontools.telegram.single" -}}
+{{- $resolved := eq .Status "resolved" -}}
+{{- $name := .Labels.alertname -}}
+{{- template "dragontools.telegram.icon" . }} <b>{{ template "dragontools.telegram.title" . }}</b>
+{{- if or (eq $name "HostRebootRequired") (eq $name "HostRebootRequirementCleared") -}}
+{{- if eq $name "HostRebootRequired" -}}
+{{ "\n\nUbuntu/Debian reports that a reboot is required after system updates." }}
+{{- with .Annotations.packages_text }}{{ "\n\nPackages:\n" }}{{ reReplaceAll "(?s)^(.{700})(.{700})(.{700})(.{700}).+$" "${1}${2}${3}${4}…" (reReplaceAll "[^a-zA-Z0-9+.:\\-\n• ]" "?" .) }}{{ else }}{{ "\n\nPackages: unavailable\n" }}{{ end }}
+{{- "\nRunning kernel: " -}}
+{{- else -}}
+{{ "\n\nHost restarted or the reboot-required condition was cleared.\n\nCurrent kernel: " }}
+{{- end -}}
+<code>{{ template "dragontools.telegram.field" .Annotations.kernel }}</code>
+{{- "\nUptime: " }}{{ template "dragontools.telegram.field" .Annotations.uptime_human }}
+{{- if eq $name "HostRebootRequired" }}{{ "\nSeverity: " }}<b>warning</b>{{ end }}
+{{- else if eq $name "DragonToolsNotificationTest" -}}
+{{- if $resolved }}{{ "\n\nThe test alert has expired." }}{{ else }}{{ "\n\nMonitoring station notification test." }}{{ end }}
+{{- else -}}
+{{- if or (eq $name "ServiceProbeFailed") (eq .Labels.source "blackbox") -}}
+{{- with .Labels.probe }}{{ "\n\nProbe: " }}<code>{{ template "dragontools.telegram.field" . }}</code>{{ end }}
+{{- with .Labels.target }}{{ "\nTarget: " }}{{ reReplaceAll "(?s)^(.{256}).+$" "${1}…" (reReplaceAll "[[:cntrl:]]" " " .) }}{{ end }}
+{{- if $resolved }}{{ "\nStatus: healthy again" }}{{ else }}{{ "\nStatus: HTTP health check failing" }}{{ end }}
+{{- else if eq $name "ErrorBurst" -}}
+{{- if not $resolved }}{{ "\n\nError events exceeded the configured threshold." }}{{ end }}
+{{- with .Labels.service }}{{ "\n\nService: " }}<code>{{ template "dragontools.telegram.field" . }}</code>{{ end }}
+{{- if $resolved }}{{ "\nStatus: error rate returned below threshold" }}{{ end }}
+{{- else if eq $name "CriticalLogEvent" -}}
+{{- if not $resolved }}{{ "\n\nA critical or fatal application event was detected." }}{{ end }}
+{{- with .Labels.service }}{{ "\n\nService: " }}<code>{{ template "dragontools.telegram.field" . }}</code>{{ end }}
+{{- else if or (eq $name "CPUHigh") (eq $name "MemoryPressure") (eq $name "DiskWarning") (eq $name "DiskCritical") (eq $name "InodesCritical") -}}
+{{- with .Labels.host }}{{ "\n\nHost: " }}<code>{{ template "dragontools.telegram.field" . }}</code>{{ end }}
+{{- with .Labels.mountpoint }}{{ "\nFilesystem: " }}<code>{{ template "dragontools.telegram.field" . }}</code>{{ end }}
+{{- if $resolved }}{{ "\nStatus: back below threshold" }}{{ else }}{{ "\nStatus: usage above threshold" }}{{ end }}
+{{- else if eq $name "SecurityUpdatesPending" -}}
+{{- if $resolved }}{{ "\n\nStatus: security update condition cleared" }}{{ else }}{{ "\n\nReview pending security updates on this host." }}{{ end }}
+{{- else if eq $name "RebootRequired" -}}
+{{- if $resolved }}{{ "\n\nStatus: reboot request cleared" }}{{ else }}{{ "\n\nSchedule a host maintenance reboot." }}{{ end }}
+{{- else -}}
+{{- if $resolved }}{{ "\n\nStatus: alert condition cleared" }}{{ else }}{{ "\n\nStatus: alert condition active" }}{{ end }}
+{{- with .Labels.service }}{{ "\nService: " }}<code>{{ template "dragontools.telegram.field" . }}</code>{{ end }}
+{{- end -}}
+{{- if not $resolved -}}
+{{- with .Labels.severity }}{{ "\nSeverity: " }}<b>{{ reReplaceAll "(?s)^(.{12}).+$" "${1}…" (reReplaceAll "[[:cntrl:]]" " " .) }}</b>{{ end }}
+{{- else if and (not .StartsAt.IsZero) (not .EndsAt.IsZero) (.EndsAt.After .StartsAt) -}}
+{{- "\nDuration: " }}{{ (.EndsAt.Sub .StartsAt).Round 1000000000 }}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "dragontools.telegram.message" -}}
+{{- if eq (len .Alerts) 1 -}}
+{{- range .Alerts -}}{{ template "dragontools.telegram.single" . }}{{- end -}}
+{{- else if gt (len .Alerts) 1 -}}
+{{- $firing := .Alerts.Firing -}}
+{{- $resolved := .Alerts.Resolved -}}
+{{- $critical := false -}}{{- $warning := false -}}
+{{- $allCritical := true -}}{{- $allWarning := true -}}
+{{- range $firing -}}
+{{- if eq .Labels.severity "critical" -}}{{- $critical = true -}}{{- else -}}{{- $allCritical = false -}}{{- end -}}
+{{- if eq .Labels.severity "warning" -}}{{- $warning = true -}}{{- else -}}{{- $allWarning = false -}}{{- end -}}
+{{- end -}}
+{{- if eq (len $firing) 0 -}}✅ <b>{{ len .Alerts }} alerts resolved</b>
+{{- else -}}
+{{- if $critical }}🚨{{ else if $warning }}⚠️{{ else }}ℹ️{{ end }} <b>{{ len .Alerts }} {{ if eq (len $resolved) 0 }}{{ if $allCritical }}critical {{ else if $allWarning }}warning {{ end }}alerts{{ else }}alerts ({{ len $firing }} firing, {{ len $resolved }} resolved){{ end }}</b>
+{{- end -}}
+{{- "\n" }}
+{{- range $i, $alert := .Alerts -}}
+{{- if lt $i 10 -}}{{ "\n• " }}{{ template "dragontools.telegram.title" $alert }}{{- end -}}
+{{- end -}}
+{{- if gt (len .Alerts) 10 -}}{{ "\n" }}+ {{ len (slice .Alerts 10) }} more{{- end -}}
+{{- else -}}ℹ️ <b>No alerts</b>{{- end -}}
+{{- end -}}

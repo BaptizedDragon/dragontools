@@ -1,0 +1,35 @@
+DragonTools includes statically linked portions of Mbed TLS 4.2.0 and
+TF-PSA-Crypto 1.2.0, Copyright The Mbed TLS Contributors.
+
+DragonTools uses these components under the Apache License, Version 2.0,
+from their upstream dual Apache-2.0 OR GPL-2.0-or-later license offer.
+Unmodified upstream source headers retain their copyright and SPDX notices.
+Full upstream license texts are preserved in:
+
+  vendor/mbedtls/LICENSE
+  vendor/mbedtls/tf-psa-crypto/LICENSE
+
+Binary release archives include those texts as MbedTLS-LICENSE and
+TF-PSA-Crypto-LICENSE, together with this notice and DragonTools' LICENSE.
+
+Source: https://github.com/Mbed-TLS/mbedtls/releases/tag/mbedtls-4.2.0
+Official release archive (including TF-PSA-Crypto):
+https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-4.2.0/mbedtls-4.2.0.tar.bz2
+SHA-256: 2bed9d713b4668f76553b097e72b8aa30bc8f112a940d7ae228d524bbde6ffea
+
+DragonTools' feature configuration and Zig bindings are separate from the
+unmodified vendored source. See vendor/mbedtls/README.md for provenance,
+the constrained configuration, and the intentional dependency update policy.
+
+Caddy v2.11.4 is a separately downloaded managed station component, not linked
+into or embedded in DragonTools controller/helper binaries. Caddy is Copyright
+The Caddy Authors and is licensed under Apache-2.0. Its official release archives
+include LICENSE and README.md; see the upstream license and dependency notices:
+https://github.com/caddyserver/caddy/blob/v2.11.4/LICENSE
+https://github.com/caddyserver/caddy/releases/tag/v2.11.4
+
+DragonTools pins official Linux amd64/arm64 archive hashes and extracted binary
+hashes in src/components/caddy.zig. The provenance and full hash table are in
+design.md under Caddy ingress pins and verification. Test-only macOS artifacts
+are separately pinned in tools/fetch_caddy_fixture.py. No Caddy custom module or
+modified upstream build is used.

@@ -1,0 +1,89 @@
+# Managed by DragonTools
+{
+	admin off
+	auto_https off
+	persist_config off
+	log {
+		output discard
+	}
+	servers {
+		protocols h1
+		max_header_size 16KB
+		timeouts {
+			read_header 5s
+			read_body 10s
+			write 15s
+			idle 15s
+		}
+	}
+}
+
+https://:9443 {
+	bind tcp4/0.0.0.0
+	tls {$CREDENTIALS_DIRECTORY}/server.crt {$CREDENTIALS_DIRECTORY}/server.key {
+		protocols tls1.2 tls1.3
+		client_auth {
+			mode require_and_verify
+			trust_pool file {
+				pem_file {$CREDENTIALS_DIRECTORY}/ca.crt
+			}
+		}
+	}
+	request_body {
+		max_size 4194304
+	}
+	request_header -X-DragonTools-*
+	reverse_proxy unix//run/dragontools-ingress/metrics.sock {
+		header_up X-DragonTools-Fingerprint "{http.request.tls.client.fingerprint}"
+		header_up X-DragonTools-Subject "{http.request.tls.client.subject}"
+		header_up X-DragonTools-URI "{http.request.tls.client.san.uris.0}"
+		header_up X-DragonTools-Other-URI "{http.request.tls.client.san.uris.1}"
+		header_up X-DragonTools-DNS "{http.request.tls.client.san.dns_names.0}"
+		header_up X-DragonTools-IP "{http.request.tls.client.san.ips.0}"
+		header_up X-DragonTools-Email "{http.request.tls.client.san.emails.0}"
+		header_up -Authorization
+		header_up -Cookie
+		transport http {
+			dial_timeout 3s
+			response_header_timeout 10s
+			read_timeout 10s
+			write_timeout 10s
+			keepalive off
+		}
+	}
+}
+
+https://:9444 {
+	bind tcp4/0.0.0.0
+	tls {$CREDENTIALS_DIRECTORY}/server.crt {$CREDENTIALS_DIRECTORY}/server.key {
+		protocols tls1.2 tls1.3
+		client_auth {
+			mode require_and_verify
+			trust_pool file {
+				pem_file {$CREDENTIALS_DIRECTORY}/ca.crt
+			}
+		}
+	}
+	request_body {
+		max_size 4194304
+	}
+	request_header -X-DragonTools-*
+	reverse_proxy unix//run/dragontools-ingress/logs.sock {
+		header_up X-DragonTools-Fingerprint "{http.request.tls.client.fingerprint}"
+		header_up X-DragonTools-Subject "{http.request.tls.client.subject}"
+		header_up X-DragonTools-URI "{http.request.tls.client.san.uris.0}"
+		header_up X-DragonTools-Other-URI "{http.request.tls.client.san.uris.1}"
+		header_up X-DragonTools-DNS "{http.request.tls.client.san.dns_names.0}"
+		header_up X-DragonTools-IP "{http.request.tls.client.san.ips.0}"
+		header_up X-DragonTools-Email "{http.request.tls.client.san.emails.0}"
+		header_up -Authorization
+		header_up -Cookie
+		transport http {
+			dial_timeout 3s
+			response_header_timeout 10s
+			read_timeout 10s
+			write_timeout 10s
+			keepalive off
+		}
+	}
+}

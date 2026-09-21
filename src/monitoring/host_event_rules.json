@@ -1,0 +1,41 @@
+{
+  "groups": [
+    {
+      "name": "dragontools-host-events",
+      "type": "vlogs",
+      "interval": "1m",
+      "rules": [
+        {
+          "alert": "HostRebootRequired",
+          "expr": "_time:2m {application=\"host\",environment=\"host\",service=\"dragontools-host\"} type:=\"dragontools_host\" event:=\"host_reboot_required\" | stats by (host, event_id) count() as events | filter events:>0",
+          "labels": {
+            "managed_by": "dragontools",
+            "source": "host-maintenance",
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "{{ $labels.host }} reboot required",
+            "kernel": "{{ $rows := query (printf \"_time:5m {application=\\\"host\\\",environment=\\\"host\\\",service=\\\"dragontools-host\\\"} type:=\\\"dragontools_host\\\" host:=%q event_id:=%q | stats by (kernel) count() as hits | filter hits:>0\" $labels.host $labels.event_id) }}{{ if gt (len $rows) 0 }}{{ label \"kernel\" (index $rows 0) }}{{ end }}",
+            "uptime_human": "{{ $rows := query (printf \"_time:5m {application=\\\"host\\\",environment=\\\"host\\\",service=\\\"dragontools-host\\\"} type:=\\\"dragontools_host\\\" host:=%q event_id:=%q | stats by (uptime_human) count() as hits | filter hits:>0\" $labels.host $labels.event_id) }}{{ if gt (len $rows) 0 }}{{ label \"uptime_human\" (index $rows 0) }}{{ end }}",
+            "packages_text": "{{ $rows := query (printf \"_time:5m {application=\\\"host\\\",environment=\\\"host\\\",service=\\\"dragontools-host\\\"} type:=\\\"dragontools_host\\\" host:=%q event_id:=%q | stats by (packages_text) count() as hits | filter hits:>0\" $labels.host $labels.event_id) }}{{ if gt (len $rows) 0 }}{{ label \"packages_text\" (index $rows 0) }}{{ end }}"
+          }
+        },
+        {
+          "alert": "HostRebootRequirementCleared",
+          "expr": "_time:2m {application=\"host\",environment=\"host\",service=\"dragontools-host\"} type:=\"dragontools_host\" event:=\"host_reboot_requirement_cleared\" | stats by (host, event_id) count() as events | filter events:>0",
+          "labels": {
+            "managed_by": "dragontools",
+            "source": "host-maintenance",
+            "severity": "info"
+          },
+          "annotations": {
+            "summary": "{{ $labels.host }} reboot requirement cleared",
+            "kernel": "{{ $rows := query (printf \"_time:5m {application=\\\"host\\\",environment=\\\"host\\\",service=\\\"dragontools-host\\\"} type:=\\\"dragontools_host\\\" host:=%q event_id:=%q | stats by (kernel) count() as hits | filter hits:>0\" $labels.host $labels.event_id) }}{{ if gt (len $rows) 0 }}{{ label \"kernel\" (index $rows 0) }}{{ end }}",
+            "uptime_human": "{{ $rows := query (printf \"_time:5m {application=\\\"host\\\",environment=\\\"host\\\",service=\\\"dragontools-host\\\"} type:=\\\"dragontools_host\\\" host:=%q event_id:=%q | stats by (uptime_human) count() as hits | filter hits:>0\" $labels.host $labels.event_id) }}{{ if gt (len $rows) 0 }}{{ label \"uptime_human\" (index $rows 0) }}{{ end }}",
+            "packages_text": "{{ $rows := query (printf \"_time:5m {application=\\\"host\\\",environment=\\\"host\\\",service=\\\"dragontools-host\\\"} type:=\\\"dragontools_host\\\" host:=%q event_id:=%q | stats by (packages_text) count() as hits | filter hits:>0\" $labels.host $labels.event_id) }}{{ if gt (len $rows) 0 }}{{ label \"packages_text\" (index $rows 0) }}{{ end }}"
+          }
+        }
+      ]
+    }
+  ]
+}

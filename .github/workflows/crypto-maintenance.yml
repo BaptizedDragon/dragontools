@@ -1,0 +1,18 @@
+name: Crypto dependency maintenance
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 8 * * 1'
+permissions:
+  contents: read
+jobs:
+  review:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify original upstream archive and vendored subset
+        run: |
+          curl --fail --location --proto '=https' --proto-redir '=https' --max-time 120 -o /tmp/mbedtls.tar.bz2 https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-4.2.0/mbedtls-4.2.0.tar.bz2
+          python3 tools/verify_crypto_vendor.py --archive /tmp/mbedtls.tar.bz2
+      - name: Flag newer upstream stable release for review
+        run: python3 tools/check_crypto_release.py

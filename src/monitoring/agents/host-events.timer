@@ -1,0 +1,13 @@
+# Managed by DragonTools
+[Unit]
+Description=DragonTools host maintenance event observation
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=5min
+AccuracySec=1s
+RandomizedDelaySec=0
+Unit=dragontools-host-events.service
+
+[Install]
+WantedBy=timers.target
