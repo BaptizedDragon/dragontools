@@ -80,6 +80,7 @@ if '-N' in args:
             path = {'8428':'/vmui/', '9428':'/select/vmui/', '10428':'/select/vmui/', '3000':'/', '8881':'/vmalert/groups', '8880':'/vmalert/groups', '9093':'/'}[remote_port]
             if mode == 'forward-denied': peer.sendall(b'1'); continue
             server = socket.socket()
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try: server.bind((local, int(port))); server.listen()
             except OSError:
                 server.close(); peer.sendall(b'1'); continue
@@ -200,12 +201,18 @@ class Tunnel(unittest.TestCase):
     def test_occupied_preferred_port_is_preserved(self):
         for ui, port in [('logs', 9428), ('alerts', 8881), ('log-alerts', 8880), ('alertmanager', 9093)]:
             with self.subTest(ui=ui), socket.socket() as existing:
+                # Reuse closed fixture connections, never another live listener.
+                existing.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 try: existing.bind(('127.0.0.1', port)); existing.listen()
-                except OSError as error: self.assertEqual(error.errno, errno.EADDRINUSE)
+                except OSError as error:
+                    if error.errno != errno.EADDRINUSE: raise
+                    # A failed bind proves neither an active listener nor that
+                    # the port will remain occupied while the controller starts.
+                    self.skipTest('Cannot own preferred-port fixture: ' + str(port))
                 process = self.start(ui)
                 self.assertNotIn(':' + str(port) + '/', self.ready(process))
                 self.closed(process)
-                # Either this fixture or a preexisting user listener still owns it.
+                # This fixture still owns the listener after tunnel shutdown.
                 with socket.socket() as probe:
                     with self.assertRaises(OSError) as error: probe.bind(('127.0.0.1', port))
                     self.assertEqual(error.exception.errno, errno.EADDRINUSE)

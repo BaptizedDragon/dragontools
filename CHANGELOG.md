@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Make the UI occupied-port fixture retain an owned listener instead of assuming
+  a transient bind conflict remains occupied. Reuse closed fixture connections
+  and explicitly skip ports that cannot be reserved; production UI behavior is unchanged.
+
 ## 0.1.1 — 2026-09-21
 
 - Fix host maintenance observer activation on Linux by reading zero-size procfs
