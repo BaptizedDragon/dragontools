@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.1 — 2026-09-21
+
+- Fix host maintenance observer activation on Linux by reading zero-size procfs
+  inputs as bounded streams. Preserve the static oneshot/five-minute timer policy,
+  separate local execution from event-stream readiness, and report fixed semantic
+  host-events checks for account, helper, storage, units, timer and last-run failures.
+- Preserve safe reruns, persistent transition state and existing Vector/VictoriaLogs
+  delivery; successful oneshot observers may remain inactive between timer runs.
+
 ## 0.1.0 — 2026-09-21
 
 - Replace the reboot-required metric alert with persistent native host maintenance

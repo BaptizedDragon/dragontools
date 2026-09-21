@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -52,6 +53,21 @@ class Events(unittest.TestCase):
         self.assertEqual(event['event_id'],'0000000000000002')
         self.assertIsNone(self.check())
         self.state.unlink(); self.marker.touch(); self.assertEqual(self.check()['event'],'host_reboot_required')
+
+    @unittest.skipUnless(Path('/proc/uptime').is_file(), 'requires real Linux procfs')
+    def test_fresh_state_with_zero_stat_size_procfs_inputs(self):
+        # Production: no reboot marker, no state, readable procfs reports size 0.
+        # Regular-file fixtures conceal Zig's size-based EOF optimization.
+        shutil.rmtree(self.root/'proc')
+        (self.root/'proc').symlink_to('/proc', target_is_directory=True)
+        self.assertEqual(Path('/proc/uptime').stat().st_size, 0)
+        self.assertTrue(Path('/proc/uptime').read_bytes())
+        self.assertIsNone(self.check())
+        self.assertEqual(json.loads(self.state.read_text()), dict(version=1, required=False, sequence=0))
+        stamp=self.state.stat().st_mtime_ns
+        self.check(verify=True)
+        self.assertIsNone(self.check())
+        self.assertEqual(self.state.stat().st_mtime_ns, stamp)
 
     def test_packages_bounded_deduplicated_missing_and_non_names_ignored(self):
         self.marker.touch()

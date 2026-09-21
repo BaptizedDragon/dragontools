@@ -970,7 +970,7 @@ test "Doers reference enrollment rerun preserves agents certificates and station
 }
 
 test "host events readiness preserves independent intent and recovers to an unchanged rerun" {
-    for ([_]readiness.Check{ .host_events_state, .host_events_ready, .log_stream_ready }) |check| {
+    for ([_]readiness.Check{ .host_events_state_directory, .host_events_timer_active, .host_events_last_run, .host_events_state_safe, .host_events_stream_ready, .log_stream_ready }) |check| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
         const a = arena.allocator();

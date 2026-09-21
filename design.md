@@ -1749,7 +1749,12 @@ apply upgrades the host helper, Vector and observer units. Apply owns independen
 observer activation intent and clears it after read-only verification and stream
 arrival. Correct units/timer/state are a no-op on rerun. app-verify uses only
 maintenance events-verify, never events; it validates metadata, loaded units and a
-successful poll within six minutes, then verifies host-stream arrival. Every
+completed successful poll within six minutes, then independently verifies
+host-stream arrival. It accepts inactive/dead after exit 0, retries startup absence
+with bounded readiness, and rejects failed executions without retrying them as
+startup. The static service is never enabled; only its timer is enabled/active.
+Procfs inputs are read with bounded streaming readers: their zero stat size must
+not be interpreted as EOF by Zig's allocating reader. Every
 monitored host now needs the existing :9444 path even with application logs off.
 
 Tests inject a filesystem root only into the test fixture executable. The isolated

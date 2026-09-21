@@ -236,7 +236,8 @@ pub fn signals(a: std.mem.Allocator, app: remote.Remote, station: remote.Remote,
         try endpointSignal(a, app, report, registration, "vmagent", .metrics, null);
         try ready.poll(a, app, &report.state, .metrics_remote_write_accepted, ready.telemetry_ms, try common.python(a, @embedFile("metrics_checks.py"), &.{ "metrics_remote_write_accepted", selected, started }), ready.ready);
     }
-    const check: ready.Check = if (std.mem.eql(u8, mode, "host")) .host_metrics_ready else if (std.mem.eql(u8, mode, "logs")) .log_stream_ready else .application_metrics_visible;
+    const check: ready.Check = if (std.mem.eql(u8, mode, "host")) .host_metrics_ready else if (std.mem.eql(u8, mode, "logs")) .log_stream_ready else if (std.mem.eql(u8, mode, "events")) .host_events_stream_ready else .application_metrics_visible;
+    if (std.mem.eql(u8, mode, "events")) report.component = .host_events;
     try ready.poll(a, station, &report.state, check, ready.telemetry_ms, try common.python(a, @embedFile("signals.py"), &.{ mode, selected, started }), ready.ready);
 }
 pub fn verify(a: std.mem.Allocator, app: remote.Remote, station: remote.Remote, report: *model.Report, registration: model.Registration) !void {
@@ -254,10 +255,11 @@ pub fn verify(a: std.mem.Allocator, app: remote.Remote, station: remote.Remote, 
     _ = try report.call(station, .health, try ingress.verifyStationCommand(a, registration.host, registration.station, try registration.json(a)));
     report.component = .journald;
     _ = try report.call(app, .health, try @import("journald.zig").command(a, false));
-    try @import("host_events.zig").verify(a, app, report);
+    try @import("host_events.zig").verify(a, app, report, machine.arch);
     report.component = .vector;
     try service(a, app, report, registration, machine.arch, .vector);
     try signals(a, app, station, report, registration, "host");
+    try signals(a, app, station, report, registration, "events");
     try signals(a, app, station, report, registration, "logs");
     if (registration.metricsCount() > 0) {
         report.component = .vmagent;

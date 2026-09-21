@@ -134,16 +134,17 @@ fn convergeAgents(a: std.mem.Allocator, app: remote.Remote, station: remote.Remo
     report.component = .vector;
     try prepare(a, app, report, registration, arch, .vector);
     report.configured = true;
-    try @import("host_events.zig").install(a, app, report);
+    try @import("host_events.zig").install(a, app, report, arch);
     report.component = .vector;
     try verify.service(a, app, report, registration, arch, .vector);
     // Station ingress is finalized by station install, independently of apps.
     try verify.signals(a, app, station, report, registration, "host");
+    try verify.signals(a, app, station, report, registration, "events");
     try verify.signals(a, app, station, report, registration, "logs");
     report.component = .vector;
     try verify.service(a, app, report, registration, arch, .vector);
     _ = try report.call(app, .finalize, try common.finalize(a, .vector));
-    try @import("host_events.zig").verify(a, app, report);
+    try @import("host_events.zig").verify(a, app, report, arch);
     try @import("host_events.zig").finalize(a, app, report);
     if (registration.metricsCount() > 0) {
         report.component = .vmagent;

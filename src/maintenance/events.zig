@@ -98,9 +98,10 @@ fn read(a: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, name: []const u8, lim
     const file = try dir.openFile(io, name, .{ .follow_symlinks = false });
     defer file.close(io);
     if (managed) try metadata(file.handle, 0o600, true);
-    // /proc files have zero stat size: bound the actual stream read instead.
+    // Procfs reports size zero despite containing data. Zig's allocating writer
+    // treats that size as EOF unless the file reader explicitly uses streaming.
     var buffer: [4096]u8 = undefined;
-    var reader = file.reader(io, &buffer);
+    var reader = file.readerStreaming(io, &buffer);
     return try reader.interface.allocRemaining(a, .limited(limit));
 }
 pub fn load(a: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !?State {
@@ -128,8 +129,8 @@ pub fn observe(a: std.mem.Allocator, io: std.Io, root: std.Io.Dir) !Observation 
     defer runtime_dir.close(io);
     const marker = try read(a, io, runtime_dir, "reboot-required", 4096, false);
     const packages = if (marker != null) try read(a, io, runtime_dir, "reboot-required.pkgs", 1048576, false) orelse "" else "";
-    const kernel = try root.readFileAlloc(io, "proc/sys/kernel/osrelease", a, .limited(256));
-    const uptime = try root.readFileAlloc(io, "proc/uptime", a, .limited(256));
+    const kernel = try read(a, io, root, "proc/sys/kernel/osrelease", 256, false) orelse return error.HostEventStateRefused;
+    const uptime = try read(a, io, root, "proc/uptime", 256, false) orelse return error.HostEventStateRefused;
     var parts = std.mem.tokenizeAny(u8, uptime, ". \n");
     return .{ .host = try @import("../monitoring/agents/model.zig").hostId(a, try root.readFileAlloc(io, "etc/machine-id", a, .limited(128))), .required = marker != null, .packages = packages, .kernel = std.mem.trim(u8, kernel, "\r\n"), .uptime = try std.fmt.parseInt(u64, parts.next() orelse return error.HostEventStateRefused, 10) };
 }

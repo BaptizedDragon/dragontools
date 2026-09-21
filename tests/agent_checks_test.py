@@ -201,10 +201,18 @@ class Signals(unittest.TestCase):
         return result, queries
 
     def test_prior_process_samples_are_not_new_arrival_even_when_recent(self):
-        for mode in ('host', 'logs', 'app'):
+        for mode in ('host', 'logs', 'app', 'events'):
             with self.subTest(mode=mode):
                 self.assertEqual(self.run_signal(mode, SINCE - 1)[0], 75)
                 self.assertEqual(self.run_signal(mode, SINCE + 1)[0], 0)
+
+    def test_host_event_readiness_queries_only_the_reserved_host_stream(self):
+        result, queries = self.run_signal('events')
+        self.assertEqual(result, 0)
+        self.assertEqual(len(queries), 1)
+        self.assertIn('application="host"', queries[0])
+        self.assertIn('environment="host"', queries[0])
+        self.assertIn('service="dragontools-host"', queries[0])
 
     def test_host_metrics_require_all_contract_signals_and_app_requires_payload(self):
         result, queries = self.run_signal('host')

@@ -66,6 +66,8 @@ def check(mode, registration, since=0):
         if metric(up + ' == 1'):
             return fresh(labels + ',__name__!~"up|scrape_.*"}')
         return metric(up + ' == 0')
+    if mode == 'events':
+        return log_ready(dict(application='host', environment='host', host=registration['host'], service='dragontools-host'), since)
     if mode == 'logs' and not log_ready(dict(application='host', environment='host', host=registration['host'], service='dragontools-host'), since):
         return False
     applications = registration.get('applications', [])

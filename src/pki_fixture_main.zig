@@ -40,6 +40,9 @@ fn run(init: std.process.Init) !void {
         const upload = try helper.uploadCommand(a, arch);
         const output = try std.json.Stringify.valueAlloc(a, .{ .inspect = try helper.inspectCommand(a, arch, false), .verify = try helper.inspectCommand(a, arch, true), .upload = upload.command, .sha256 = @as([]const u8, &artifact.sha256), .version = @import("version.zig").version }, .{});
         try std.Io.File.stdout().writeStreamingAll(init.io, output);
+    } else if (args.len == 2 and std.mem.eql(u8, args[1], "host-events-scripts")) {
+        const events = @import("monitoring/agents/host_events.zig");
+        try std.Io.File.stdout().writeStreamingAll(init.io, try std.json.Stringify.valueAlloc(a, .{ .activate = events.activate, .service = events.service, .timer = events.timer }, .{}));
     } else if (args.len == 4 and std.mem.eql(u8, args[1], "host-events")) {
         // Test-only injected filesystem root and observation, never release CLI.
         const events = @import("maintenance/events.zig");

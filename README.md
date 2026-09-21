@@ -1441,6 +1441,13 @@ dragontool monitoring ui log-alerts
 Vector configuration and recent host stream arrival. It does not run the observer,
 change state or force a maintenance event. The five-minute observer interval and
 20-package bound are fixed; no new TOML options are required.
+The timer must be enabled and active; its static oneshot service normally becomes
+`inactive (dead)` after a successful run. Only the timer is enabled. A helper
+failure is reported as `host_events_last_run`, separately from timer activation,
+`host_events_state_safe`, and downstream `host_events_stream_ready`. Other fixed
+checks distinguish the account, helper integrity, state directory and each unit.
+Failed verification retains observer activation intent; an unchanged successful
+rerun does not re-enable or restart the timer or invoke another observation.
 
 `HostRebootRequired` and `HostRebootRequirementCleared` are separate log alerts,
 evaluated every minute over two minutes of event history. Only host/event identity

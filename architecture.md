@@ -842,7 +842,9 @@ is application-host owned; station install owns shared authorization, rule packs
 and Alertmanager routing. Zero applications stays valid on the station. Apply
 requires an updated station and never repairs its base ingress. Host event stream
 metadata verifies :9444 even without selected application logs. Read-only verify
-checks the timer and state without running a transition check.
+checks the enabled/active timer, a completed successful static oneshot (normally
+inactive/dead), and safe state without running a transition check. Local observer
+health and downstream event-stream readiness have separate semantic checks.
 
 Notifications use a two-minute event window and host/event ID deduplication, with
 separate clear events and send_resolved=false on only this receiver. Historical

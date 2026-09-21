@@ -72,3 +72,11 @@ test "host event timer verifier rejects unit metadata drift and stale observatio
     defer a.free(result.stderr);
     try std.testing.expectEqual(@as(u8, 0), result.term.exited);
 }
+
+test "host event activation recovers failed oneshot and interrupted timer then stays unchanged" {
+    const a = std.testing.allocator;
+    const result = try std.process.run(a, std.testing.io, .{ .argv = &.{ "python3", "-I", "-B", "tests/host_events_activation_test.py" } });
+    defer a.free(result.stdout);
+    defer a.free(result.stderr);
+    try std.testing.expectEqual(@as(u8, 0), result.term.exited);
+}

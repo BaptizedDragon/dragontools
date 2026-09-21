@@ -20,6 +20,11 @@ pub fn statusForApplication(a: std.mem.Allocator, app: remote.Remote, station: r
 }
 fn statusSelected(a: std.mem.Allocator, app: remote.Remote, station: remote.Remote, registration: model.Registration, name: ?[]const u8) ![]const u8 {
     const selected = registration.selected(name);
+    const timer_active = try state(a, app, "dragontools-host-events.timer", "is-active");
+    const timer_enabled = try state(a, app, "dragontools-host-events.timer", "is-enabled");
+    const observer = try app.runTimed(.status, try common.python(a, @embedFile("host_events.py"), &.{"ready"}), 15_000);
+    const events = try signal(a, station, selected, "events");
+    const maintenance = try std.fmt.allocPrint(a, "Host maintenance observer\n  timer {s}; {s}\n  last run and state {s}\n  event stream {s}\n", .{ if (timer_active) "active" else "inactive", if (timer_enabled) "enabled" else "disabled", if (observer.code == 0) "healthy (successful oneshot may be inactive)" else "unverified", if (events) "flowing" else "unverified" });
     const active = try state(a, app, "dragontools-vector.service", "is-active");
     const enabled = try state(a, app, "dragontools-vector.service", "is-enabled");
     const logs = try signal(a, station, selected, "logs");
@@ -28,7 +33,7 @@ fn statusSelected(a: std.mem.Allocator, app: remote.Remote, station: remote.Remo
         if (service.logs) log_count += 1;
     };
     const metrics = try signal(a, station, selected, "host");
-    const vector = try std.fmt.allocPrint(a, "Vector\n  {s}\n  {s}\n  log forwarding {s}\n  host metrics {s}\n", .{ if (active) "active" else "inactive", if (enabled) "enabled" else "disabled", if (log_count == 0) "disabled (no selected services)" else if (logs) "healthy (recent stream identity)" else "unverified (no recent stream or station unavailable)", if (metrics) "flowing" else "unverified" });
+    const vector = try std.fmt.allocPrint(a, "{s}Vector\n  {s}\n  {s}\n  log forwarding {s}\n  host metrics {s}\n", .{ maintenance, if (active) "active" else "inactive", if (enabled) "enabled" else "disabled", if (log_count == 0) "disabled (no selected services)" else if (logs) "healthy (recent stream identity)" else "unverified (no recent stream or station unavailable)", if (metrics) "flowing" else "unverified" });
     if (selected.metricsCount() == 0) return std.fmt.allocPrint(a, "{s}vmagent\n  not required (no application metrics targets)\nOTel traces: unavailable.\n", .{vector});
     const vm_active = try state(a, app, "dragontools-vmagent.service", "is-active");
     const vm_enabled = try state(a, app, "dragontools-vmagent.service", "is-enabled");
