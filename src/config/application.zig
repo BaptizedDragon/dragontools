@@ -7,7 +7,13 @@ pub const max_bytes = 64 * 1024;
 pub const max_items = 64;
 pub const default_path = "./monitoring.toml";
 pub const Identity = struct { name: []const u8, environment: []const u8 };
-pub const Service = struct { name: []const u8, systemd: []const u8, logs: bool = false, metrics_url: ?[]const u8 = null };
+pub const HttpMetrics = struct {
+    requests_total: ?[]const u8 = null,
+    duration_histogram: ?[]const u8 = null,
+    status_label: ?[]const u8 = null,
+    route_label: ?[]const u8 = null,
+};
+pub const Service = struct { name: []const u8, systemd: []const u8, logs: bool = false, metrics_url: ?[]const u8 = null, http: ?HttpMetrics = null };
 pub const Probe = probe_policy.Probe;
 pub const Source = enum { logs, probe };
 pub const Severity = enum { warning, critical };
@@ -36,7 +42,7 @@ pub const Config = struct {
         self.arena.deinit();
     }
 };
-const Section = enum { root, application, target, station, service, logs, metrics, traces, probe, alert };
+const Section = enum { root, application, target, station, service, logs, metrics, http, traces, probe, alert };
 const ServiceTable = struct {
     name: ?[]const u8 = null,
     systemd: ?[]const u8 = null,
@@ -45,6 +51,8 @@ const ServiceTable = struct {
     traces: ?bool = null,
     logs_seen: bool = false,
     metrics_seen: bool = false,
+    http: HttpMetrics = .{},
+    http_seen: bool = false,
     traces_seen: bool = false,
 };
 const ProbeTable = struct { name: ?[]const u8 = null, url: ?[]const u8 = null };
@@ -66,6 +74,13 @@ fn identifier(value: []const u8) bool {
     if (value.len == 0 or value.len > 63 or !std.ascii.isAlphanumeric(value[0])) return false;
     for (value) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '_' and byte != '-') return false;
     return true;
+}
+pub fn metricIdentifier(value: []const u8, label: bool) bool {
+    if (value.len == 0 or value.len > 128) return false;
+    for (value, 0..) |byte, i| {
+        if (!std.ascii.isAlphabetic(byte) and byte != '_' and !(byte == ':' and !label) and !(i > 0 and std.ascii.isDigit(byte))) return false;
+    }
+    return !std.mem.startsWith(u8, value, "__");
 }
 pub fn validateIdentity(identity: Identity) !void {
     if (!identifier(identity.name)) return error.InvalidApplicationName;
@@ -258,10 +273,16 @@ pub fn parse(a: std.mem.Allocator, contents: []const u8) !Config {
                 const child = try line.key();
                 if (service_tables.items.len == 0) return error.MissingApplicationService;
                 const current = &service_tables.items[service_tables.items.len - 1];
-                const seen = if (eq(child, "logs")) &current.logs_seen else if (eq(child, "metrics")) &current.metrics_seen else if (eq(child, "traces")) &current.traces_seen else return error.UnknownApplicationConfigKey;
+                line.space();
+                const http = eq(child, "metrics") and std.mem.startsWith(u8, line.rest, ".");
+                if (http) {
+                    try line.take('.');
+                    if (!eq(try line.key(), "http")) return error.UnknownApplicationConfigKey;
+                }
+                const seen = if (http) &current.http_seen else if (eq(child, "logs")) &current.logs_seen else if (eq(child, "metrics")) &current.metrics_seen else if (eq(child, "traces")) &current.traces_seen else return error.UnknownApplicationConfigKey;
                 if (seen.*) return error.DuplicateApplicationConfigKey;
                 seen.* = true;
-                section = if (eq(child, "logs")) .logs else if (eq(child, "metrics")) .metrics else .traces;
+                section = if (http) .http else if (eq(child, "logs")) .logs else if (eq(child, "metrics")) .metrics else .traces;
             } else {
                 const seen = if (eq(table, "application")) &application_seen else if (eq(table, "target")) &target_seen else if (eq(table, "station")) &station_seen else return error.UnknownApplicationConfigKey;
                 if (seen.*) return error.DuplicateApplicationConfigKey;
@@ -306,6 +327,12 @@ pub fn parse(a: std.mem.Allocator, contents: []const u8) !Config {
                 if (!eq(key, "url")) return error.UnknownApplicationConfigKey;
                 try putString(&service_tables.items[service_tables.items.len - 1].metrics_url, &line, storage);
             },
+            .http => {
+                const current = &service_tables.items[service_tables.items.len - 1].http;
+                const dest = if (eq(key, "requests_total")) &current.requests_total else if (eq(key, "duration_histogram")) &current.duration_histogram else if (eq(key, "status_label")) &current.status_label else if (eq(key, "route_label")) &current.route_label else return error.UnknownApplicationConfigKey;
+                try putString(dest, &line, storage);
+                if (!metricIdentifier(dest.*.?, eq(key, "status_label") or eq(key, "route_label"))) return error.InvalidHttpMetricIdentifier;
+            },
             .probe => {
                 const current = &probe_tables.items[probe_tables.items.len - 1];
                 try putString(if (eq(key, "name")) &current.name else if (eq(key, "url")) &current.url else return error.UnknownApplicationConfigKey, &line, storage);
@@ -342,6 +369,10 @@ pub fn parse(a: std.mem.Allocator, contents: []const u8) !Config {
     const services = try storage.alloc(Service, service_tables.items.len);
     for (service_tables.items, services, 0..) |table, *service, index| {
         service.* = .{ .name = table.name orelse return error.MissingApplicationServiceName, .systemd = table.systemd orelse return error.MissingApplicationServiceUnit, .logs = table.logs orelse false, .metrics_url = table.metrics_url };
+        if (table.http_seen) {
+            if (table.metrics_url == null or (table.http.requests_total == null and table.http.duration_histogram == null) or ((table.http.status_label != null or table.http.route_label != null) and table.http.requests_total == null)) return error.InvalidHttpMetricMapping;
+            service.http = table.http;
+        }
         if (!identifier(service.name)) return error.InvalidApplicationServiceName;
         try targets.validateService(service.systemd);
         if ((table.logs_seen and table.logs == null) or (table.traces_seen and table.traces == null) or (table.metrics_seen and table.metrics_url == null)) return error.MissingApplicationSignalField;
@@ -653,4 +684,18 @@ test "application maximum object counts remain bounded and free all arena storag
     try std.testing.expectEqual(max_items, config.services.len);
     try std.testing.expectEqual(max_items, config.probes.len);
     try std.testing.expectEqual(max_items, config.alerts.len);
+}
+
+test "HTTP dashboard mapping validates identifiers independently of agent configuration" {
+    const base = example ++ "\n" ++ logged_service ++ "\n[service.metrics]\nurl='http://127.0.0.1:16005/metrics'\n[service.metrics.http]\n";
+    var parsed = try parse(std.testing.allocator, base ++ "requests_total='doers_http_requests_total'\nduration_histogram='doers_http_request_duration_seconds'\nstatus_label='status_class'\nroute_label='route'\n");
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("doers_http_requests_total", parsed.services[0].http.?.requests_total.?);
+    for ([_][]const u8{ "x{job='other'}", "sum(x)", "x[5m]", "1metric", "__name__", "a b" }) |bad| {
+        const text = try std.fmt.allocPrint(std.testing.allocator, "{s}requests_total=\"{s}\"\n", .{ base, bad });
+        defer std.testing.allocator.free(text);
+        try std.testing.expectError(error.InvalidHttpMetricIdentifier, parse(std.testing.allocator, text));
+    }
+    try std.testing.expectError(error.InvalidHttpMetricMapping, parse(std.testing.allocator, base ++ "route_label='route'"));
+    try std.testing.expectError(error.InvalidHttpMetricIdentifier, parse(std.testing.allocator, base ++ "requests_total='requests_total'\nstatus_label='bad:label'"));
 }

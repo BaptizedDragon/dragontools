@@ -249,6 +249,7 @@ pub fn install(a: std.mem.Allocator, r: remote.Remote, report: *Report) !void {
     report.reserve_bytes = try fs.reserve(try fs.capacity(try report.call(r, .capacity, capacity_command)));
     _ = try report.call(r, .binary, try vm.binaryCommand(a, machine.arch));
     if (report.station_enabled) try @import("scrape.zig").prepare(a, r, report, machine.arch);
+    if (report.station_enabled) try @import("dashboards/main.zig").station(a, r, report, false);
     const unit = try units.renderStation(a, report.reserve_bytes, report.station_enabled);
     _ = try report.call(r, .unit, try @import("../system/files.zig").writeCommand(a, units.unit_path, unit, vm.pending));
     _ = try report.call(r, .activate, activate);

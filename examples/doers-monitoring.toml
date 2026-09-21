@@ -1,5 +1,6 @@
 # Illustrative application contract. Replace aliases, unit and metrics endpoint
-# after checking your deployment; these values have not been verified on a host.
+# after checking your deployment. HTTP family names were observed read-only on
+# 2026-09-21; no deployment mutation is implied.
 # Application repositories must never contain station or telemetry credentials.
 version = 1
 
@@ -26,6 +27,14 @@ enabled = true
 
 [service.metrics]
 url = "http://127.0.0.1:16005/metrics"
+
+# Explicit family/label contract, not arbitrary queries. route is a bounded
+# route template (e.g. /company/:id), never an unbounded URL label.
+[service.metrics.http]
+requests_total = "doers_http_requests_total"
+duration_histogram = "doers_http_request_duration_seconds"
+status_label = "status_class"
+route_label = "route"
 
 [service.traces]
 enabled = false # true fails clearly until trace agents are implemented

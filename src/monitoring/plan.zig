@@ -7,7 +7,7 @@ const vt = @import("../components/victoriatraces.zig");
 const grafana = @import("../components/grafana.zig");
 const logs_plugin = @import("../components/grafana_victorialogs_plugin.zig");
 
-pub const unavailable = "Not yet available: dashboards, OTel Collector/traces agents, HostDown and systemd-service state alerts, firewall, public Grafana TLS, automatic OS upgrades.\n";
+pub const unavailable = "Not yet available: OTel Collector/traces agents, HostDown and systemd-service state alerts, firewall, public Grafana TLS, automatic OS upgrades.\n";
 
 pub fn connection(a: std.mem.Allocator, alias: ?[]const u8, host: []const u8, hostname: ?[]const u8) ![]const u8 {
     return std.fmt.allocPrint(a, "Connection:\n  {s}: {s}\n\nStation:\n  hostname: {s}\n  metrics ingress: :9443\n  logs ingress: :9444\n\n", .{

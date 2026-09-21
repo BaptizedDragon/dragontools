@@ -68,7 +68,7 @@ and `alertmanager`. All reuse the station parser and connection precedence,
 independently of application configuration or the mTLS hostname.
 Command/flag metadata also supplies help and shell completion. Native VMUI is the
 primary investigation interface; Grafana retains dashboards and secondary queries.
-This slice does not provision dashboards or implement tracing agents.
+UI access itself does not provision dashboards; station install and application apply own them. Tracing agents remain unavailable.
 
 UI ports/paths belong to component modules. Pinned handlers confirm
 [VictoriaMetrics v1.151.0 `/vmui/`](https://github.com/VictoriaMetrics/VictoriaMetrics/blob/v1.151.0/app/vmselect/main.go),
@@ -438,7 +438,7 @@ The concrete configuration pins `http_addr = 127.0.0.1`, `http_port = 3000`, the
 and provisioning paths, SQLite, and console logging for journald. Local authentication
 remains enabled; anonymous access, auth proxy and signup are explicitly disabled.
 The signed official VictoriaLogs datasource plugin is installed from a separately
-pinned artifact; no dashboard is provisioned.
+pinned artifact; managed dashboards are provisioned separately.
 The concrete unit uses `dt-grafana`, empty capabilities, no new privileges, private
 tmp/devices, protected home/system/kernel/control groups, restricted SUID/SGID and
 personality, and a sole persistent write path under the Grafana data directory.
@@ -866,10 +866,15 @@ commands do not export credentials, repair configuration, clear pending markers
 or send notifications. Full two-host Ubuntu deployment remains an integration
 gate; local renderers and native process fixtures are narrower evidence.
 
-Future dashboards must use `DragonTools / <application>` folders and deterministic
-UIDs with explicit ownership. They must preserve manual assets and fail conflicts
-without a specific adoption option. This iteration creates no dashboards, OTLP
-collector, custom metrics alert engine or arbitrary configuration upload path.
+Managed dashboards use `DragonTools / <application>` folders and deterministic
+SHA-256-derived UIDs within Grafana's 40-byte bound. Exact versioned generation
+proof and identity binding protect manual assets; no global adoption is provided.
+VMUI uses the pinned v1.151.0 `title/rows/panels/expr` schema, a direct-child JSON
+path (the native loader is not recursive), and its live `/vmui/custom-dashboards`
+API. Grafana uses a fixed file provider with 15-second polling and deletion/UI
+updates disabled. See the service-resource/dashboard contract in README.
+No OTLP collector, custom metrics alert engine or arbitrary configuration upload
+path is added.
 
 ## Monitored-host logs and metrics
 
@@ -1644,9 +1649,10 @@ fake-remote/renderer tests do not prove live evaluation or Telegram receipt.
 
 ## Dashboards and additional alert packs: roadmap
 
-Add dashboards: Host Overview,
-Monitoring Station, Service Health, Storage, Updates / Security. Metrics, Logs and
-Traces are provisioned now. Configured credentials exercise the Logs query path;
+Managed application resource/HTTP/log dashboards and the station VM self-scrape
+dashboard are implemented. Broader Host Overview, Service Health, Storage and
+Updates / Security dashboards remain future work. Metrics, Logs and Traces
+datasources are provisioned now. Configured credentials exercise the Logs query path;
 Metrics/Traces query-engine checks and browser UI validation remain integration gates.
 
 The current installation deploys fixed log, external-probe and verified host packs.

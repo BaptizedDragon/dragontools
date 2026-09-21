@@ -29,7 +29,7 @@ publication generations and independent scraper reload / evaluator restart inten
 Shared-host signal manifests merge into one Vector/vmagent without dropping other
 apps. Probe/alert-only changes never dirty agents. Trusted app/environment/host/
 service labels must override incoming data. Use shared host rules and one default
-or overridden alert per probe. Future dashboards require owned app folders and
+or overridden alert per probe. Managed dashboards require owned app folders and
 deterministic UIDs; no arbitrary config/DSL injection.
 
 Safe reruns are mandatory for every mutating command. Inspect actual remote state
@@ -90,7 +90,9 @@ The official VictoriaLogs datasource plugin is pinned, integrity-checked and sto
 outside Grafana release binaries. Preserve its signature verification and independent
 Grafana restart intent; plugin/provisioning changes never restart VM/VL/VT. Without
 configured credentials, report that the authenticated Logs plugin query was not checked.
-Dashboards remain deferred.
+Managed application/station dashboards use exact versioned ownership manifests,
+fixed Grafana file provisioning and the pinned VMUI schema. Preserve manual assets;
+dashboard-only changes must not restart data agents.
 
 The station also runs blackbox_exporter, Alertmanager, vmalert-logs and
 vmalert-metrics with dedicated accounts and loopback-only listeners on 9115,
@@ -214,5 +216,5 @@ End this and every future Codex iteration with these five sections:
 
 When adding a component, report its exact pinned version, checksum provenance,
 and remaining verification limits. Keep deployment useful now without implying
-that dashboards, HostDown/service-state alerts, tracing agents, automatic
+that HostDown/service-state alerts, tracing agents, automatic
 CA rollover or hard tenant isolation are already available.

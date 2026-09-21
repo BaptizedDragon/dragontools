@@ -46,6 +46,12 @@ jobs:
           fixture="$RUNNER_TEMP/dragontools-doers"
           sudo unshare --net sh -c 'ip link set lo up; exec python3 -I -B tests/integration/host_events.py "$1" "$1" "$1" "$2"' fixture "$fixture" "$PWD/zig-out/bin/dragontool-pki-fixture"
           python3 -I -B tests/telegram_template_test.py --amtool "$fixture/amtool"
+      - name: Native service metrics and dashboard LogsQL (isolated Linux processes)
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        run: |
+          fixture="$RUNNER_TEMP/dragontools-doers"
+          sudo unshare --net sh -c 'ip link set lo up; exec python3 -I -B tests/integration/service_resources.py "$1" "$2" "$1"' fixture "$fixture" "$PWD/zig-out/bin/dragontool-pki-fixture"
       - name: Linux helper filesystem lifecycle (temporary paths only)
         if: runner.os == 'Linux'
         run: sudo python3 -I -B tests/helper_install_test.py --fixture "$PWD/zig-out/bin/dragontool-pki-fixture" --agent "$PWD/zig-out/bin/dragontool-agent"

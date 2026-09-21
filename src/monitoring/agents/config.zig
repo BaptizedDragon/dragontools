@@ -69,6 +69,14 @@ fn vectorConfig(a: std.mem.Allocator, host_id: []const u8, station_hostname: []c
     try w.writeAll("# Managed by DragonTools\ndata_dir: /var/lib/dragontools/vector\napi:\n  enabled: false\nsources:\n  host:\n    type: host_metrics\n    namespace: host\n    collectors: [cpu, memory, filesystem, disk, network]\n    filesystem:\n      filesystems:\n        excludes: [squashfs, iso9660]\n    scrape_interval_secs: 15\n  internal:\n    type: internal_metrics\n    scrape_interval_secs: 15\n");
     try w.writeAll("  maintenance_exec:\n    type: exec\n    command: [/opt/dragontools/agent/current/dragontool-agent, maintenance, metrics]\n    mode: scheduled\n    scheduled:\n      exec_interval_secs: 60\n    clear_environment: true\n    include_stderr: false\n    maximum_buffer_size_bytes: 4096\n    decoding:\n      codec: json\n");
     try w.writeAll("  host_events_journal:\n    type: journald\n    current_boot_only: false\n    since_now: false\n    include_units: [dragontools-host-events.service]\n  host_events_metadata:\n    type: demo_logs\n    format: shuffle\n    interval: 30\n    lines: ['{\"event\":\"host_stream_ready\",\"message\":\"DragonTools host event stream metadata\"}']\n");
+    for (applications, 0..) |app, ai| for (app.services, 0..) |service, si| {
+        try w.print("  service_{d}_{d}:\n    type: exec\n    command: [", .{ ai, si });
+        for ([_][]const u8{ "/opt/dragontools/agent/current/dragontool-agent", "service-metrics", app.name, app.environment, host_id, service.name, service.systemd }, 0..) |arg, index| {
+            if (index != 0) try w.writeAll(", ");
+            try string(w, arg);
+        }
+        try w.writeAll("]\n    mode: scheduled\n    scheduled:\n      exec_interval_secs: 15\n    clear_environment: true\n    include_stderr: false\n    maximum_buffer_size_bytes: 4096\n    decoding:\n      codec: json\n");
+    };
     if (ordered.len != 0) {
         try w.writeAll("  journal:\n    type: journald\n    current_boot_only: false\n    since_now: true\n    include_units:\n");
         for (ordered) |service| {
@@ -90,6 +98,9 @@ fn vectorConfig(a: std.mem.Allocator, host_id: []const u8, station_hostname: []c
     try w.writeAll("transforms:\n  maintenance:\n    type: log_to_metric\n    inputs: [maintenance_exec]\n    metrics:\n");
     inline for (@import("../../maintenance/main.zig").gauges) |name| try w.writeAll("      - type: gauge\n        field: dragontool_host_" ++ name ++ "\n");
     try w.writeAll("      - type: gauge\n        field: dragontool_host_package_metadata_fresh\n      - type: gauge\n        field: dragontool_agent_version_info\n        tags:\n          version: '{{ version }}'\n");
+    for (applications, 0..) |app, ai| for (app.services, 0..) |_, si| {
+        try w.print("  service_metrics_{d}_{d}:\n    type: log_to_metric\n    inputs: [service_{d}_{d}]\n    all_metrics: true\n", .{ ai, si, ai, si });
+    };
     if (applications.len == 0) {
         try metricTransform(w, "metrics_identity", host_id, null);
     } else {
@@ -136,6 +147,9 @@ fn vectorConfig(a: std.mem.Allocator, host_id: []const u8, station_hostname: []c
             try w.print("metrics_identity_{d}", .{i});
         }
     }
+    for (applications, 0..) |app, ai| for (app.services, 0..) |_, si| {
+        try w.print(", service_metrics_{d}_{d}", .{ ai, si });
+    };
     try w.writeAll("]\n    endpoint: ");
     const metrics_url = try std.fmt.allocPrint(a, "https://{s}:9443/api/v1/write", .{station_hostname});
     defer a.free(metrics_url);
@@ -362,7 +376,8 @@ test "application agents merge scopes with trusted labels and metrics-only edits
     const registration = model.Registration{ .host = "dt-0123456789abcdef0123456789abcdef", .station = "station.example", .services = &.{"doers.service"}, .metrics_targets = &.{}, .applications = &.{ first, second } };
     const vector = try renderVectorRegistration(a, registration);
     for ([_][]const u8{ ".application = \"doers\"", ".environment = \"production\"", ".service = \"web\"", ".journal_unit = \"doers.service\"", ".tags.application = \"doers\"", ".tags.application = \"orderflow\"", ".tags.environment = \"staging\"" }) |needle| try std.testing.expect(std.mem.indexOf(u8, vector, needle) != null);
-    try std.testing.expect(std.mem.indexOf(u8, vector, "orderflow.service") == null);
+    try std.testing.expect(std.mem.indexOf(u8, vector, "orderflow.service") != null); // Resources include logs-disabled units.
+    try std.testing.expect(std.mem.indexOf(u8, vector, ".journal_unit = \"orderflow.service\"") == null);
     const vmagent = try renderVmagentRegistration(a, registration);
     for ([_][]const u8{ "dragontools-app-5-doers-3-web", "dragontools-app-9-orderflow-3-web", "target_label: application", "target_label: environment", "target_label: service", "metric_relabel_configs:", "follow_redirects: false" }) |needle| try std.testing.expect(std.mem.indexOf(u8, vmagent, needle) != null);
     var reversed = registration;

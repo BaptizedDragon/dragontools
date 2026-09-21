@@ -41,6 +41,7 @@ const Fake = struct {
     notify_calls: usize = 0,
     check_syntax: bool = false,
     helper_present: bool = false,
+    dashboards_present: [2]bool = .{ false, false },
     pki_present: bool = false,
     pki_calls: usize = 0,
     fail_after_unit: ?workflow.Component = null,
@@ -139,6 +140,17 @@ const Fake = struct {
             const result = try std.process.run(self.allocator, std.testing.io, .{ .argv = if (wrapped) &.{ "/bin/sh", "-c", script } else &.{ "/bin/sh", "-n", "-c", script } });
             try std.testing.expectEqualStrings("", result.stderr);
             try std.testing.expectEqual(@as(u8, 0), result.term.exited);
+        }
+        if (std.mem.indexOf(u8, command, "dragontools_dashboards") != null) {
+            if (op == .provisioning) {
+                const index: usize = if (self.report.component == .grafana) 1 else 0;
+                const changed = !self.dashboards_present[index];
+                self.dashboards_present[index] = true;
+                return .{ .code = 0, .output = if (changed) "changed" else "unchanged" };
+            }
+            try std.testing.expectEqual(remote.Operation.health, op);
+            try std.testing.expect(self.dashboards_present[0] and self.dashboards_present[1]);
+            return .{ .code = 0 };
         }
         if (std.mem.indexOf(u8, command, "base64.b64decode(sys.argv.pop(1)") != null) return self.scrape(op);
         if (op == .detect) return self.core.asRemote().run(op, command);

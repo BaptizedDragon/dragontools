@@ -277,6 +277,31 @@ class ApplicationSignals(unittest.TestCase):
     def registration(self):
         return dict(REGISTRATION, services=['doers.service'], metrics_targets=[], applications=[dict(name='doers', environment='production', services=[dict(name='web', systemd='doers.service', logs=True, metrics_url='http://127.0.0.1:16005/metrics')])])
 
+    def test_service_resources_require_fresh_cpu_memory_and_supported_tasks(self):
+        for absent, available, tasks, expected in (
+                (None, True, True, True), ('cpu_seconds_total', True, True, False),
+                ('memory_current_bytes', True, True, False), ('tasks_current', True, True, False),
+                ('tasks_current', True, False, True), ('cgroup_available', False, True, False),
+                ('cpu_seconds_total', False, True, True)):
+            with self.subTest(absent=absent, available=available, tasks=tasks):
+                functions = self.module()
+                queries = []
+                def metric(query):
+                    queries.append(query)
+                    for label in ('application="doers"', 'environment="production"', 'service="web"', 'host=' + json.dumps(REGISTRATION['host'])):
+                        self.assertIn(label, query)
+                    if query.startswith('count('):
+                        self.assertIn(' >= ' + str(float(SINCE)), query)
+                        self.assertIn(' > time()-90)', query)
+                        return absent is None or 'dragontools_service_' + absent not in query
+                    if 'cgroup_available' in query:
+                        return not available
+                    self.assertIn('tasks_supported', query)
+                    return tasks
+                functions['metric'] = metric
+                self.assertEqual(functions['check']('service', self.registration(), SINCE), expected)
+                self.assertTrue(queries)
+
     def test_failed_scrape_is_valid_but_stale_absent_and_empty_success_are_not(self):
         for registration in (REGISTRATION, self.registration()):
             for up, fresh_up, payload, expected in (

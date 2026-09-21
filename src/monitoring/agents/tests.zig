@@ -538,6 +538,58 @@ test "application host metrics without selected logs or metrics targets still in
     try std.testing.expectEqual(before, fake.mutations);
 }
 
+test "service resources timeout retains Vector intent and recovery is a no-op on rerun" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var report: model.Report = .{};
+    var fake: Fake = .{ .allocator = a, .report = &report, .delayed = .service_metrics_ready, .timeout = true };
+    var selected = registration;
+    selected.applications = &.{.{ .name = "sample", .environment = "production", .services = &.{.{ .name = "app", .systemd = "app.service", .logs = true }} }};
+    selected.metrics_targets = &.{};
+    try std.testing.expectError(error.ReadinessTimedOut, install.install(a, fake.asRemote(), fake.asRemote(), &report, selected));
+    try std.testing.expectEqual(readiness.Check.service_metrics_ready, report.state.check.?);
+    try std.testing.expect(fake.state(.vector).pending);
+    fake.timeout = false;
+    fake.delayed = null;
+    report = .{};
+    try install.install(a, fake.asRemote(), fake.asRemote(), &report, selected);
+    try std.testing.expect(!fake.state(.vector).pending);
+    const before = fake.mutations;
+    report = .{};
+    try install.install(a, fake.asRemote(), fake.asRemote(), &report, selected);
+    try std.testing.expectEqual(before, fake.mutations);
+}
+
+test "HTTP dashboard mapping edits never dirty shared agents or enrollment" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const app_config = @import("../../config/application.zig");
+    var value = try app_config.parse(a, app_config.example);
+    var service: app_config.Service = .{ .name = "web", .systemd = "app.service", .logs = true, .metrics_url = "http://127.0.0.1:16000/metrics" };
+    service.http = .{ .requests_total = "requests_total" };
+    value.services = &.{service};
+    var selected = registration;
+    selected.services = &.{service.systemd};
+    selected.metrics_targets = &.{};
+    selected.applications = &.{try @import("../apps/dispatch.zig").scope(a, value)};
+    var report: model.Report = .{};
+    var fake: Fake = .{ .allocator = a, .report = &report };
+    try install.install(a, fake.asRemote(), fake.asRemote(), &report, selected);
+    const before = fake.mutations;
+    service.http.?.duration_histogram = "request_duration_seconds";
+    value.services = &.{service};
+    selected.applications = &.{try @import("../apps/dispatch.zig").scope(a, value)};
+    report = .{};
+    try install.install(a, fake.asRemote(), fake.asRemote(), &report, selected);
+    try std.testing.expectEqual(before, fake.mutations);
+    try std.testing.expectEqual(@as(usize, 1), fake.state(.vector).restarts);
+    try std.testing.expectEqual(@as(usize, 1), fake.state(.vmagent).restarts);
+    try std.testing.expectEqual(@as(usize, 0), fake.state(.caddy).restarts);
+    try std.testing.expectEqual(@as(usize, 1), fake.enrollments);
+}
+
 test "CSR signing failure leaves running consumers and active registration untouched" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

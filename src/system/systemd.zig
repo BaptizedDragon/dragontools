@@ -6,12 +6,13 @@ pub fn render(a: std.mem.Allocator, reserve: u64) ![]const u8 {
         "User=dt-victoriametrics\nGroup=dt-victoriametrics\nExecStart=/opt/dragontools/components/victoriametrics/current/victoria-metrics-prod -storageDataPath=/var/lib/dragontools/victoriametrics -retentionPeriod=" ++ policy.metrics.retention ++ " -storage.minFreeDiskSpaceBytes={d} -httpListenAddr=" ++ @import("../components/victoriametrics.zig").listen_address ++ " -selfScrapeInterval=15s\n" ++
         "Restart=on-failure\nRestartSec=5s\nTimeoutStopSec=120s\n{s}\n\n[Install]\nWantedBy=multi-user.target\n", .{ reserve, @import("../security/hardening.zig").victoria_metrics });
 }
+pub const dashboard_argument = "-vmui.customDashboardsPath=/etc/dragontools/victoriametrics/dashboards";
 pub const scrape_argument = "-promscrape.config=/etc/dragontools/victoriametrics/prometheus.yml";
 pub fn renderStation(a: std.mem.Allocator, reserve: u64, enabled: bool) ![]const u8 {
     const base = try render(a, reserve);
     if (!enabled) return base;
     defer a.free(base);
-    return std.mem.replaceOwned(u8, a, base, "-selfScrapeInterval=15s\n", "-selfScrapeInterval=15s " ++ scrape_argument ++ "\n");
+    return std.mem.replaceOwned(u8, a, base, "-selfScrapeInterval=15s\n", "-selfScrapeInterval=15s " ++ scrape_argument ++ " " ++ dashboard_argument ++ "\n");
 }
 test "unit storage and hardening" {
     const s = try render(std.testing.allocator, 2000);

@@ -216,6 +216,7 @@ pub fn health(a: std.mem.Allocator, r: remote.Remote, report: *install.Report, a
     const logs_backend = try remote.shell(a, &.{ "sh", "-eu", "-c", logs_backend_script, "dragontools-grafana-logs_backend_ready", binary_hash, logs_backend_check });
     defer a.free(logs_backend);
     try readiness.poll(a, r, report, .logs_backend_ready, readiness.telemetry_ms, logs_backend, readiness.ready);
+    if (report.station_enabled) try @import("dashboards/main.zig").verify(a, r, report, "{\"station\":true}");
 }
 
 fn member(value: std.json.Value, name: []const u8) !std.json.Value {

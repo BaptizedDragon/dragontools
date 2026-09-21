@@ -59,7 +59,7 @@ pub const listener_ready =
 
 pub fn command(a: std.mem.Allocator, arch: host.Arch, report: *install.Report, script: []const u8, check: readiness.Check) ![]const u8 {
     const units = @import("../system/systemd.zig");
-    const guarded = if (report.station_enabled) try std.mem.replaceOwned(u8, a, script, "-selfScrapeInterval=15s)", "-selfScrapeInterval=15s " ++ units.scrape_argument ++ ")") else try a.dupe(u8, script);
+    const guarded = if (report.station_enabled) try std.mem.replaceOwned(u8, a, script, "-selfScrapeInterval=15s)", "-selfScrapeInterval=15s " ++ units.scrape_argument ++ " " ++ units.dashboard_argument ++ ")") else try a.dupe(u8, script);
     defer a.free(guarded);
     return remote.shell(a, &.{ "sh", "-eu", "-c", guarded, try std.fmt.allocPrint(a, "dragontools-victoriametrics-{s}", .{@tagName(check)}), vm.artifact(arch).binary_sha256, try units.renderStation(a, report.reserve_bytes, report.station_enabled), try std.fmt.allocPrint(a, "{d}", .{report.reserve_bytes}), "-retentionPeriod=" ++ policy.metrics.retention });
 }

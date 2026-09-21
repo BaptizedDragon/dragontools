@@ -37,7 +37,7 @@ pub const preflight =
     \\  for path in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
     \\    if test ! -e "$path" && test ! -L "$path"; then continue; fi
     \\    case "$path" in
-    \\      /etc/dragontools/grafana/grafana.ini|/etc/dragontools/grafana/provisioning|/etc/dragontools/grafana/provisioning/datasources|/etc/dragontools/grafana/provisioning/dashboards|/etc/dragontools/grafana/provisioning/datasources/dragontools.yaml) ;;
+    \\      /etc/dragontools/grafana/grafana.ini|/etc/dragontools/grafana/provisioning|/etc/dragontools/grafana/provisioning/datasources|/etc/dragontools/grafana/provisioning/dashboards|/etc/dragontools/grafana/provisioning/datasources/dragontools.yaml|/etc/dragontools/grafana/provisioning/dashboards/dragontools.yaml|/etc/dragontools/grafana/provisioning/dashboards/dragontools.yaml.next) ;;
     \\      /etc/dragontools/grafana/grafana.ini.??????|/etc/dragontools/grafana/provisioning/datasources/dragontools.yaml.??????)
     \\        # Interrupted adjacent writer files are never loaded, adopted or purged.
     \\        suffix=${path##*.}
@@ -110,6 +110,7 @@ pub fn install(a: std.mem.Allocator, r: remote.Remote, report: *workflow.Report,
     report.emit(if (std.mem.eql(u8, plugin_result, "changed")) .plugin_installed else .plugin_current);
     const provisioning_result = try report.call(r, .provisioning, try files.writeCommand(a, config.datasources_path, config.datasources, grafana.pending));
     report.emit(if (std.mem.eql(u8, provisioning_result, "changed")) .datasources_updated else .datasources_current);
+    if (report.station_enabled) try @import("dashboards/main.zig").station(a, r, report, true);
     _ = try report.call(r, .unit, try files.writeCommand(a, unit.unit_path, try unit.render(a), grafana.pending));
     try @import("grafana_credentials.zig").bootstrap(a, r, report);
     _ = try report.call(r, .activate, workflow.activate_grafana);

@@ -70,7 +70,8 @@ def main(fixture):
     assert json.loads((fixture / 'doers-transport.json').read_text()) == dict(
         target_ssh_host='softwarelanding', station_ssh_host='monitoring', station_hostname='monitoring.baptizeddragon.com')
     assert config['application'] == 'doers' and config['environment'] == 'production'
-    assert config['services'] == [dict(name='doers', systemd='doers.service', logs=True, metrics_url='http://127.0.0.1:16005/metrics')]
+    assert config['services'] == [dict(name='doers', systemd='doers.service', logs=True, metrics_url='http://127.0.0.1:16005/metrics',
+        http=dict(requests_total='doers_http_requests_total', duration_histogram='doers_http_request_duration_seconds', status_label='status_class', route_label='route'))]
     assert config['probes'] == [dict(name='web', url='https://doers.business/healthz')]
     assert registration['services'] == ['doers.service']
     registration['station'] = 'localhost'

@@ -24,7 +24,14 @@ fn run(init: std.process.Init) !void {
     const a = arena.allocator();
     const args = try init.minimal.args.toSlice(a);
     const now = std.Io.Clock.real.now(init.io).toSeconds();
-    if (args.len == 2 and (std.mem.eql(u8, args[1], "ingress-checks") or std.mem.eql(u8, args[1], "caddy-checks"))) {
+    if (args.len == 3 and std.mem.eql(u8, args[1], "service-metrics")) {
+        const service = @import("maintenance/service_metrics.zig");
+        const root = try std.Io.Dir.openDirAbsolute(init.io, args[2], .{});
+        defer root.close(init.io);
+        const properties = try root.readFileAlloc(init.io, "unit.properties", a, .limited(8192));
+        const snapshot = try service.collect(a, init.io, root, properties, "doers.service");
+        try std.Io.File.stdout().writeStreamingAll(init.io, try service.render(a, snapshot, .{ .application = "doers", .environment = "production", .host = "dt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", .service = "doers" }));
+    } else if (args.len == 2 and (std.mem.eql(u8, args[1], "ingress-checks") or std.mem.eql(u8, args[1], "caddy-checks"))) {
         const common = @import("monitoring/agents/common.zig");
         const kind: common.Kind = if (std.mem.eql(u8, args[1], "caddy-checks")) .caddy else .ingestion;
         const output = try std.json.Stringify.valueAlloc(a, .{

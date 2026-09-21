@@ -28,6 +28,10 @@ fn entry(init: std.process.Init, enabled: *bool, stage: *diagnostics.Stage) !u8 
     defer arena.deinit();
     const a = arena.allocator();
     const args = try init.minimal.args.toSlice(a);
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "service-metrics")) {
+        try @import("maintenance/service_metrics.zig").run(a, init.io, args[2..]);
+        return 0;
+    }
     if (args.len >= 2 and std.mem.eql(u8, args[1], "version")) {
         try j.require(args.len == 2 or args.len == 3 and std.mem.eql(u8, args[2], "--json"));
         try std.Io.File.stdout().writeStreamingAll(init.io, try @import("version.zig").render(a, args.len == 3, true));

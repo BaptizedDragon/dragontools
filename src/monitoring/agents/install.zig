@@ -139,6 +139,7 @@ fn convergeAgents(a: std.mem.Allocator, app: remote.Remote, station: remote.Remo
     try verify.service(a, app, report, registration, arch, .vector);
     // Station ingress is finalized by station install, independently of apps.
     try verify.signals(a, app, station, report, registration, "host");
+    if (registration.applications.len > 0) try verify.signals(a, app, station, report, registration, "service");
     try verify.signals(a, app, station, report, registration, "events");
     try verify.signals(a, app, station, report, registration, "logs");
     report.component = .vector;

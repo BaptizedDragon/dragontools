@@ -1,0 +1,13 @@
+# Sanitized contract observed read-only on 2026-09-21 from Doers :16005/metrics.
+# Values are fixtures; names, metric types, label names and route forms are real.
+# TYPE doers_http_requests_in_flight gauge
+doers_http_requests_in_flight{service="doers",deployment_environment="production"} 0
+# TYPE doers_http_requests_total counter
+doers_http_requests_total{service="doers",deployment_environment="production",method="GET",route="/healthz",status_class="2xx"} 0
+doers_http_requests_total{service="doers",deployment_environment="production",method="GET",route="/company/:id",status_class="3xx"} 0
+doers_http_requests_total{service="doers",deployment_environment="production",method="POST",route="unknown",status_class="4xx"} 0
+# TYPE doers_http_request_duration_seconds histogram
+doers_http_request_duration_seconds_bucket{service="doers",deployment_environment="production",method="GET",route="/healthz",le="0.005000000"} 0
+doers_http_request_duration_seconds_bucket{service="doers",deployment_environment="production",method="GET",route="/healthz",le="+Inf"} 0
+doers_http_request_duration_seconds_sum{service="doers",deployment_environment="production",method="GET",route="/healthz"} 0
+doers_http_request_duration_seconds_count{service="doers",deployment_environment="production",method="GET",route="/healthz"} 0

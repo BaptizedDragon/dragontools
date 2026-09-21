@@ -37,7 +37,15 @@ pub fn render(a: std.mem.Allocator, config: application.Config) ![]const u8 {
         }
     }
     try w.print("Owned station namespace: /etc/dragontools/apps/{s}/\n  manifest.json, logs.rules.yml, metrics.rules.yml, scrape.yml\n", .{config.application.name});
-    try w.writeAll("Ensure bounded journald and Vector buffers; preserve stricter administrator limits.\nCaddy: require registered mTLS; TCP 9443 metrics, TCP 9444 logs. Raw backends stay loopback-only. TCP 9445 is reserved and closed.\nGenerate client private keys only on the monitored host; exchange public CSRs/certificates. Renew near-expiry leaf certificates with existing keys.\nInspect actual ownership and other application manifests during apply; preserve their signals.\nReconcile shared station loaders once if needed; later changes affect only their consumers.\nVerify recent signals, loaded probes and rules before clearing pending intent.\nNo firewall changes, secret resolution, SSH or mutations performed by this plan.\nTraces: skipped (unsupported); OTel traces, custom metrics alerts and dashboards: unavailable.\n");
+    try w.writeAll("Service resources: observe current systemd cgroup v2 CPU/memory/tasks/IO; transport normalized metrics through Vector.\nDashboards: reconcile only this application's VMUI and Grafana documents; preserve manual assets.\n");
+    for (config.services) |service| {
+        if (service.http) |_| {
+            try w.print("HTTP dashboard metrics: explicit family mapping for {s}; verify counter/histogram types and recent samples.\n", .{service.name});
+        } else {
+            try w.print("HTTP request dashboard metrics unavailable for {s}: no explicit request counter/duration histogram mapping.\n", .{service.name});
+        }
+    }
+    try w.writeAll("Ensure bounded journald and Vector buffers; preserve stricter administrator limits.\nCaddy: require registered mTLS; TCP 9443 metrics, TCP 9444 logs. Raw backends stay loopback-only. TCP 9445 is reserved and closed.\nGenerate client private keys only on the monitored host; exchange public CSRs/certificates. Renew near-expiry leaf certificates with existing keys.\nInspect actual ownership and other application manifests during apply; preserve their signals.\nReconcile shared station loaders once if needed; later changes affect only their consumers.\nVerify recent signals, loaded probes and rules before clearing pending intent.\nNo firewall changes, secret resolution, SSH or mutations performed by this plan.\nTraces: skipped (unsupported); OTel traces, custom metrics alerts: unavailable.\n");
     return out.toOwnedSlice();
 }
 

@@ -3,7 +3,7 @@ pub fn build(b: *std.Build) void {
     const requested = b.standardTargetOptions(.{});
     const target = if (requested.result.os.tag == .linux) b.resolveTargetQuery(.{ .cpu_arch = requested.result.cpu.arch, .os_tag = .linux, .abi = .musl }) else requested;
     const optimize = b.standardOptimizeOption(.{});
-    const version = b.option([]const u8, "version", "Release version shared by controller and bundled helper") orelse "0.1.1";
+    const version = b.option([]const u8, "version", "Release version shared by controller and bundled helper") orelse "0.1.2";
     if (version.len > 64) @panic("-Dversion is limited to 64 characters");
     for (version) |byte| if (!std.ascii.isAlphanumeric(byte) and std.mem.indexOfScalar(u8, ".+-", byte) == null) @panic("invalid release version character");
     _ = std.SemanticVersion.parse(version) catch @panic("-Dversion must be a semantic version without a v prefix");

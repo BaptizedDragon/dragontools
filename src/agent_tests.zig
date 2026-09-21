@@ -1,4 +1,7 @@
 const std = @import("std");
+test {
+    _ = @import("maintenance/service_metrics.zig");
+}
 const state = @import("agent/state.zig");
 const station = @import("agent/station.zig");
 const client = @import("agent/client.zig");

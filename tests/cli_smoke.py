@@ -338,7 +338,7 @@ url = "https://orders.example.com/healthz"
         assert component not in unavailable, (component, unavailable)
     for required in ("pinned OSS release", "local authentication enabled", "Metrics datasource", "http://127.0.0.1:8428", "Logs datasource", "http://127.0.0.1:9428", "official VictoriaLogs datasource plugin", "victoriametrics-logs-datasource", "0.32.0", "signed, SHA256-pinned", "Traces datasource", "http://127.0.0.1:10428/select/jaeger", "SSH port forwarding only", "manual verification"):
         assert required in grafana, (required, grafana)
-    assert "Grafana Logs datasource" not in unavailable and "dashboards" in unavailable
+    assert "Grafana Logs datasource" not in unavailable and "dashboards" not in unavailable
     assert "Logs plugin query requires administrator references" in grafana
     configured_plan = local_run(config_args).stdout
     assert "verify Logs plugin health and a bounded read-only LogsQL query through Grafana" in configured_plan

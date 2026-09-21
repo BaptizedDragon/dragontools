@@ -8,6 +8,7 @@ const host = @import("../../system/host.zig");
 const model = @import("../agents/model.zig");
 const agent_apps = @import("../agents/apps.zig");
 const agent_install = @import("../agents/install.zig");
+const dashboards = @import("../dashboards/main.zig");
 const station_apps = @import("station.zig");
 
 fn print(io: std.Io, value: []const u8) void {
@@ -33,6 +34,7 @@ pub fn execute(a: std.mem.Allocator, app: remote.Remote, station: remote.Remote,
     report.component = .station;
     // Refuse namespace/ownership conflicts before touching the target manifest.
     try station_apps.preflight(a, station, &report.state, value, identity);
+    if (command != .app_status) try dashboards.preflight(a, station, &report.state, value, identity);
     const registration = try agent_apps.prepare(a, app, report, try scope(a, value), identity, endpoint, command == .app_apply);
     if (command == .app_status) {
         const agents = try @import("../agents/status.zig").statusForApplication(a, app, station, registration, value.application.name);
@@ -51,18 +53,29 @@ pub fn execute(a: std.mem.Allocator, app: remote.Remote, station: remote.Remote,
     } else {
         try station_apps.verify(a, station, &report.state, machine.arch, value, identity);
     }
+    report.component = .signals;
+    try @import("../dashboards/signals.zig").verify(a, app, station, &report.state, value, identity);
+    report.component = .station;
+    if (command == .app_apply) {
+        try dashboards.apply(a, station, &report.state, value, identity);
+    } else {
+        try dashboards.verify(a, station, &report.state, try dashboards.data(a, value, identity));
+    }
     var logs: usize = 0;
     var metrics: usize = 0;
+    var http: usize = 0;
     for (value.services) |service| {
         if (service.logs) logs += 1;
         if (service.metrics_url != null) metrics += 1;
+        if (service.http != null) http += 1;
     }
-    return std.fmt.allocPrint(a, "{s}{s}host metrics flowing\nhost maintenance observer and log stream verified\n{s}\n{s}\nprobes registered: {d}\napplication alerts loaded\nTraces: skipped (unsupported). No test notification sent.\n", .{
+    return std.fmt.allocPrint(a, "{s}{s}host metrics flowing\nhost maintenance observer and log stream verified\n{s}\n{s}\nprobes registered: {d}\napplication alerts loaded\nservice resource signals verified\n{s}\nVMUI and Grafana managed dashboards loaded\nTraces: skipped (unsupported). No test notification sent.\n", .{
         if (command == .app_apply and report.state.changes == 0) "No changes required.\n" else "",
         report.enrollmentSummary(),
         if (logs > 0) "selected service logs flowing (quiet-service metadata included)" else "selected service logs: disabled",
         if (metrics > 0) "application metrics pipeline verified (fresh scrape telemetry; target may be down)" else "application metrics: not configured",
         value.probes.len,
+        if (http == 0) "HTTP request dashboard metrics unavailable: no request counter/duration histogram mapped" else "mapped HTTP dashboard metrics verified (zero requests and down targets are valid)",
     });
 }
 
@@ -124,6 +137,7 @@ pub fn run(init: std.process.Init, options: cli.Options) !void {
             if (options.command == .app_apply) "Completed changes may remain; pending intent is preserved. Correct the cause and rerun the same application config." else "This command is read-only; no configuration or restart intent was changed.",
         }));
         print(init.io, try report.state.credentialDiagnostics(a));
+        if (report.state.check == .dashboard_ownership) print(init.io, "Station install owns dashboard loaders. Upgrade the station with monitoring install first. Edited files or unmanaged dashboard UID conflicts must be resolved explicitly; DragonTools does not adopt them.\n");
         if (report.component == .ingestion or report.component == .caddy or report.state.check == .station_ingress_required) print(init.io, "Station ingress is owned by monitoring install. Run monitoring install on the station with its configured --ingress-hostname, then retry. Application apply does not bootstrap or repair base ingress.\n");
         if (report.state.check == .dns_unresolved) print(init.io, "Monitoring station hostname does not resolve. DragonTools does not manage DNS. Configure the DNS record and rerun the same command.\n");
         if (report.state.check == .tcp_metrics_unreachable or report.state.check == .tcp_logs_unreachable) {

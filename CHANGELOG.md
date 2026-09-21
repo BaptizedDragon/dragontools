@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.1.2 — 2026-09-21
+
+- Add bounded per-service cgroup v2 resource observations using each systemd
+  unit's current ControlGroup, with normalized CPU/memory/tasks/I/O/OOM metrics
+  shipped through Vector. Unlimited limits and unavailable optional observations
+  are omitted; inactive services remain an explicit observed state.
+- Add strict optional HTTP counter/histogram mappings and managed VMUI/Grafana
+  application dashboards, with resource/HTTP/probe panels and scoped warning/error
+  logs. Record Doers' actual metric contract in a sanitized fixture and example.
+- Add exact dashboard generation ownership, UID-conflict refusal, interrupted
+  publication recovery, read-only loaded-state checks and unchanged no-op behavior.
+  Station install owns dashboard loaders; dashboard edits never restart agents.
 - Make the UI occupied-port fixture retain an owned listener instead of assuming
   a transient bind conflict remains occupied. Reuse closed fixture connections
   and explicitly skip ports that cannot be reserved; production UI behavior is unchanged.

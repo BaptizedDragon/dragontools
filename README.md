@@ -38,8 +38,8 @@ provisions its CA/server certificate, Caddy mTLS ingress on IPv4 9443/9444, and
 the private authorization service; no registered clients are required. The separate
 `monitoring apply` workflow installs Vector for selected journal logs and host
 metrics, plus vmagent for explicitly selected application metrics. Host alerts use
-verified Vector metrics. OTel traces agents, service-state alerts and dashboards
-remain unavailable.
+verified Vector metrics. Per-service cgroup v2 resources and managed VMUI/Grafana
+dashboards are available. OTel traces agents and service-state alerts remain unavailable.
 
 A separate `host install-oh-my-zsh` convenience command installs missing shell
 tooling for an existing user. It does not change the monitoring stack.
@@ -134,8 +134,8 @@ while anonymous access, auth proxy and signup stay disabled.
 ## Monitoring UIs
 
 Use native VMUI for direct telemetry investigation. Grafana remains available for
-dashboards and as a secondary investigation interface; DragonTools-provisioned
-dashboards remain deferred. All seven remote UIs stay loopback-only and are accessed
+combined operational dashboards. Application apply provisions owned dashboards
+in both interfaces. All seven remote UIs stay loopback-only and are accessed
 through SSH tunnels.
 
 From the directory containing your station's `station.toml`, run one command at
@@ -380,7 +380,8 @@ then visit **http://127.0.0.1:3000**. In Explore select **Logs**, use Raw Logs m
 and execute the harmless LogsQL query `*`. A successful empty response is valid
 before application ingestion; verification never injects logs. Metrics and Traces
 remain available through their own Explore views. Traces may have no services yet.
-No dashboard is provisioned and no public port is opened.
+Station install provisions a separate station dashboard; application apply provisions
+application dashboards. No public port is opened.
 
 Expected listeners **on the server**:
 
@@ -1095,7 +1096,7 @@ restart only the affected evaluator. Failures preserve pending intent.
 
 Trusted application/environment/host/service overwrite application log fields and
 scrape labels. mTLS, bounded buffers, journald limits and signal freshness use the
-agent policy below. Automatic CA rollover, custom metrics alerts, dashboards and
+agent policy below. Automatic CA rollover, custom metrics alerts and
 OTel deployment remain unavailable. See the [two-host application gate](tests/integration/README.md#application-contract-two-host-gate)
 before claiming deployment validation.
 
@@ -1693,7 +1694,7 @@ crypto, controller and native-process evidence from that remaining host gate.
 | vmalert / Alertmanager | Implemented separate metrics/logs evaluation and grouped alert routing |
 | Grafana OSS | Implemented; loopback:3000, local authentication, Metrics/Logs/Traces datasources |
 | Grafana Logs datasource | Official plugin 0.32.0; authenticated health/query checks with configured references |
-| Dashboards | Unavailable |
+| Dashboards | Managed station/application VMUI and Grafana dashboards |
 | Telegram | Optional configured SecretRefs; explicit `notify-test`, never automatic tests |
 | Vector / vmagent | Implemented selected logs/host metrics and optional app metrics |
 | OTel Collector | Unavailable; traces agent deferred |
@@ -1834,3 +1835,144 @@ HA monitoring, dynamic service discovery, generic cloud-provider management,
 multiple alert providers, generic firewall management, a general plugin framework, public resource DSL,
 hard multi-tenant isolation, per-agent API tokens, automatic monitoring-component
 upgrades, automatic reboots, or arbitrary shell hooks.
+
+## Service resources and managed application dashboards
+
+`monitoring apply` collects resources for every configured `[[service]]`, even
+when its logs and HTTP metrics are disabled. The native monitored-host helper runs
+unprivileged under Vector every 15 seconds and resolves the unit's **current
+systemd ControlGroup** each time. It reads only cgroup v2 files, never process names,
+PIDs or `/proc/<pid>` walks. A moved/restarted cgroup is observed on the next poll.
+
+Vector 0.58.0's upstream cgroup collector provides CPU usage/user/system and current
+memory, but identifies series by cgroup path and accepts static path selection.
+DragonTools needs dynamic systemd resolution and stable service identity. Its
+normalized helper therefore reads those same kernel counters along with the
+missing pressure/limit/task/I/O fields, then sends **absolute** metric events
+through Vector's native `log_to_metric` and existing mTLS remote-write sink. The
+native Vector cgroup collector is not also enabled: there are no duplicate cgroup
+series or a scan of every container/user cgroup. Existing Vector host metrics stay
+unchanged. No exporter or new listener is installed.
+
+All normalized metrics have exactly `application`, `environment`, `host`, `service`
+labels. `host` is the existing stable `dt-<machine-id>` identity. Metric prefix:
+`dragontools_service_`.
+
+| Suffix | Source / meaning |
+| --- | --- |
+| `cpu_seconds_total`, `cpu_user_seconds_total`, `cpu_system_seconds_total` | `cpu.stat` microseconds converted to seconds |
+| `cpu_throttled_seconds_total`, `cpu_throttled_periods_total` | Optional CPU throttle counters |
+| `memory_current_bytes`, `memory_peak_bytes` | Current and optional peak memory |
+| `memory_limit_bytes` | Finite `memory.max`; absent for `max` |
+| `tasks_current`, `tasks_limit` | `pids.current` / finite `pids.max`; tasks include OS threads |
+| `oom_total`, `oom_kill_total` | `memory.events` counters |
+| `io_read_bytes_total`, `io_write_bytes_total` | `io.stat`, summed across devices |
+| `cgroup_available`, `tasks_supported` | Observation availability, not a systemd alert policy |
+
+Dashboards show CPU in **cores**: `rate(cpu_seconds_total[5m])`; 0.5 means half a
+logical core and 2 means two cores. They show current/peak/finite memory limits,
+tasks/finite task limits, I/O rates and OOM increments. Missing optional counters
+and unlimited limits are absent series, never invented zero limits. No FD counting
+or new service-resource alert pack is included. Read-only signal checks require
+recent CPU/memory and supported tasks after Vector's current process start. An
+inactive service reports unavailable resources; it does not fail a functional
+monitoring pipeline.
+
+For HTTP panels, explicitly declare the application's observed metric families:
+
+```toml
+[service.metrics]
+url = "http://127.0.0.1:16005/metrics"
+
+[service.metrics.http]
+requests_total = "doers_http_requests_total"
+duration_histogram = "doers_http_request_duration_seconds"
+status_label = "status_class"
+route_label = "route"
+```
+
+These Doers names were inspected read-only on 2026-09-21. The request counter has
+`method`, `route`, `status_class`, `service`, `deployment_environment`; the duration
+histogram has the same labels except status, plus bucket `le`. Observed status
+classes were `2xx`, `3xx`, `4xx`. Routes include `/company/:id`, `/healthz`, `static`
+and `unknown`. A sanitized zero-traffic contract is committed in
+`tests/fixtures/doers-http-metrics.prom`; real production values are not committed.
+Incoming identity labels are still overridden by vmagent's existing trusted labels.
+
+Either HTTP family is optional, but an HTTP table needs at least one family and
+an existing metrics URL. Status/route grouping requires the counter. Names are
+bounded Prometheus identifiers, never raw queries. `route_label` explicitly asserts
+that the source uses bounded templates; do not map raw request URLs. Route panels
+show at most 20 series; routes are never dashboard variables. The source `TYPE`
+and bucket/sum/count contract is checked. Missing mappings omit the corresponding
+panels; explicit incorrect mappings fail `http_metrics_ready`. Zero counters are
+valid. A fresh failed scrape remains valid telemetry while an application is down.
+
+VMUI is preferred for direct metrics investigation. Its app dashboard shows host
+CPU, configured probes, service resources and mapped RPS/p50/p95/p99/status/routes.
+Grafana combines those metrics with warning/warn/error/critical/fatal logs scoped
+to application, environment, host and selected log services. Log fields are projected
+to `_time, service, level, event, method, path, status, _msg`; INFO noise is excluded.
+Only environment/host/service variables exist. No secret references are added to
+application configuration.
+Its overview uses availability/RPS/p50/p95/p99 stat cards, followed by resource
+and HTTP time-series sections. CPU percentage divides service cores by the actual
+number of idle-mode host CPU series; it does not assume a host CPU count.
+
+Station install configures `-vmui.customDashboardsPath` and Grafana's dedicated
+file provider. VMUI JSON lives directly under
+`/etc/dragontools/victoriametrics/dashboards/dragontools-app-<application>.json`
+because the pinned VMUI loader is not recursive. Grafana files live under
+`/etc/dragontools/dashboards/grafana/DragonTools/<application>/`. A separate manifest
+under `/etc/dragontools/dashboards/manifests/` must reproduce every owned byte.
+Edited/unmanaged files, symlinks, identity rebinding and foreign Grafana UIDs fail
+closed. Manual dashboards outside those exact paths remain untouched. Previous
+and desired generations permit interrupted publication to resume. No dashboard
+delete/adopt lifecycle is included.
+
+Application apply verifies station dashboard support before target mutation,
+then verifies signals, publishes only its own dashboard pair and waits for VMUI
+and Grafana to load them. VMUI reads on page load; Grafana polls every 15 seconds.
+Dashboard edits need no Vector, vmagent, Grafana or Victoria backend restart.
+A first station upgrade changes only the affected station loader/unit state.
+An identical apply prints `No changes required.`; `app-verify` remains read-only.
+
+The separate station dashboard uses VictoriaMetrics' existing self-scrape.
+VictoriaLogs, VictoriaTraces, Grafana, Alertmanager, vmalert and Caddy resource
+panels are omitted where no stored process/self signal exists; their service
+health remains covered by `monitoring verify`. This does not enable Caddy's admin
+API or add public listeners. Tracing agents, per-service alerts and hard tenant
+isolation remain unavailable.
+
+Upgrade station loaders before applying an application with this version. Use the
+same station configuration and OpenSSH alias for install, verify and the deliberate
+unchanged rerun. From the DragonTools checkout (replace the example alias):
+
+```sh
+zig build -Doptimize=ReleaseSafe
+export PATH="$PWD/zig-out/bin:$PATH"
+DT_STATION=monitoring # replace with your station SSH alias
+DT_STATION_CONFIG="$PWD/station.toml"
+dragontool monitoring install --config "$DT_STATION_CONFIG" --ssh-host "$DT_STATION"
+dragontool monitoring verify --config "$DT_STATION_CONFIG" --ssh-host "$DT_STATION"
+dragontool monitoring install --config "$DT_STATION_CONFIG" --ssh-host "$DT_STATION"
+```
+
+In the application repository, merge the appropriate HTTP mapping into its existing
+`monitoring.toml` (the Doers reference is in `examples/doers-monitoring.toml`), then:
+
+```sh
+dragontool monitoring apply --plan
+dragontool monitoring apply
+dragontool monitoring app-verify
+dragontool monitoring apply
+dragontool monitoring ui metrics --config "$DT_STATION_CONFIG" --ssh-host "$DT_STATION"
+# Close the first foreground tunnel before opening another, or use another terminal:
+dragontool monitoring ui grafana --config "$DT_STATION_CONFIG" --ssh-host "$DT_STATION"
+```
+
+Expected unchanged apply: `No changes required.`, `service resource signals verified`
+and `VMUI and Grafana managed dashboards loaded`. These are expected deployment
+results; isolated file, cgroup and pinned-process fixtures are not a real
+Ubuntu/systemd or production dashboard validation. See the
+[service/dashboard integration checklist](tests/integration/service-dashboards-validation.md).

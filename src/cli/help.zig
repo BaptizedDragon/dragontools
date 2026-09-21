@@ -190,7 +190,7 @@ pub fn render(a: std.mem.Allocator, node: spec.Node) ![]const u8 {
         return out.toOwnedSlice();
     }
     if (node == .root) try w.writeAll("\nHost utility: host install-oh-my-zsh installs only missing shell setup.\n");
-    try w.print("\nImplemented: VictoriaMetrics, VictoriaLogs, VictoriaTraces and Grafana.\nVictoriaMetrics: loopback:8428; retention {s}; reserve {d}%.\nVictoriaLogs: loopback:9428; disk-bound retention; logical limit {s}; native partition budget {d}% of filesystem capacity.\nVictoriaTraces: loopback:{d}; disk-bound retention; logical limit {s}; native partition budget {d}% of filesystem capacity.\nGrafana: loopback:3000; local authentication enabled; Metrics, Logs and Traces provisioned.\nAccess through SSH forwarding only. The official VictoriaLogs plugin is pinned; dashboards remain unavailable.\nLogs/traces preserve the newest two partitions. Cleanup is periodic.\nEach native partition budget excludes other writers; adequate headroom is required.\nReruns inspect actual state and recover pending activation. Healthy unchanged services are not restarted.\n", .{ policy.metrics.retention, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent, vt.port, policy.traces.retention, policy.traces.cleanup_usage_percent });
+    try w.print("\nImplemented: VictoriaMetrics, VictoriaLogs, VictoriaTraces and Grafana.\nVictoriaMetrics: loopback:8428; retention {s}; reserve {d}%.\nVictoriaLogs: loopback:9428; disk-bound retention; logical limit {s}; native partition budget {d}% of filesystem capacity.\nVictoriaTraces: loopback:{d}; disk-bound retention; logical limit {s}; native partition budget {d}% of filesystem capacity.\nGrafana: loopback:3000; local authentication enabled; Metrics, Logs and Traces provisioned.\nAccess through SSH forwarding only. The official VictoriaLogs plugin is pinned; managed VMUI and Grafana dashboards are available.\nLogs/traces preserve the newest two partitions. Cleanup is periodic.\nEach native partition budget excludes other writers; adequate headroom is required.\nReruns inspect actual state and recover pending activation. Healthy unchanged services are not restarted.\n", .{ policy.metrics.retention, policy.metrics.reserve_percent, policy.logs.retention, policy.logs.cleanup_usage_percent, vt.port, policy.traces.retention, policy.traces.cleanup_usage_percent });
     try w.writeAll(
         \\Blackbox exporter: loopback:9115; HTTP/HTTPS GET probes with verified TLS.
         \\VictoriaMetrics native scraping: 30s interval / 5s timeout; target changes reload without restart.
@@ -201,7 +201,7 @@ pub fn render(a: std.mem.Allocator, node: spec.Node) ![]const u8 {
         \\Status reads stored probe metrics. Verify is read-only and sends no test alerts.
         \\Send a test explicitly with monitoring notify-test (reads ./station.toml).
         \\Vector logs/host metrics and optional vmagent app metrics use monitoring agents.
-        \\OTel traces agents, dashboards, firewall, TLS and legacy Telegram flags are unavailable.
+        \\OTel traces agents, firewall, TLS and legacy Telegram flags are unavailable.
         \\Unavailable options are validated, then rejected before SSH, including with --plan.
         \\
     );

@@ -78,6 +78,20 @@ def check(mode, registration, since=0):
                 for name in ('host_cpu_seconds_total', 'host_memory_total_bytes', 'host_filesystem_used_ratio'):
                     if not fresh(name + '{host=' + host + ',agent="vector"' + identity + '}'):
                         return False
+            elif mode == 'service':
+                for service in application['services']:
+                    labels = '{host=' + host + identity + ',service=' + json.dumps(service['name']) + '}'
+                    available = 'dragontools_service_cgroup_available' + labels
+                    if not fresh(available):
+                        return False
+                    # A stopped service is an observed state, not broken monitoring.
+                    if metric(available + ' == 0'):
+                        continue
+                    for name in ('cpu_seconds_total', 'memory_current_bytes', 'tasks_supported'):
+                        if not fresh('dragontools_service_' + name + labels):
+                            return False
+                    if metric('dragontools_service_tasks_supported' + labels + ' == 1') and not fresh('dragontools_service_tasks_current' + labels):
+                        return False
             elif mode == 'logs':
                 for service in application['services']:
                     if not service['logs']:
@@ -94,6 +108,8 @@ def check(mode, registration, since=0):
                         return False
             else:
                 raise ValueError('invalid signal check')
+        return True
+    if mode == 'service':
         return True
     if mode == 'host':
         # Versioned Vector contract, scoped to trusted agent labels and freshness.
