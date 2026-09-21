@@ -5,6 +5,9 @@
 - Make the UI occupied-port fixture retain an owned listener instead of assuming
   a transient bind conflict remains occupied. Reuse closed fixture connections
   and explicitly skip ports that cannot be reserved; production UI behavior is unchanged.
+- Bound the host-event integration fixture's notification wait to cover native
+  vmalert query delay and minute alignment; preserve production evaluation and
+  notification timings.
 
 ## 0.1.1 — 2026-09-21
 

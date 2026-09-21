@@ -127,7 +127,11 @@ def main(rendered,binaries,alerting,native):
             start([alerting/'alertmanager','--config.file='+str(am_config),'--storage.path='+str(root/'am'),'--web.listen-address=127.0.0.1:9093','--cluster.listen-address='])
             wait(lambda: request(9093,'/-/ready') is not None)
             evaluator=start([binaries/'vmalert','-rule='+str(rendered/'base-logs.rules.yml'),'-datasource.url=http://127.0.0.1:9428','-notifier.url=http://127.0.0.1:9093','-httpListenAddr=127.0.0.1:8880','-group.maxStartDelay=1s'])
-            wait(lambda: len(notifications)==2)
+            # v1.152.0 subtracts its 30s eval delay, then aligns query time to
+            # the 1m group interval. Starting early in a minute can leave both
+            # initial evaluations before these fresh events; allow two full
+            # cycles plus notification margin, without changing native policy.
+            wait(lambda: len(notifications)==2,seconds=180)
             names={item['alerts'][0]['labels']['alertname'] for item in notifications}
             assert names=={'HostRebootRequired','HostRebootRequirementCleared'}
             for item in notifications:
